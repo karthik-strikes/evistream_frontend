@@ -1,13 +1,11 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
 import { useTheme } from '@/contexts/ThemeContext';
-import { documentsService } from '@/services/documents.service';
-import { formsService } from '@/services/forms.service';
-import { extractionsService } from '@/services/extractions.service';
-import { resultsService } from '@/services/results.service';
+import { dashboardService } from '@/services/dashboard.service';
 import Link from 'next/link';
 import { statusColor } from '@/lib/colors';
 import { cn } from '@/lib/utils';
@@ -136,14 +134,6 @@ export default function DashboardPage() {
   const [selectedProject, setSelectedProjectPanel] = useState<any>(null);
   const [panelClosing, setPanelClosing] = useState(false);
 
-  // Data
-  const [stats, setStats] = useState({ documents: 0, forms: 0, extractions: 0, results: 0 });
-  const [loading, setLoading] = useState(true);
-  const [recentExtractions, setRecentExtractions] = useState<any[]>([]);
-  const [projectsData, setProjectsData] = useState<any[]>([]);
-  const [formCounts, setFormCounts] = useState<Record<string, number>>({});
-  const [runningExtractionCount, setRunningExtractionCount] = useState(0);
-  const [doneExtractionCount, setDoneExtractionCount] = useState(0);
   const [hoveredStat, setHoveredStat] = useState<number | null>(null);
   const [hoveredRow, setHoveredRow] = useState<number | null>(null);
 
@@ -160,97 +150,45 @@ export default function DashboardPage() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
+  const { data, isLoading } = useQuery({
+    queryKey: ['dashboard', 'stats', viewProject?.id],
+    queryFn: () => dashboardService.getStats(viewProject!.id),
+    enabled: !!viewProject?.id,
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const loading = isLoading;
+  const stats = data?.stats ?? { documents: 0, forms: 0, extractions: 0, results: 0 };
+  const formCounts = data?.form_counts ?? {};
+  const statusCounts = data?.extraction_status_counts ?? {};
+  const runningExtractionCount = (statusCounts['running'] ?? 0) + (statusCounts['pending'] ?? 0);
+  const doneExtractionCount = (statusCounts['completed'] ?? 0) + (statusCounts['done'] ?? 0);
+  const recentExtractions = (data?.recent_extractions ?? []).map(e => ({
+    id: e.id,
+    name: e.doc_name || '—',
+    form: e.form_name || 'Unknown',
+    fields: e.status === 'running' || e.status === 'pending' ? null : e.fields_filled,
+    total: e.total_fields,
+    time: new Date(e.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }),
+    status: e.status === 'completed' ? 'done' : (e.status === 'pending') ? 'running' : e.status,
+  }));
+  const projectsData = (data?.projects_overview ?? []).map(p => ({
+    id: p.id,
+    name: p.name,
+    desc: p.description || '',
+    created: new Date(p.created_at).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }),
+    active: p.id === viewProject?.id,
+    forms: [] as any[],
+    documents: [] as any[],
+    document_count: p.document_count,
+    form_count: p.form_count,
+  }));
+
   // Animated stat counters
   const cDocs = useCountUp(loading ? 0 : stats.documents);
   const cExtractions = useCountUp(loading ? 0 : stats.extractions);
   const cForms = useCountUp(loading ? 0 : stats.forms);
   const cResults = useCountUp(loading ? 0 : stats.results);
-
-  useEffect(() => {
-    const fetchAllData = async () => {
-      if (!viewProject) { setLoading(false); return; }
-      setLoading(true);
-      try {
-        const [documents, forms, extractions] = await Promise.all([
-          documentsService.getAll(viewProject.id),
-          formsService.getAll(viewProject.id),
-          extractionsService.getAll(viewProject.id),
-        ]);
-
-        const fCounts: Record<string, number> = {};
-        forms.forEach((f: any) => { const s = fmtFormStatus(f.status || 'active'); fCounts[s] = (fCounts[s] || 0) + 1; });
-        setFormCounts(fCounts);
-
-        const runningCount = extractions.filter((e: any) => e.status === 'running' || e.status === 'pending').length;
-        const doneCount = extractions.filter((e: any) => e.status === 'done' || e.status === 'completed').length;
-        setRunningExtractionCount(runningCount);
-        setDoneExtractionCount(doneCount);
-
-        const resultCounts = await Promise.all(
-          extractions.map((e: any) => resultsService.getAll({ extractionId: e.id }).then((r: any[]) => r.length).catch(() => 0))
-        );
-        const totalResults = resultCounts.reduce((sum: number, c: number) => sum + c, 0);
-        setStats({ documents: documents.length, forms: forms.length, extractions: extractions.length, results: totalResults });
-
-        const docMap: Record<string, string> = {};
-        documents.forEach((d: any) => { docMap[d.id] = d.filename; });
-
-        const recentWithDetails = await Promise.all(
-          extractions.slice(0, 5).map(async (ext: any) => {
-            try {
-              const results = await resultsService.getAll({ extractionId: ext.id });
-              const form = forms.find((f: any) => f.id === ext.form_id);
-              const totalFields = form?.fields?.length || 0;
-              const isRunning = ext.status === 'running' || ext.status === 'pending';
-              const isFailed = ext.status === 'failed' || ext.status === 'cancelled';
-              const firstDocId = results[0]?.document_id;
-              const docName = firstDocId ? (docMap[firstDocId] || firstDocId.slice(0, 12)) : '—';
-              return {
-                id: ext.id,
-                name: docName,
-                form: form?.form_name || 'Unknown',
-                fields: isRunning ? null : results.length,
-                total: totalFields,
-                time: new Date(ext.created_at).toLocaleDateString([], { month: 'short', day: 'numeric' }),
-                status: isFailed ? 'failed' : isRunning ? 'running' : 'done',
-              };
-            } catch { return null; }
-          })
-        );
-        setRecentExtractions(recentWithDetails.filter(Boolean));
-
-        const allProjects = contextProjects || [];
-        const projectsWithData = await Promise.all(
-          allProjects.map(async (proj: any) => {
-            try {
-              const [projDocs, projForms] = await Promise.all([
-                documentsService.getAll(proj.id),
-                formsService.getAll(proj.id),
-              ]);
-              return {
-                id: proj.id, name: proj.name, desc: proj.description || 'No description',
-                created: new Date(proj.created_at).toLocaleDateString([], { month: 'short', day: 'numeric', year: 'numeric' }),
-                active: proj.id === contextProject.id,
-                forms: projForms.map((f: any) => ({ name: f.form_name, status: fmtFormStatus(f.status || 'active') })),
-                documents: projDocs.map((d: any) => ({
-                  name: d.filename,
-                  status: d.processing_status === 'completed' ? 'Completed' : d.processing_status === 'processing' ? 'Generating' : 'Failed',
-                })),
-              };
-            } catch {
-              return { id: proj.id, name: proj.name, desc: proj.description || '', created: '', active: proj.id === contextProject.id, forms: [], documents: [] };
-            }
-          })
-        );
-        setProjectsData(projectsWithData);
-      } catch (err) {
-        console.error('Dashboard fetch error:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchAllData();
-  }, [viewProject, contextProjects]);
 
   // Derived
   const apFailed = formCounts['Failed'] || 0;
@@ -715,7 +653,7 @@ export default function DashboardPage() {
 
           {/* ── Footer ─────────────────────────────────────────── */}
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '4px 2px', fontSize: 11, color: T.textDim }}>
-            <span>{projectsData.reduce((s, p) => s + p.documents.length, 0)} documents · {projectsData.reduce((s, p) => s + p.forms.length, 0)} forms · {projectsData.length} projects</span>
+            <span>{projectsData.reduce((s, p) => s + p.document_count, 0)} documents · {projectsData.reduce((s, p) => s + p.form_count, 0)} forms · {projectsData.length} projects</span>
           </div>
 
         </div>

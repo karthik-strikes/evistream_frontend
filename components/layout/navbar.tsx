@@ -18,11 +18,8 @@ export function Navbar({ title, description }: NavbarProps) {
   const pathname = usePathname();
   const { resolvedTheme, setTheme } = useTheme();
 
-  const [scrolled, setScrolled] = useState(false);
-  const [mounted, setMounted] = useState(false);
+  const [scrolled, setScrolled] = useState(() => typeof window !== 'undefined' ? window.scrollY > 8 : false);
   const [showNotifications, setShowNotifications] = useState(false);
-
-  useEffect(() => setMounted(true), []);
 
   useEffect(() => {
     const handler = () => setScrolled(window.scrollY > 8);
@@ -94,7 +91,7 @@ export function Navbar({ title, description }: NavbarProps) {
               className="p-1.5 rounded-md hover:bg-gray-100/80 dark:hover:bg-white/5 transition-colors"
               title={resolvedTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
             >
-              {mounted && resolvedTheme === 'dark' ? (
+              {resolvedTheme === 'dark' ? (
                 <Sun className="h-4 w-4 text-gray-300" />
               ) : (
                 <Moon className="h-4 w-4 text-gray-500" />

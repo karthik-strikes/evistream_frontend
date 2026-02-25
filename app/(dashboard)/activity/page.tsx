@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { Card, Button, Badge, EmptyState, Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui';
 import {
@@ -30,49 +31,20 @@ type ActionFilter = 'all' | 'upload' | 'extraction' | 'export' | 'code_generatio
 
 export default function ActivityPage() {
   const { selectedProject, projects } = useProject();
-  const [activities, setActivities] = useState<Activity[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [dateFilter, setDateFilter] = useState<DateFilter>('week');
   const [actionFilter, setActionFilter] = useState<ActionFilter>('all');
   const [projectFilter, setProjectFilter] = useState<string>('all');
 
-  useEffect(() => {
-    fetchActivities();
-  }, [selectedProject, dateFilter, actionFilter, projectFilter]);
+  const { data: activities = [], isLoading, isFetching, error: queryError } = useQuery({
+    queryKey: ['activities', projectFilter, actionFilter, dateFilter],
+    queryFn: () => activityService.getAll({
+      project_id: projectFilter !== 'all' ? projectFilter : undefined,
+      action_type: actionFilter !== 'all' ? actionFilter : undefined,
+      date_range: dateFilter,
+    }),
+  });
 
-  const fetchActivities = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await activityService.getAll({
-        project_id: projectFilter !== 'all' ? projectFilter : undefined,
-        action_type: actionFilter !== 'all' ? actionFilter : undefined,
-        date_range: dateFilter,
-      });
-      setActivities(data);
-    } catch (err: any) {
-      console.error('Error fetching activities:', err);
-      // Handle various error response formats
-      let errorMessage = 'Failed to load activities';
-      if (err.response?.data?.detail) {
-        // If detail is a string, use it directly
-        if (typeof err.response.data.detail === 'string') {
-          errorMessage = err.response.data.detail;
-        }
-        // If detail is an array (Pydantic validation errors)
-        else if (Array.isArray(err.response.data.detail)) {
-          errorMessage = err.response.data.detail.map((e: any) => e.msg).join(', ');
-        }
-      } else if (err.message) {
-        errorMessage = err.message;
-      }
-      setError(errorMessage);
-      setActivities([]);
-    } finally {
-      setLoading(false);
-    }
-  };
+  const error = queryError ? 'Failed to load activities' : null;
 
   const getActivityIcon = (type: Activity['action_type']) => {
     switch (type) {
@@ -294,7 +266,7 @@ export default function ActivityPage() {
             </div>
           </div>
 
-          {loading ? (
+          {isLoading ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
             </div>
@@ -303,7 +275,6 @@ export default function ActivityPage() {
               <XCircle className="h-12 w-12 text-purple-500 mb-4" />
               <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">Failed to Load Activities</h3>
               <p className="text-sm text-gray-600 dark:text-zinc-400 mb-4">{error}</p>
-              <Button onClick={fetchActivities}>Try Again</Button>
             </div>
           ) : filteredActivities.length === 0 ? (
             <EmptyState
@@ -313,6 +284,12 @@ export default function ActivityPage() {
             />
           ) : (
             <div className="space-y-4">
+              {isFetching && !isLoading && (
+                <div className="flex items-center gap-2 text-xs text-gray-400 mb-2">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  <span>Refreshing...</span>
+                </div>
+              )}
               {filteredActivities.map((activity, index) => {
                 const Icon = getActivityIcon(activity.action_type);
                 const colors = getActivityColor(activity.action_type);

@@ -11,6 +11,7 @@ import { useToast } from '@/hooks/use-toast';
 import { apiClient } from '@/lib/api';
 import type { RegisterRequest, AuthResponse } from '@/types/api';
 import { Logo } from '@/components/ui/logo';
+import { getErrorMessage } from '@/lib/utils';
 
 const registerSchema = z.object({
   full_name: z.string().min(2, 'Name must be at least 2 characters'),
@@ -51,7 +52,7 @@ export default function RegisterPage() {
       toast({ title: 'Success', description: 'Account created', variant: 'success' });
       window.location.href = '/dashboard';
     } catch (error: any) {
-      toast({ title: 'Error', description: error.response?.data?.detail || 'Registration failed', variant: 'error' });
+      toast({ title: 'Error', description: getErrorMessage(error, 'Registration failed'), variant: 'error' });
     } finally {
       setLoading(false);
     }

@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useCallback, useEffect } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useDropzone } from 'react-dropzone';
 import { FileText, Upload, Trash2, Download, Loader2, AlertCircle, CheckCircle, Clock } from 'lucide-react';
@@ -17,8 +18,12 @@ export default function DocumentsPage() {
   const { toast } = useToast();
   const { selectedProject } = useProject();
   const router = useRouter();
-  const [documents, setDocuments] = useState<Document[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
+  const { data: documents = [], isLoading } = useQuery({
+    queryKey: ['documents', selectedProject?.id],
+    queryFn: () => documentsService.getAll(selectedProject!.id),
+    enabled: !!selectedProject,
+  });
   const [uploading, setUploading] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
@@ -38,32 +43,6 @@ export default function DocumentsPage() {
   useEffect(() => {
     checkBackend();
   }, [checkBackend]);
-
-  const fetchDocuments = useCallback(async () => {
-    if (!selectedProject) return;
-
-    try {
-      setLoading(true);
-      const data = await documentsService.getAll(selectedProject.id);
-      setDocuments(data);
-    } catch (error: any) {
-      const errorMessage = typeof error.response?.data?.detail === 'string'
-        ? error.response.data.detail
-        : 'Failed to fetch documents';
-      toast({
-        title: 'Error',
-        description: errorMessage,
-        variant: 'error',
-      });
-    } finally {
-      setLoading(false);
-    }
-  }, [toast, selectedProject]);
-
-  // Fetch documents on mount
-  useEffect(() => {
-    fetchDocuments();
-  }, [fetchDocuments]);
 
   const onDrop = useCallback(async (acceptedFiles: File[]) => {
     if (acceptedFiles.length === 0 || !selectedProject) return;
@@ -91,7 +70,7 @@ export default function DocumentsPage() {
       }
 
       // Refresh document list
-      await fetchDocuments();
+      await queryClient.invalidateQueries({ queryKey: ['documents', selectedProject?.id] });
     } catch (error: any) {
       const errorMessage = typeof error.response?.data?.detail === 'string'
         ? error.response.data.detail
@@ -105,7 +84,7 @@ export default function DocumentsPage() {
       setUploading(false);
       setUploadProgress({});
     }
-  }, [toast, fetchDocuments, selectedProject]);
+  }, [toast, queryClient, selectedProject]);
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
@@ -124,7 +103,7 @@ export default function DocumentsPage() {
         description: 'Document deleted successfully',
         variant: 'success',
       });
-      await fetchDocuments();
+      await queryClient.invalidateQueries({ queryKey: ['documents', selectedProject?.id] });
     } catch (error: any) {
       const errorMessage = typeof error.response?.data?.detail === 'string'
         ? error.response.data.detail
@@ -298,7 +277,7 @@ export default function DocumentsPage() {
             )}
           </div>
 
-          {loading ? (
+          {isLoading ? (
             <div className="flex items-center justify-center py-12">
               <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
             </div>
@@ -342,9 +321,11 @@ export default function DocumentsPage() {
                         {/* Filename + status inline */}
                         <div className="flex items-center gap-2.5 mb-1.5">
                           <h3 className="text-base font-semibold text-gray-900 m-0 tracking-tight leading-snug overflow-hidden text-ellipsis whitespace-nowrap dark:text-white">{doc.filename}</h3>
-                          <span
-                            className={cn('text-[10.5px] font-semibold px-2 py-0.5 rounded-[5px] tracking-wide whitespace-nowrap', s.cls)}
-                          >{s.label}</span>
+                          {doc.processing_status !== 'completed' && (
+                            <span
+                              className={cn('text-[10.5px] font-semibold px-2 py-0.5 rounded-[5px] tracking-wide whitespace-nowrap', s.cls)}
+                            >{s.label}</span>
+                          )}
                         </div>
                         {/* Date */}
                         <div className="text-xs text-gray-400 dark:text-gray-500">

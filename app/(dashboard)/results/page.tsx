@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useMemo } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
 import { resultsService, extractionsService, documentsService, formsService } from '@/services';
@@ -12,7 +13,7 @@ import {
   Download, AlertCircle, FileText, Table as TableIcon,
   Search, ChevronDown, ArrowUpDown, X,
 } from 'lucide-react';
-import { cn, formatDate } from '@/lib/utils';
+import { cn, formatDate, getErrorMessage } from '@/lib/utils';
 
 type SortKey = 'doc_name_asc' | 'doc_name_desc' | 'date_newest' | 'date_oldest' | 'completeness_high' | 'completeness_low';
 
@@ -22,58 +23,58 @@ export default function ResultsPage() {
   const searchParams = useSearchParams();
   const extractionIdParam = searchParams.get('extraction_id');
 
-  const [extractions, setExtractions] = useState<Extraction[]>([]);
-  const [forms, setForms] = useState<Record<string, any>>({});
   const [selectedExtractionId, setSelectedExtractionId] = useState<string>(extractionIdParam || '');
-  const [results, setResults] = useState<ExtractionResult[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (selectedProject) fetchExtractions();
-  }, [selectedProject]);
-
-  useEffect(() => {
-    if (selectedExtractionId) fetchResults();
-    else setResults([]);
-  }, [selectedExtractionId]);
-
-  const fetchExtractions = async () => {
-    if (!selectedProject) return;
-    try {
+  const { data: extractionsData } = useQuery({
+    queryKey: ['extractions-with-forms', selectedProject?.id],
+    queryFn: async () => {
       const [data, formData] = await Promise.all([
-        extractionsService.getAll(selectedProject.id),
-        formsService.getAll(selectedProject.id).catch(() => []),
+        extractionsService.getAll(selectedProject!.id),
+        formsService.getAll(selectedProject!.id).catch(() => []),
       ]);
       const completed = data.filter((e: Extraction) => e.status === 'completed');
-      setExtractions(completed);
-
       const formMap: Record<string, any> = {};
       formData.forEach((f: any) => { formMap[f.id] = f; });
-      setForms(formMap);
+      return { extractions: completed, forms: formMap };
+    },
+    enabled: !!selectedProject,
+  });
+  const extractions = extractionsData?.extractions ?? [];
+  const forms = extractionsData?.forms ?? {};
 
-      if (extractionIdParam && completed.some((e: Extraction) => e.id === extractionIdParam)) {
+  useEffect(() => {
+    if (!selectedExtractionId && extractions.length > 0) {
+      if (extractionIdParam && extractions.some((e: Extraction) => e.id === extractionIdParam)) {
         setSelectedExtractionId(extractionIdParam);
-      } else if (completed.length > 0 && !selectedExtractionId) {
-        setSelectedExtractionId(completed[0].id);
+      } else {
+        setSelectedExtractionId(extractions[0].id);
       }
-    } catch { setError('Failed to load extractions'); }
-    finally { setLoading(false); }
-  };
-
-  const fetchResults = async () => {
-    if (!selectedExtractionId) return;
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await resultsService.getAll({ extractionId: selectedExtractionId });
-      setResults(data);
-    } catch (err: any) {
-      setError(err.response?.data?.detail || 'Failed to load results');
-    } finally {
-      setLoading(false);
     }
-  };
+  }, [extractions, extractionIdParam]);
+
+  const { data: results = [], isLoading: resultsLoading, error: resultsError } = useQuery({
+    queryKey: ['results', selectedExtractionId],
+    queryFn: () => resultsService.getAll({ extractionId: selectedExtractionId }),
+    enabled: !!selectedExtractionId,
+  });
+
+  const documentIds = useMemo(() => Array.from(new Set(results.map(r => r.document_id))), [results]);
+  const { data: documentsList = [] } = useQuery({
+    queryKey: ['documents-by-ids', documentIds],
+    queryFn: async () => {
+      const docs = await Promise.all(documentIds.map(id => documentsService.getById(id).catch(() => null)));
+      return docs;
+    },
+    enabled: documentIds.length > 0,
+  });
+  const documentsMap = useMemo(() => {
+    const map: Record<string, Document> = {};
+    documentsList.forEach((doc, i) => { if (doc) map[documentIds[i]] = doc; });
+    return map;
+  }, [documentsList, documentIds]);
+
+  const loading = !extractionsData || resultsLoading;
+  const error = resultsError ? getErrorMessage(resultsError as any, 'Failed to load results') : null;
 
   const handleExport = async (format: 'json' | 'csv') => {
     if (!selectedExtractionId) return;
@@ -115,7 +116,7 @@ export default function ResultsPage() {
       ) : (
         <div className="flex flex-col gap-5">
 
-          {/* ── Toolbar ── */}
+          {/* -- Toolbar -- */}
           <div className="flex items-center gap-3 flex-wrap">
             {/* Extraction picker */}
             <div className="flex items-center gap-2 min-w-0">
@@ -135,14 +136,7 @@ export default function ResultsPage() {
               </div>
             </div>
 
-            {/* Form badge */}
-            {selectedForm && (
-              <span className="text-[10.5px] font-semibold text-gray-500 dark:text-zinc-500 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] px-2 py-0.5 rounded-[5px]">
-                {selectedForm.form_name}
-              </span>
-            )}
-
-            {!loading && results.length > 0 && (
+{!loading && results.length > 0 && (
               <span className="text-[10.5px] font-semibold text-gray-500 dark:text-zinc-500 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] px-2 py-0.5 rounded-[5px]">
                 {results.length} {results.length === 1 ? 'result' : 'results'}
               </span>
@@ -169,19 +163,18 @@ export default function ResultsPage() {
             )}
           </div>
 
-          {/* ── Results ── */}
+          {/* -- Results -- */}
           {loading ? (
             <div className="flex justify-center items-center py-12"><Spinner size="lg" /></div>
           ) : error ? (
             <div className="bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-900/40 rounded-xl p-12 text-center">
               <AlertCircle className="w-10 h-10 text-red-400 mx-auto mb-3" />
               <p className="text-sm font-semibold text-red-900 dark:text-red-400 mb-4">{error}</p>
-              <button onClick={fetchResults} className="text-sm font-medium text-gray-600 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-4 py-2 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">Retry</button>
             </div>
           ) : results.length === 0 ? (
             <EmptyState icon={FileText} title="No results found" description="This extraction has no results yet" />
           ) : (
-            <ResultsTableView results={results} handleExport={handleExport} />
+            <ResultsTableView results={results} handleExport={handleExport} documents={documentsMap} />
           )}
         </div>
       )}
@@ -189,12 +182,13 @@ export default function ResultsPage() {
   );
 }
 
-function ResultsTableView({ results, handleExport }: { results: ExtractionResult[]; handleExport: (f: 'json' | 'csv') => void }) {
-  const [documents, setDocuments] = useState<Record<string, Document>>({});
-  const [loadingDocs, setLoadingDocs] = useState(true);
+function ResultsTableView({ results, handleExport, documents }: {
+  results: ExtractionResult[];
+  handleExport: (f: 'json' | 'csv') => void;
+  documents: Record<string, Document>;
+}) {
   const [expandedRow, setExpandedRow] = useState<number | null>(null);
   const [detailSearch, setDetailSearch] = useState('');
-  const [visibleColumns, setVisibleColumns] = useState<string[]>([]);
   const [showColumnSelector, setShowColumnSelector] = useState(false);
   const [docSearch, setDocSearch] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('date_newest');
@@ -208,21 +202,7 @@ function ResultsTableView({ results, handleExport }: { results: ExtractionResult
 
   const defaultColumns = useMemo(() => allFieldNames.slice(0, 4), [allFieldNames]);
 
-  useEffect(() => { setVisibleColumns(defaultColumns); }, [defaultColumns]);
-
-  useEffect(() => {
-    const fetchAllDocuments = async () => {
-      setLoadingDocs(true);
-      try {
-        const uniqueIds = Array.from(new Set(results.map(r => r.document_id)));
-        const docs = await Promise.all(uniqueIds.map(id => documentsService.getById(id).catch(() => null)));
-        const map: Record<string, Document> = {};
-        docs.forEach((doc, i) => { if (doc) map[uniqueIds[i]] = doc; });
-        setDocuments(map);
-      } catch { /* ignore */ } finally { setLoadingDocs(false); }
-    };
-    if (results.length > 0) fetchAllDocuments();
-  }, [results]);
+  const [visibleColumns, setVisibleColumns] = useState<string[]>(defaultColumns);
 
   const formatFieldName = (f: string) =>
     f.replace(/_/g, ' ').replace(/\./g, ' ').split(' ')
@@ -269,15 +249,6 @@ function ResultsTableView({ results, handleExport }: { results: ExtractionResult
 
     return r;
   }, [results, documents, docSearch, sortKey]);
-
-  if (loadingDocs) {
-    return (
-      <div className="flex items-center justify-center py-12">
-        <Spinner size="lg" />
-        <span className="ml-3 text-sm text-gray-400 dark:text-zinc-500">Loading documents…</span>
-      </div>
-    );
-  }
 
   return (
     <div>

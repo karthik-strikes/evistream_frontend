@@ -6,6 +6,16 @@ const UPENN_LOGO = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAB9AAAAKOCAYAAA
 
 export default function LandingPage() {
   useEffect(() => {
+    // Force light mode on landing page
+    const root = document.documentElement;
+    const hadDark = root.classList.contains('dark');
+    root.classList.remove('dark');
+    return () => {
+      if (hadDark) root.classList.add('dark');
+    };
+  }, []);
+
+  useEffect(() => {
     // Nav scroll shadow
     const nav = document.getElementById('main-nav');
     if (nav) {

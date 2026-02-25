@@ -3,6 +3,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { projectsService } from '@/services';
 import { Project as APIProject, CreateProjectRequest } from '@/types/api';
+import { getErrorMessage } from '@/lib/utils';
 
 // Re-export Project type from API
 export type Project = APIProject;
@@ -120,8 +121,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       return newProject;
     } catch (err: unknown) {
       console.error('Failed to create project:', err);
-      const message = (err as any)?.response?.data?.detail || 'Failed to create project';
-      throw new Error(typeof message === 'string' ? message : 'Failed to create project');
+      throw new Error(getErrorMessage(err, 'Failed to create project'));
     }
   }, []);
 
@@ -141,8 +141,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       setSelectedProjectState((prev) => (prev?.id === id ? updated : prev));
     } catch (err: unknown) {
       console.error('Failed to update project:', err);
-      const message = (err as any)?.response?.data?.detail || 'Failed to update project';
-      throw new Error(typeof message === 'string' ? message : 'Failed to update project');
+      throw new Error(getErrorMessage(err, 'Failed to update project'));
     }
   }, []);
 
@@ -165,8 +164,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       });
     } catch (err: unknown) {
       console.error('Failed to delete project:', err);
-      const message = (err as any)?.response?.data?.detail || 'Failed to delete project';
-      throw new Error(typeof message === 'string' ? message : 'Failed to delete project');
+      throw new Error(getErrorMessage(err, 'Failed to delete project'));
     }
   }, []);
 

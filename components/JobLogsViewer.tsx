@@ -36,6 +36,7 @@ export function JobLogsViewer({
   const wsRef = useRef<JobLogsWebSocket | null>(null);
 
   useEffect(() => {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') || undefined : undefined;
     // Connect to WebSocket
     const ws = connectToJobLogs(jobId, {
       onConnected: () => {
@@ -79,7 +80,7 @@ export function JobLogsViewer({
       onError: (error) => {
         setLogs((prev) => [...prev, error]);
       },
-    });
+    }, token);
 
     wsRef.current = ws;
 

@@ -46,6 +46,18 @@ export function formatRelativeTime(date: string | Date): string {
 }
 
 /**
+ * Extract a safe string message from a FastAPI error response.
+ * Handles both string details and Pydantic validation error arrays.
+ */
+export function getErrorMessage(err: any, fallback = 'Something went wrong'): string {
+  const detail = err?.response?.data?.detail;
+  if (!detail) return fallback;
+  if (typeof detail === 'string') return detail;
+  if (Array.isArray(detail)) return detail.map((e: any) => e?.msg ?? String(e)).join(', ');
+  return fallback;
+}
+
+/**
  * Sleep helper for async operations
  */
 export const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));

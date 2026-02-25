@@ -91,10 +91,10 @@ export class JobLogsWebSocket {
   }
 
   private buildWebSocketUrl(token?: string): string {
-    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const host = process.env.NEXT_PUBLIC_WS_URL || 'localhost:8000';
+    const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+    const wsBase = apiUrl.replace(/^http/, 'ws');
     const tokenParam = token ? `?token=${token}` : '';
-    return `${protocol}//${host}/api/v1/ws/jobs/${this.jobId}${tokenParam}`;
+    return `${wsBase}/api/v1/ws/jobs/${this.jobId}${tokenParam}`;
   }
 
   private handleMessage(message: LogMessage): void {

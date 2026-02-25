@@ -11,6 +11,7 @@ import { useToast } from '@/hooks/use-toast';
 import { apiClient } from '@/lib/api';
 import type { AuthResponse } from '@/types/api';
 import { Logo } from '@/components/ui/logo';
+import { getErrorMessage } from '@/lib/utils';
 
 const loginSchema = z.object({
   email: z.string().email('Invalid email address'),
@@ -41,7 +42,7 @@ export default function LoginPage() {
       toast({ title: 'Success', description: 'Login successful', variant: 'success' });
       window.location.href = '/dashboard';
     } catch (error: any) {
-      toast({ title: 'Error', description: error.response?.data?.detail || 'Login failed', variant: 'error' });
+      toast({ title: 'Error', description: getErrorMessage(error, 'Login failed'), variant: 'error' });
     } finally {
       setLoading(false);
     }

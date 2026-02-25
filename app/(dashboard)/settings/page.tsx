@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import {
   User, Lock, Key, Zap, Download, Bell, Save, Loader2,
@@ -101,7 +102,6 @@ export default function SettingsPage() {
   const { toast } = useToast();
   const [active, setActive] = useState<Section>('profile');
   const [saving, setSaving] = useState(false);
-  const [loading, setLoading] = useState(true);
   const [passwordErrors, setPasswordErrors] = useState<string[]>([]);
 
   const [profile, setProfile] = useState({ fullName: '', email: '', currentPassword: '', newPassword: '', confirmPassword: '' });
@@ -110,17 +110,14 @@ export default function SettingsPage() {
   const [notificationSettings, setNotificationSettings] = useState({ email: true, browser: true, extractionComplete: true, extractionFailed: true, codeGeneration: true });
   const [exportSettings, setExportSettings] = useState({ format: 'csv', dateFormat: 'ISO', includeMetadata: true, includeConfidence: true });
 
-  useEffect(() => { loadUserData(); }, []);
-
-  const loadUserData = async () => {
-    setLoading(true);
-    try {
+  const { isLoading: loading } = useQuery({
+    queryKey: ['currentUser'],
+    queryFn: async () => {
       const user = await authService.getCurrentUser();
       setProfile(prev => ({ ...prev, fullName: user.full_name, email: user.email }));
-    } catch { /* ignore */ } finally {
-      setLoading(false);
-    }
-  };
+      return user;
+    },
+  });
 
   const save = async (fn?: () => Promise<void>) => {
     setSaving(true);

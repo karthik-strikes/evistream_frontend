@@ -77,7 +77,7 @@ export function Sidebar() {
   return (
     <div
       className={cn(
-        'flex h-screen flex-col border-r border-gray-200 bg-gray-50 transition-all duration-200 flex-shrink-0 dark:bg-[#0a0a0a] dark:border-[#1a1a1a]',
+        'sticky top-0 flex h-screen flex-col border-r border-gray-200 bg-gray-50 transition-all duration-200 flex-shrink-0 overflow-y-auto dark:bg-[#0a0a0a] dark:border-[#1a1a1a]',
         collapsed ? 'w-16' : 'w-56'
       )}
     >

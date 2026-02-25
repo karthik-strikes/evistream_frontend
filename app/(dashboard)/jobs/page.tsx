@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { Card, Badge, Button, Progress, EmptyState, Alert } from '@/components/ui';
 import {
@@ -26,7 +27,7 @@ import { useProject } from '@/contexts/ProjectContext';
 import { jobsService } from '@/services';
 import { useToast } from '@/hooks/use-toast';
 import { useJobWebSocket } from '@/hooks/useJobWebSocket';
-import { formatDate, cn } from '@/lib/utils';
+import { formatDate, cn, getErrorMessage } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
 import type { Job } from '@/types/api';
 
@@ -34,25 +35,22 @@ export default function JobsPage() {
   const { selectedProject } = useProject();
   const { toast } = useToast();
   const router = useRouter();
-  const [jobs, setJobs] = useState<Job[]>([]);
-  const [loading, setLoading] = useState(true);
+  const queryClient = useQueryClient();
   const [filter, setFilter] = useState<'all' | 'processing' | 'pending' | 'completed' | 'failed' | 'cancelled'>('all');
   const [expandedJobs, setExpandedJobs] = useState<Set<string>>(new Set());
   const [currentPage, setCurrentPage] = useState(1);
   const [itemsPerPage] = useState(10);
 
-  const fetchJobs = useCallback(async () => {
-    if (!selectedProject) return;
-
-    try {
-      const data = await jobsService.getAll(selectedProject.id);
-      setJobs(data);
-    } catch (error: any) {
-      console.error('Error fetching jobs:', error);
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedProject]);
+  const { data: jobs = [], isLoading } = useQuery({
+    queryKey: ['jobs', selectedProject?.id],
+    queryFn: () => jobsService.getAll(selectedProject!.id),
+    enabled: !!selectedProject,
+    refetchInterval: (query) => {
+      const data = query.state.data ?? [];
+      const hasActive = data.some((j: Job) => j.status === 'pending' || j.status === 'processing');
+      return hasActive ? 3000 : false;
+    },
+  });
 
   // Find the first active job for WebSocket connection
   const activeJob = jobs.find(j => j.status === 'pending' || j.status === 'processing');
@@ -63,19 +61,9 @@ export default function JobsPage() {
     jobId: activeJob?.id ?? null,
     enabled: hasActiveJobs,
     onMessage: () => {
-      // Refresh the full list when we get a WS update
-      fetchJobs();
+      queryClient.invalidateQueries({ queryKey: ['jobs', selectedProject?.id] });
     },
   });
-
-  useEffect(() => {
-    fetchJobs();
-
-    // Poll at longer interval when WebSocket is connected, shorter when not
-    const pollInterval = wsConnected && hasActiveJobs ? 10000 : 3000;
-    const interval = setInterval(fetchJobs, pollInterval);
-    return () => clearInterval(interval);
-  }, [fetchJobs, wsConnected, hasActiveJobs]);
 
   const handleCancel = async (jobId: string) => {
     try {
@@ -85,11 +73,11 @@ export default function JobsPage() {
         description: 'The extraction job has been cancelled',
         variant: 'success',
       });
-      fetchJobs();
+      queryClient.invalidateQueries({ queryKey: ['jobs', selectedProject?.id] });
     } catch (error: any) {
       toast({
         title: 'Error',
-        description: error.response?.data?.detail || 'Failed to cancel job',
+        description: getErrorMessage(error, 'Failed to cancel job'),
         variant: 'error',
       });
     }
@@ -306,7 +294,7 @@ export default function JobsPage() {
         </Card>
 
         {/* Jobs List */}
-        {loading ? (
+        {isLoading ? (
           <div className="flex items-center justify-center py-12">
             <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
           </div>

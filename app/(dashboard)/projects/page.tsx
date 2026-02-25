@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { useQuery } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
 import { formsService, documentsService } from '@/services'; // used for enriching card stats
@@ -40,8 +41,6 @@ export default function ProjectsPage() {
   const [submitting, setSubmitting] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editData, setEditData] = useState({ name: '', description: '' });
-  const [projectsData, setProjectsData] = useState<any[]>([]);
-  const [dataLoading, setDataLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -57,37 +56,34 @@ export default function ProjectsPage() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // Fetch forms + docs for every project
-  useEffect(() => {
-    const fetchAll = async () => {
-      if (!contextProjects?.length) { setDataLoading(false); return; }
-      setDataLoading(true);
-      try {
-        const enriched = await Promise.all(
-          contextProjects.map(async (proj: any) => {
-            try {
-              const [projForms, projDocs] = await Promise.all([
-                formsService.getAll(proj.id),
-                documentsService.getAll(proj.id),
-              ]);
-              return {
-                ...proj,
-                forms: projForms.map((f: any) => ({ name: f.form_name, status: fmtStatus(f.status || 'active') })),
-                documents: projDocs.map((d: any) => ({
-                  name: d.filename,
-                  status: d.processing_status === 'completed' ? 'Completed' : d.processing_status === 'processing' ? 'Generating' : 'Failed',
-                })),
-              };
-            } catch {
-              return { ...proj, forms: [], documents: [] };
-            }
-          })
-        );
-        setProjectsData(enriched);
-      } finally { setDataLoading(false); }
-    };
-    fetchAll();
-  }, [contextProjects]);
+  const { data: projectsData = [], isLoading: dataLoading } = useQuery({
+    queryKey: ['projects-enriched', contextProjects?.map((p: any) => p.id).join(',')],
+    queryFn: async () => {
+      if (!contextProjects?.length) return [];
+      const enriched = await Promise.all(
+        contextProjects.map(async (proj: any) => {
+          try {
+            const [projForms, projDocs] = await Promise.all([
+              formsService.getAll(proj.id),
+              documentsService.getAll(proj.id),
+            ]);
+            return {
+              ...proj,
+              forms: projForms.map((f: any) => ({ name: f.form_name, status: fmtStatus(f.status || 'active') })),
+              documents: projDocs.map((d: any) => ({
+                name: d.filename,
+                status: d.processing_status === 'completed' ? 'Completed' : d.processing_status === 'processing' ? 'Generating' : 'Failed',
+              })),
+            };
+          } catch {
+            return { ...proj, forms: [], documents: [] };
+          }
+        })
+      );
+      return enriched;
+    },
+    enabled: !!contextProjects?.length,
+  });
 
 
   const handleCreate = async () => {

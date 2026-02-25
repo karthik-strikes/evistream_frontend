@@ -5,6 +5,7 @@ import { useProject } from '@/contexts/ProjectContext';
 import { formsService } from '@/services';
 import { Form, CreateFormRequest, FormField } from '@/types/api';
 import { useEffect, useState, useRef } from 'react';
+import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import {
   Button,
@@ -16,16 +17,13 @@ import {
 } from '@/components/ui';
 import { Plus, Trash2, FileText, Code, AlertCircle, Check, Edit3, ThumbsUp, ThumbsDown, MessageSquare, ChevronDown, ChevronUp, ChevronRight } from 'lucide-react';
 import { JobLogsViewer } from '@/components/JobLogsViewer';
-import { cn, formatDate } from '@/lib/utils';
+import { cn, formatDate, getErrorMessage } from '@/lib/utils';
 import { typography } from '@/lib/typography';
 import { statusColors, statusBgs } from '@/lib/colors';
 
 export default function FormsPage() {
   const { selectedProject } = useProject();
   const { toast } = useToast();
-  const [forms, setForms] = useState<Form[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [selectedForm, setSelectedForm] = useState<Form | null>(null);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
@@ -33,34 +31,23 @@ export default function FormsPage() {
   const [editForm, setEditForm] = useState<Form | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
 
+  const queryClient = useQueryClient();
+  const { data: forms = [], isLoading, error: queryError } = useQuery({
+    queryKey: ['forms', selectedProject?.id],
+    queryFn: () => formsService.getAll(selectedProject!.id),
+    enabled: !!selectedProject,
+    refetchInterval: (query) => {
+      const data = query.state.data ?? [];
+      return data.some((f: Form) => f.status === 'generating' || f.status === 'regenerating') ? 4000 : false;
+    },
+    placeholderData: keepPreviousData,
+  });
+
+  const error = queryError ? getErrorMessage(queryError as any, 'Failed to load forms') : null;
+
   const filteredForms = searchQuery.trim()
     ? forms.filter((f) => f.form_name?.toLowerCase().includes(searchQuery.toLowerCase()))
     : forms;
-
-  useEffect(() => {
-    if (selectedProject) {
-      fetchForms();
-    } else {
-      setForms([]);
-      setLoading(false);
-    }
-  }, [selectedProject]);
-
-  const fetchForms = async () => {
-    if (!selectedProject) return;
-
-    setLoading(true);
-    setError(null);
-    try {
-      const data = await formsService.getAll(selectedProject.id);
-      setForms(data);
-    } catch (err: any) {
-      console.error('Failed to fetch forms:', err);
-      setError(err.response?.data?.detail || 'Failed to load forms');
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const handleGenerateCode = async (formId: string) => {
     try {
@@ -78,12 +65,12 @@ export default function FormsPage() {
       });
 
       // Refresh forms to see updated status
-      await fetchForms();
+      await queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id] });
     } catch (err: any) {
       console.error('Failed to generate code:', err);
       toast({
         title: 'Error',
-        description: err.response?.data?.detail || 'Failed to generate code',
+        description: getErrorMessage(err, 'Failed to generate code'),
         variant: 'error',
       });
     }
@@ -94,7 +81,7 @@ export default function FormsPage() {
 
     try {
       await formsService.delete(formId);
-      setForms(forms.filter((f) => f.id !== formId));
+      await queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id] });
       toast({
         title: 'Success',
         description: 'Form deleted successfully',
@@ -104,7 +91,7 @@ export default function FormsPage() {
       console.error('Failed to delete form:', err);
       toast({
         title: 'Error',
-        description: err.response?.data?.detail || 'Failed to delete form',
+        description: getErrorMessage(err, 'Failed to delete form'),
         variant: 'error',
       });
     }
@@ -119,12 +106,12 @@ export default function FormsPage() {
         variant: 'success',
       });
       setReviewForm(null);
-      await fetchForms();
+      await queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id] });
     } catch (err: any) {
       console.error('Failed to approve decomposition:', err);
       toast({
         title: 'Error',
-        description: err.response?.data?.detail || 'Failed to approve decomposition',
+        description: getErrorMessage(err, 'Failed to approve decomposition'),
         variant: 'error',
       });
     }
@@ -139,12 +126,12 @@ export default function FormsPage() {
         variant: 'success',
       });
       setReviewForm(null);
-      await fetchForms();
+      await queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id] });
     } catch (err: any) {
       console.error('Failed to reject decomposition:', err);
       toast({
         title: 'Error',
-        description: err.response?.data?.detail || 'Failed to reject decomposition',
+        description: getErrorMessage(err, 'Failed to reject decomposition'),
         variant: 'error',
       });
     }
@@ -158,12 +145,12 @@ export default function FormsPage() {
         description: 'Form updated successfully',
         variant: 'success',
       });
-      await fetchForms();
+      await queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id] });
     } catch (err: any) {
       console.error('Failed to update form:', err);
       toast({
         title: 'Error',
-        description: err.response?.data?.detail || 'Failed to update form',
+        description: getErrorMessage(err, 'Failed to update form'),
         variant: 'error',
       });
     }
@@ -188,7 +175,7 @@ export default function FormsPage() {
       title="Forms"
       description="Create and manage extraction forms"
     >
-      {loading ? (
+      {isLoading ? (
         <div className="flex justify-center items-center py-12">
           <Spinner size="lg" />
         </div>
@@ -196,7 +183,7 @@ export default function FormsPage() {
         <div className="bg-red-50 border border-red-200 rounded-lg p-6 text-center dark:bg-red-900/20 dark:border-red-800/50">
           <AlertCircle className="h-12 w-12 text-red-500 mx-auto mb-3" />
           <p className={cn(typography.message.error, "text-red-800 dark:text-red-400")}>{error}</p>
-          <Button variant="secondary" onClick={fetchForms} className="mt-4">
+          <Button variant="secondary" onClick={() => queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id] })} className="mt-4">
             Retry
           </Button>
         </div>
@@ -279,6 +266,36 @@ export default function FormsPage() {
                 </div>
               )}
 
+              {/* In Progress Section */}
+              {filteredForms.filter(f => f.status === 'generating' || f.status === 'regenerating').length > 0 && (
+                <div>
+                  <div className="flex items-center gap-2 mb-4">
+                    <div className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+                    <h2 className={cn(typography.sectionHeader.default, "text-gray-500")}>
+                      In Progress
+                    </h2>
+                    <span className={cn(typography.body.tiny, "text-gray-400")}>
+                      {filteredForms.filter(f => f.status === 'generating' || f.status === 'regenerating').length}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {filteredForms
+                      .filter(f => f.status === 'generating' || f.status === 'regenerating')
+                      .map((form) => (
+                        <FormCard
+                          key={form.id}
+                          form={form}
+                          onGenerateCode={handleGenerateCode}
+                          onDelete={handleDeleteForm}
+                          onClick={() => setSelectedForm(form)}
+                          onReview={(form) => setReviewForm(form)}
+                          onEdit={(form) => setEditForm(form)}
+                        />
+                      ))}
+                  </div>
+                </div>
+              )}
+
               {/* Active Section */}
               {filteredForms.filter(f => f.status === 'active' || f.status === 'draft').length > 0 && (
                 <div>
@@ -319,7 +336,7 @@ export default function FormsPage() {
           onClose={() => setShowCreateDialog(false)}
           onSuccess={() => {
             setShowCreateDialog(false);
-            fetchForms();
+            queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id] });
           }}
         />
       )}
@@ -348,7 +365,7 @@ export default function FormsPage() {
           onClose={() => setEditForm(null)}
           onSuccess={() => {
             setEditForm(null);
-            fetchForms();
+            queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id] });
           }}
           onUpdate={handleUpdateForm}
           onGenerateCode={handleGenerateCode}
@@ -1025,25 +1042,9 @@ function CreateFormDialog({
       console.error('Failed to create form:', err);
       console.error('Error response:', err.response?.data);
 
-      // Format error message properly
-      let errorMessage = 'Failed to create form';
-      if (err.response?.data?.detail) {
-        const detail = err.response.data.detail;
-        if (Array.isArray(detail)) {
-          // Validation errors
-          errorMessage = detail.map((e: any) => e.msg || JSON.stringify(e)).join(', ');
-        } else if (typeof detail === 'string') {
-          errorMessage = detail;
-        } else {
-          errorMessage = JSON.stringify(detail);
-        }
-      } else if (err.message) {
-        errorMessage = err.message;
-      }
-
       toast({
         title: 'Error',
-        description: errorMessage,
+        description: getErrorMessage(err, 'Failed to create form'),
         variant: 'error',
       });
     } finally {
@@ -1543,7 +1544,7 @@ function EditFormDialog({
       console.error('Failed to update form:', err);
       toast({
         title: 'Error',
-        description: err.response?.data?.detail || 'Failed to update form',
+        description: getErrorMessage(err, 'Failed to update form'),
         variant: 'error',
       });
     } finally {

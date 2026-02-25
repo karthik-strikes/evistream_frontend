@@ -12,14 +12,14 @@ interface DashboardLayoutProps {
 
 export function DashboardLayout({ children, title, description, action }: DashboardLayoutProps) {
   return (
-    <div className="flex min-h-screen bg-white dark:bg-[#050505]">
+    <div className="flex min-h-screen overflow-x-hidden bg-white dark:bg-[#050505]">
       {/* Sidebar */}
       <Sidebar />
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col min-w-0">
         <Navbar title={title} description={description} />
-        <main className="flex-1 px-6 pt-4 pb-6">
+        <main className="flex-1 px-6 pt-4 pb-6 max-w-full">
           {/* Action button row (if provided) */}
           {action && (
             <div className="flex justify-end mb-4">

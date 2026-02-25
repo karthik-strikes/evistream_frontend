@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { Play, Grid3x3, ChevronDown, Loader2, AlertCircle, X, FileText, Check } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
@@ -9,19 +10,17 @@ import { useToast } from '@/hooks/use-toast';
 import { useRouter } from 'next/navigation';
 import { EmptyState, Alert, Button } from '@/components/ui';
 import type { Extraction, Form, Job, Document } from '@/types/api';
-import { formatDate, cn } from '@/lib/utils';
+import { formatDate, cn, getErrorMessage } from '@/lib/utils';
 import { typography } from '@/lib/typography';
 
-/* ─── Main Page ────────────────────────────────────────────────── */
+/* --- Main Page --------------------------------------------------------- */
 
 export default function ExtractionsPage() {
   const { selectedProject } = useProject();
   const { toast } = useToast();
   const router = useRouter();
-  const [extractions, setExtractions] = useState<Extraction[]>([]);
+  const queryClient = useQueryClient();
   const [jobs, setJobs] = useState<Record<string, Job>>({});
-  const [forms, setForms] = useState<Form[]>([]);
-  const [loading, setLoading] = useState(true);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [showRunDialog, setShowRunDialog] = useState(false);
   const [selectedFormId, setSelectedFormId] = useState<string>('');
@@ -33,48 +32,33 @@ export default function ExtractionsPage() {
   const [formSearch, setFormSearch] = useState('');
   const [docSearch, setDocSearch] = useState('');
 
-  const fetchExtractions = useCallback(async () => {
-    if (!selectedProject) return;
-
-    try {
-      setLoading(true);
-      const data = await extractionsService.getAll(selectedProject.id);
-      setExtractions(data);
-
+  const { data: extractions = [], isLoading } = useQuery({
+    queryKey: ['extractions', selectedProject?.id],
+    queryFn: async () => {
+      const data = await extractionsService.getAll(selectedProject!.id);
       // Fetch job details for each extraction
       const jobPromises = data
-        .filter(ext => ext.job_id)
-        .map(ext => jobsService.getById(ext.job_id!).catch(() => null));
-
+        .filter((ext: Extraction) => ext.job_id)
+        .map((ext: Extraction) => jobsService.getById(ext.job_id!).catch(() => null));
       const jobResults = await Promise.all(jobPromises);
       const jobsMap: Record<string, Job> = {};
       jobResults.forEach((job) => {
         if (job) jobsMap[job.id] = job;
       });
       setJobs(jobsMap);
-    } catch (error: any) {
-      console.error('Error fetching extractions:', error);
-    } finally {
-      setLoading(false);
-    }
-  }, [selectedProject]);
+      return data;
+    },
+    enabled: !!selectedProject,
+  });
 
-  const fetchForms = useCallback(async () => {
-    if (!selectedProject) return;
-
-    try {
-      const data = await formsService.getAll(selectedProject.id);
-      const activeForms = data.filter(f => f.status === 'active');
-      setForms(activeForms);
-    } catch (error: any) {
-      console.error('Error fetching forms:', error);
-    }
-  }, [selectedProject]);
-
-  useEffect(() => {
-    fetchExtractions();
-    fetchForms();
-  }, [fetchExtractions, fetchForms]);
+  const { data: forms = [] } = useQuery({
+    queryKey: ['forms', selectedProject?.id],
+    queryFn: async () => {
+      const data = await formsService.getAll(selectedProject!.id);
+      return data.filter((f: Form) => f.status === 'active');
+    },
+    enabled: !!selectedProject,
+  });
 
   const toggle = (id: string) => {
     const newSet = new Set(expanded);
@@ -118,11 +102,11 @@ export default function ExtractionsPage() {
 
       toast({ title: 'Success', description: 'Extraction started successfully', variant: 'success' });
       setShowRunDialog(false);
-      fetchExtractions();
+      queryClient.invalidateQueries({ queryKey: ['extractions', selectedProject?.id] });
     } catch (error: any) {
       toast({
         title: 'Error',
-        description: error.response?.data?.detail || 'Failed to start extraction',
+        description: getErrorMessage(error, 'Failed to start extraction'),
         variant: 'error',
       });
     } finally {
@@ -173,7 +157,7 @@ export default function ExtractionsPage() {
       title="Extractions"
       description="Run and monitor extraction jobs"
     >
-      {loading ? (
+      {isLoading ? (
         <div className="flex items-center justify-center py-12">
           <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
         </div>
