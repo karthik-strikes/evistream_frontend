@@ -1,8 +1,15 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import type { WSMessage } from '@/types/api';
 
-const WS_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000')
-  .replace(/^http/, 'ws');
+function buildWsBaseUrl(): string {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  const isLocal = /localhost|127\.0\.0\.1/.test(apiUrl);
+  if (!isLocal && apiUrl.startsWith('http://')) {
+    return apiUrl.replace(/^http:\/\//, 'wss://');
+  }
+  return apiUrl.replace(/^https?/, (s) => (s === 'https' ? 'wss' : 'ws'));
+}
+const WS_BASE_URL = buildWsBaseUrl();
 
 interface UseJobWebSocketOptions {
   jobId: string | null;
@@ -41,7 +48,7 @@ export function useJobWebSocket({
     if (!jobId || !enabled) return;
 
     const token = typeof window !== 'undefined'
-      ? localStorage.getItem('auth_token')
+      ? sessionStorage.getItem('auth_token')
       : null;
 
     const url = `${WS_BASE_URL}/api/v1/ws/jobs/${jobId}`;

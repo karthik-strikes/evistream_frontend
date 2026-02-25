@@ -93,7 +93,13 @@ export class JobLogsWebSocket {
 
   private buildWebSocketUrl(): string {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
-    const wsBase = apiUrl.replace(/^http/, 'ws');
+    const isLocal = /localhost|127\.0\.0\.1/.test(apiUrl);
+    let wsBase: string;
+    if (!isLocal && apiUrl.startsWith('http://')) {
+      wsBase = apiUrl.replace(/^http:\/\//, 'wss://');
+    } else {
+      wsBase = apiUrl.replace(/^https?/, (s) => (s === 'https' ? 'wss' : 'ws'));
+    }
     return `${wsBase}/api/v1/ws/jobs/${this.jobId}`;
   }
 

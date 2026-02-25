@@ -24,7 +24,7 @@ export const authService = {
 
   logout(): void {
     if (typeof window !== 'undefined') {
-      localStorage.removeItem('auth_token');
+      sessionStorage.removeItem('auth_token');
       window.location.href = '/login';
     }
   },

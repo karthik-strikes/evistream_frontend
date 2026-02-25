@@ -28,7 +28,7 @@ export function Navbar({ title, description }: NavbarProps) {
   }, []);
 
   const handleLogout = () => {
-    localStorage.removeItem('auth_token');
+    sessionStorage.removeItem('auth_token');
     router.push('/login');
   };
 
