@@ -25,6 +25,7 @@ export const authService = {
   logout(): void {
     if (typeof window !== 'undefined') {
       sessionStorage.removeItem('auth_token');
+      document.cookie = 'is_logged_in=; path=/; max-age=0; SameSite=Strict';
       window.location.href = '/login';
     }
   },

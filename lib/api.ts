@@ -54,11 +54,13 @@ class APIClient {
   private clearToken(): void {
     if (typeof window === 'undefined') return;
     sessionStorage.removeItem('auth_token');
+    document.cookie = 'is_logged_in=; path=/; max-age=0; SameSite=Strict';
   }
 
   public setToken(token: string): void {
     if (typeof window === 'undefined') return;
     sessionStorage.setItem('auth_token', token);
+    document.cookie = 'is_logged_in=1; path=/; SameSite=Strict';
   }
 
   // HTTP Methods

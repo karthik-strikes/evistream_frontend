@@ -29,6 +29,7 @@ export function Navbar({ title, description }: NavbarProps) {
 
   const handleLogout = () => {
     sessionStorage.removeItem('auth_token');
+    document.cookie = 'is_logged_in=; path=/; max-age=0; SameSite=Strict';
     router.push('/login');
   };
 

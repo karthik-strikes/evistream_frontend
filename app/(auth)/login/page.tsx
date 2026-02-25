@@ -2,6 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import * as z from 'zod';
@@ -22,6 +23,7 @@ type LoginFormData = z.infer<typeof loginSchema>;
 
 export default function LoginPage() {
   const { toast } = useToast();
+  const searchParams = useSearchParams();
   const [loading, setLoading] = useState(false);
   const [isDark, setIsDark] = useState(true);
 
@@ -40,7 +42,8 @@ export default function LoginPage() {
       const response = await apiClient.post<AuthResponse>('/api/v1/auth/login', data);
       apiClient.setToken(response.access_token);
       toast({ title: 'Success', description: 'Login successful', variant: 'success' });
-      window.location.href = '/dashboard';
+      const from = searchParams.get('from') || '/dashboard';
+      window.location.href = from;
     } catch (error: any) {
       toast({ title: 'Error', description: getErrorMessage(error, 'Login failed'), variant: 'error' });
     } finally {
