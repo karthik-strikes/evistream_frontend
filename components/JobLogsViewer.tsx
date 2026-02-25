@@ -41,12 +41,10 @@ export function JobLogsViewer({
     const ws = connectToJobLogs(jobId, {
       onConnected: () => {
         setIsConnected(true);
-        console.log('Connected to job logs');
       },
 
       onDisconnected: () => {
         setIsConnected(false);
-        console.log('Disconnected from job logs');
       },
 
       onLog: (log) => {
