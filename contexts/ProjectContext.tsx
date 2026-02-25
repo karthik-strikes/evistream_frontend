@@ -1,0 +1,207 @@
+'use client';
+
+import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
+import { projectsService } from '@/services';
+import { Project as APIProject, CreateProjectRequest } from '@/types/api';
+
+// Re-export Project type from API
+export type Project = APIProject;
+
+interface ProjectContextType {
+  projects: Project[];
+  selectedProject: Project | null;
+  loading: boolean;
+  error: string | null;
+  setSelectedProject: (project: Project | null) => void;
+  createProject: (name: string, description?: string) => Promise<Project>;
+  updateProject: (id: string, updates: Partial<CreateProjectRequest>) => Promise<void>;
+  deleteProject: (id: string) => Promise<void>;
+  refreshProjects: () => Promise<void>;
+}
+
+const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
+
+function safeGetItem(key: string): string | null {
+  if (typeof window === 'undefined') return null;
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function safeSetItem(key: string, value: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(key, value);
+  } catch (e) {
+    console.error('localStorage write failed:', e);
+  }
+}
+
+function safeRemoveItem(key: string): void {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    // ignore
+  }
+}
+
+export function ProjectProvider({ children }: { children: ReactNode }) {
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProject, setSelectedProjectState] = useState<Project | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const refreshInFlight = useRef(false);
+
+  const refreshProjects = useCallback(async () => {
+    if (refreshInFlight.current) return;
+    refreshInFlight.current = true;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await projectsService.getAll();
+      setProjects(data);
+      safeSetItem('projects', JSON.stringify(data));
+    } catch (err: unknown) {
+      console.error('Failed to fetch projects:', err);
+      setError('Failed to load projects');
+
+      // Fallback to localStorage
+      const stored = safeGetItem('projects');
+      if (stored) {
+        try {
+          setProjects(JSON.parse(stored));
+        } catch (e) {
+          console.error('Failed to parse stored projects:', e);
+        }
+      }
+    } finally {
+      setLoading(false);
+      refreshInFlight.current = false;
+    }
+  }, []);
+
+  // Load projects from API on mount
+  useEffect(() => {
+    refreshProjects();
+  }, [refreshProjects]);
+
+  // Restore selected project from localStorage
+  useEffect(() => {
+    if (projects.length > 0) {
+      const storedId = safeGetItem('selectedProjectId');
+      if (storedId) {
+        const project = projects.find((p) => p.id === storedId);
+        if (project) {
+          setSelectedProjectState(project);
+          return;
+        }
+      }
+      // Auto-select first project if no valid stored selection
+      setSelectedProjectState(projects[0]);
+    } else {
+      setSelectedProjectState(null);
+    }
+  }, [projects]);
+
+  const createProject = useCallback(async (name: string, description?: string): Promise<Project> => {
+    const request: CreateProjectRequest = { name, description };
+
+    try {
+      const newProject = await projectsService.create(request);
+      setProjects((prev) => {
+        const updated = [newProject, ...prev];
+        safeSetItem('projects', JSON.stringify(updated));
+        return updated;
+      });
+      setSelectedProjectState(newProject);
+      return newProject;
+    } catch (err: unknown) {
+      console.error('Failed to create project:', err);
+      const message = (err as any)?.response?.data?.detail || 'Failed to create project';
+      throw new Error(typeof message === 'string' ? message : 'Failed to create project');
+    }
+  }, []);
+
+  const updateProject = useCallback(async (
+    id: string,
+    updates: Partial<CreateProjectRequest>
+  ): Promise<void> => {
+    try {
+      const updated = await projectsService.update(id, updates);
+
+      setProjects((prev) => {
+        const newProjects = prev.map((p) => (p.id === id ? updated : p));
+        safeSetItem('projects', JSON.stringify(newProjects));
+        return newProjects;
+      });
+
+      setSelectedProjectState((prev) => (prev?.id === id ? updated : prev));
+    } catch (err: unknown) {
+      console.error('Failed to update project:', err);
+      const message = (err as any)?.response?.data?.detail || 'Failed to update project';
+      throw new Error(typeof message === 'string' ? message : 'Failed to update project');
+    }
+  }, []);
+
+  const deleteProject = useCallback(async (id: string): Promise<void> => {
+    try {
+      await projectsService.delete(id);
+
+      setProjects((prev) => {
+        const remaining = prev.filter((p) => p.id !== id);
+        safeSetItem('projects', JSON.stringify(remaining));
+        return remaining;
+      });
+
+      setSelectedProjectState((prev) => {
+        if (prev?.id === id) {
+          // Will be resolved by the useEffect on projects change
+          return null;
+        }
+        return prev;
+      });
+    } catch (err: unknown) {
+      console.error('Failed to delete project:', err);
+      const message = (err as any)?.response?.data?.detail || 'Failed to delete project';
+      throw new Error(typeof message === 'string' ? message : 'Failed to delete project');
+    }
+  }, []);
+
+  const setSelectedProject = useCallback((project: Project | null) => {
+    setSelectedProjectState(project);
+    if (project) {
+      safeSetItem('selectedProjectId', project.id);
+    } else {
+      safeRemoveItem('selectedProjectId');
+    }
+  }, []);
+
+  const value = React.useMemo(() => ({
+    projects,
+    selectedProject,
+    loading,
+    error,
+    setSelectedProject,
+    createProject,
+    updateProject,
+    deleteProject,
+    refreshProjects,
+  }), [projects, selectedProject, loading, error, setSelectedProject, createProject, updateProject, deleteProject, refreshProjects]);
+
+  return (
+    <ProjectContext.Provider value={value}>
+      {children}
+    </ProjectContext.Provider>
+  );
+}
+
+export function useProject() {
+  const context = useContext(ProjectContext);
+  if (!context) {
+    throw new Error('useProject must be used within ProjectProvider');
+  }
+  return context;
+}

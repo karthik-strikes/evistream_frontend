@@ -1,0 +1,22 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(wc -l:*)",
+      "Bash(claude doctor:*)",
+      "Bash(npx claude:*)",
+      "Bash(node --version:*)",
+      "Bash(npm --version:*)",
+      "Bash(~/.bashrc)",
+      "Bash(echo:*)",
+      "Bash(npx tsc:*)",
+      "mcp__ide__getDiagnostics",
+      "Bash(head:*)",
+      "Bash(/mnt/nlpgridio3/data/karthik9/Sprint1/Dental/eviStream/frontend/public/patient_population_form.json:*)",
+      "Bash(python3:*)",
+      "Bash(pip show:*)"
+    ]
+  }
+}
