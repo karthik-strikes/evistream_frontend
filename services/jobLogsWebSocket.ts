@@ -53,11 +53,14 @@ export class JobLogsWebSocket {
   connect(token?: string): void {
     this.isIntentionallyClosed = false;
 
-    const wsUrl = this.buildWebSocketUrl(token);
+    const wsUrl = this.buildWebSocketUrl();
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
-      console.log(`[WebSocket] Connected to job ${this.jobId}`);
+      // Send auth token as first message instead of URL query param
+      if (token) {
+        this.ws!.send(JSON.stringify({ type: 'auth', token }));
+      }
       this.reconnectAttempts = 0;
       this.reconnectDelay = 1000;
       this.callbacks.onConnected?.();
@@ -67,34 +70,31 @@ export class JobLogsWebSocket {
       try {
         const message: LogMessage = JSON.parse(event.data);
         this.handleMessage(message);
-      } catch (error) {
-        console.error('[WebSocket] Failed to parse message:', error);
+      } catch {
+        // Ignore parse errors
       }
     };
 
-    this.ws.onerror = (error) => {
-      console.error('[WebSocket] Error:', error);
+    this.ws.onerror = () => {
+      // Error handled by onclose
     };
 
-    this.ws.onclose = (event) => {
-      console.log(`[WebSocket] Disconnected from job ${this.jobId}`);
+    this.ws.onclose = () => {
       this.callbacks.onDisconnected?.();
 
       // Attempt reconnection if not intentionally closed
       if (!this.isIntentionallyClosed && this.reconnectAttempts < this.maxReconnectAttempts) {
         this.reconnectAttempts++;
-        console.log(`[WebSocket] Reconnecting... (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
         setTimeout(() => this.connect(token), this.reconnectDelay);
         this.reconnectDelay *= 2; // Exponential backoff
       }
     };
   }
 
-  private buildWebSocketUrl(token?: string): string {
+  private buildWebSocketUrl(): string {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
     const wsBase = apiUrl.replace(/^http/, 'ws');
-    const tokenParam = token ? `?token=${token}` : '';
-    return `${wsBase}/api/v1/ws/jobs/${this.jobId}${tokenParam}`;
+    return `${wsBase}/api/v1/ws/jobs/${this.jobId}`;
   }
 
   private handleMessage(message: LogMessage): void {
@@ -124,7 +124,6 @@ export class JobLogsWebSocket {
         break;
 
       case 'connected':
-        console.log('[WebSocket] Connection confirmed by server');
         break;
 
       case 'heartbeat':
@@ -132,7 +131,7 @@ export class JobLogsWebSocket {
         break;
 
       default:
-        console.warn('[WebSocket] Unknown message type:', message.type);
+        break;
     }
   }
 

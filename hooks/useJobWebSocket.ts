@@ -44,12 +44,16 @@ export function useJobWebSocket({
       ? localStorage.getItem('auth_token')
       : null;
 
-    const url = `${WS_BASE_URL}/api/v1/ws/jobs/${jobId}${token ? `?token=${token}` : ''}`;
+    const url = `${WS_BASE_URL}/api/v1/ws/jobs/${jobId}`;
 
     const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
+      // Send auth token as first message instead of URL query param
+      if (token) {
+        ws.send(JSON.stringify({ type: 'auth', token }));
+      }
       setConnected(true);
     };
 
