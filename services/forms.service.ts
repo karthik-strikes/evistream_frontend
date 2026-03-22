@@ -2,12 +2,12 @@ import { apiClient } from '@/lib/api';
 import type { Form, CreateFormRequest } from '@/types/api';
 
 export const formsService = {
-  async getAll(projectId: string): Promise<Form[]> {
-    return apiClient.get<Form[]>(`/api/v1/forms/?project_id=${encodeURIComponent(projectId)}`);
-  },
-
-  async getById(id: string): Promise<Form> {
-    return apiClient.get<Form>(`/api/v1/forms/${id}`);
+  async getAll(projectId: string, search?: string): Promise<Form[]> {
+    const params = new URLSearchParams({ project_id: projectId });
+    if (search?.trim()) {
+      params.set('search', search.trim());
+    }
+    return apiClient.get<Form[]>(`/api/v1/forms/?${params.toString()}`);
   },
 
   async create(data: CreateFormRequest): Promise<Form> {
@@ -22,12 +22,9 @@ export const formsService = {
     return apiClient.delete<void>(`/api/v1/forms/${id}`);
   },
 
-  async generateCode(id: string): Promise<Form> {
-    return apiClient.post<Form>(`/api/v1/forms/${id}/regenerate`);
-  },
-
-  async getGenerationStatus(id: string): Promise<Form> {
-    return apiClient.get<Form>(`/api/v1/forms/${id}`);
+  async generateCode(id: string, enableReview?: boolean): Promise<Form> {
+    const params = enableReview ? '?enable_review=true' : '';
+    return apiClient.post<Form>(`/api/v1/forms/${id}/regenerate${params}`);
   },
 
   async approveDecomposition(id: string): Promise<{ message: string; form_id: string; status: string }> {

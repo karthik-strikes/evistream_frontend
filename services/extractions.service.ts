@@ -25,4 +25,8 @@ export const extractionsService = {
   async getStatus(id: string): Promise<Extraction> {
     return apiClient.get<Extraction>(`/api/v1/extractions/${id}`);
   },
+
+  async retryFailed(id: string): Promise<{ job_id: string; retrying_count: number }> {
+    return apiClient.post<{ job_id: string; retrying_count: number }>(`/api/v1/extractions/${id}/retry-failed`);
+  },
 };

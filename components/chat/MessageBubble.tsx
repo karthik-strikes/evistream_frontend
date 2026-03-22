@@ -35,7 +35,7 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
       )}
     >
       {!isUser && (
-        <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-white flex items-center justify-center border border-gray-200">
+        <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-white flex items-center justify-center border border-gray-200 dark:bg-[#111111] dark:border-[#222]">
           <Logo size={20} />
         </div>
       )}
@@ -46,13 +46,13 @@ export function MessageBubble({ message, isLatest }: MessageBubbleProps) {
             'relative rounded-2xl px-4 py-3 text-[15px] leading-relaxed transition-all duration-200',
             isUser
               ? 'bg-gray-900 text-white'
-              : 'bg-white text-gray-900 border border-gray-200 shadow-sm hover:shadow-md'
+              : 'bg-white text-gray-900 border border-gray-200 shadow-sm hover:shadow-md dark:bg-[#111111] dark:border-[#222] dark:text-zinc-100 dark:shadow-none'
           )}
         >
           {!isUser && !message.isStreaming && (
             <button
               onClick={handleCopy}
-              className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 bg-white rounded-lg p-1.5 shadow-md border border-gray-200 hover:bg-gray-50"
+              className="absolute -top-2 -right-2 opacity-0 group-hover:opacity-100 transition-opacity duration-200 bg-white rounded-lg p-1.5 shadow-md border border-gray-200 hover:bg-gray-50 dark:bg-[#1a1a1a] dark:border-[#333] dark:hover:bg-[#222]"
             >
               {copied ? (
                 <CheckCheck className="h-3.5 w-3.5 text-green-600" />

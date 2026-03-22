@@ -1,5 +1,8 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
+import { apiClient } from '@/lib/api';
 import type { WSMessage } from '@/types/api';
+
+const MAX_RECONNECT_ATTEMPTS = 10;
 
 function buildWsBaseUrl(): string {
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
@@ -16,6 +19,7 @@ interface UseJobWebSocketOptions {
   onMessage?: (message: WSMessage) => void;
   onStatusChange?: (status: string) => void;
   onProgress?: (progress: number) => void;
+  onMaxRetriesReached?: () => void;
   enabled?: boolean;
 }
 
@@ -29,10 +33,12 @@ export function useJobWebSocket({
   onMessage,
   onStatusChange,
   onProgress,
+  onMaxRetriesReached,
   enabled = true,
 }: UseJobWebSocketOptions): UseJobWebSocketReturn {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const reconnectAttemptsRef = useRef(0);
   const [connected, setConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState<WSMessage | null>(null);
 
@@ -40,18 +46,20 @@ export function useJobWebSocket({
   const onMessageRef = useRef(onMessage);
   const onStatusChangeRef = useRef(onStatusChange);
   const onProgressRef = useRef(onProgress);
+  const onMaxRetriesReachedRef = useRef(onMaxRetriesReached);
   onMessageRef.current = onMessage;
   onStatusChangeRef.current = onStatusChange;
   onProgressRef.current = onProgress;
+  onMaxRetriesReachedRef.current = onMaxRetriesReached;
 
   const connect = useCallback(() => {
     if (!jobId || !enabled) return;
 
-    const token = typeof window !== 'undefined'
-      ? sessionStorage.getItem('auth_token')
-      : null;
+    const token = apiClient.getToken();
 
-    const url = `${WS_BASE_URL}/api/v1/ws/jobs/${jobId}`;
+    const url = token
+      ? `${WS_BASE_URL}/api/v1/ws/jobs/${jobId}?token=${encodeURIComponent(token)}`
+      : `${WS_BASE_URL}/api/v1/ws/jobs/${jobId}`;
 
     const ws = new WebSocket(url);
     wsRef.current = ws;
@@ -61,6 +69,7 @@ export function useJobWebSocket({
       if (token) {
         ws.send(JSON.stringify({ type: 'auth', token }));
       }
+      reconnectAttemptsRef.current = 0;
       setConnected(true);
     };
 
@@ -89,9 +98,14 @@ export function useJobWebSocket({
 
     ws.onclose = () => {
       setConnected(false);
-      // Reconnect after 3 seconds if still enabled
+      // Reconnect after 3 seconds if still enabled and under max attempts
       if (enabled && jobId) {
-        reconnectTimerRef.current = setTimeout(connect, 3000);
+        if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+          reconnectAttemptsRef.current++;
+          reconnectTimerRef.current = setTimeout(connect, 3000);
+        } else {
+          onMaxRetriesReachedRef.current?.();
+        }
       }
     };
 

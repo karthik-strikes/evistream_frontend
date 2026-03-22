@@ -2,8 +2,11 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
 import { projectsService } from '@/services';
-import { Project as APIProject, CreateProjectRequest } from '@/types/api';
+import { projectMembersService } from '@/services/project-members.service';
+import { Project as APIProject, CreateProjectRequest, MyPermissionsResponse } from '@/types/api';
 import { getErrorMessage } from '@/lib/utils';
+import { apiClient } from '@/lib/api';
+import { useAuth } from '@/contexts/AuthContext';
 
 // Re-export Project type from API
 export type Project = APIProject;
@@ -18,6 +21,8 @@ interface ProjectContextType {
   updateProject: (id: string, updates: Partial<CreateProjectRequest>) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
   refreshProjects: () => Promise<void>;
+  myPermissions: MyPermissionsResponse | null;
+  isOwner: boolean;
 }
 
 const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
@@ -50,10 +55,13 @@ function safeRemoveItem(key: string): void {
 }
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
+  const { loading: authLoading } = useAuth();
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProject, setSelectedProjectState] = useState<Project | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [myPermissions, setMyPermissions] = useState<MyPermissionsResponse | null>(null);
+  const [isOwner, setIsOwner] = useState(false);
   const refreshInFlight = useRef(false);
 
   const refreshProjects = useCallback(async () => {
@@ -84,10 +92,16 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Load projects from API on mount
+  // Load projects from API once auth has finished loading
   useEffect(() => {
-    refreshProjects();
-  }, [refreshProjects]);
+    if (authLoading) return;
+    const token = apiClient.getToken();
+    if (token) {
+      refreshProjects();
+    } else {
+      setLoading(false);
+    }
+  }, [authLoading, refreshProjects]);
 
   // Restore selected project from localStorage
   useEffect(() => {
@@ -106,6 +120,38 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       setSelectedProjectState(null);
     }
   }, [projects]);
+
+  // Fetch permissions for selected project
+  useEffect(() => {
+    if (!selectedProject) {
+      setMyPermissions(null);
+      setIsOwner(false);
+      return;
+    }
+    const token = apiClient.getToken();
+    if (!token) return;
+
+    projectMembersService.getMyPermissions(selectedProject.id)
+      .then((perms) => {
+        setMyPermissions(perms);
+        setIsOwner(perms.is_owner);
+      })
+      .catch((err: unknown) => {
+        console.error('Failed to fetch permissions:', err);
+        setMyPermissions({
+          is_owner: false,
+          can_view_docs: true,
+          can_upload_docs: false,
+          can_create_forms: false,
+          can_run_extractions: false,
+          can_view_results: true,
+          can_adjudicate: false,
+          can_qa_review: false,
+          can_manage_assignments: false,
+        });
+        setIsOwner(false);
+      });
+  }, [selectedProject]);
 
   const createProject = useCallback(async (name: string, description?: string): Promise<Project> => {
     const request: CreateProjectRequest = { name, description };
@@ -187,7 +233,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     updateProject,
     deleteProject,
     refreshProjects,
-  }), [projects, selectedProject, loading, error, setSelectedProject, createProject, updateProject, deleteProject, refreshProjects]);
+    myPermissions,
+    isOwner,
+  }), [projects, selectedProject, loading, error, setSelectedProject, createProject, updateProject, deleteProject, refreshProjects, myPermissions, isOwner]);
 
   return (
     <ProjectContext.Provider value={value}>

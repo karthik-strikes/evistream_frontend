@@ -177,8 +177,8 @@ export function PaperChat({ documents, selectedDocIds }: PaperChatProps) {
   };
 
   return (
-    <div className="flex flex-col h-[calc(100vh-8rem)] bg-white">
-      <div className="flex-1 overflow-y-auto px-8 py-6 bg-gray-50">
+    <div className="flex flex-col h-[calc(100vh-8rem)] bg-white dark:bg-[#0a0a0a]">
+      <div className="flex-1 overflow-y-auto px-8 py-6 bg-gray-50 dark:bg-[#050505]">
         <div className="max-w-5xl mx-auto">
           {messages.map((message, index) => (
             <MessageBubble
@@ -200,17 +200,17 @@ export function PaperChat({ documents, selectedDocIds }: PaperChatProps) {
         />
       )}
 
-      <div className="border-t border-gray-200 bg-white px-8 py-4">
+      <div className="border-t border-gray-200 bg-white px-8 py-4 dark:border-[#222] dark:bg-[#0a0a0a]">
         <div className="max-w-5xl mx-auto">
           <div className="flex gap-3 items-end">
             <Button
               onClick={handleReset}
               variant="ghost"
               size="icon"
-              className="flex-shrink-0 h-11 w-11 rounded-xl hover:bg-gray-100"
+              className="flex-shrink-0 h-11 w-11 rounded-xl hover:bg-gray-100 dark:hover:bg-[#1a1a1a]"
               title="Reset conversation"
             >
-              <RotateCcw className="h-5 w-5 text-gray-600" />
+              <RotateCcw className="h-5 w-5 text-gray-600 dark:text-zinc-400" />
             </Button>
 
             <div className="flex-1 relative">
@@ -228,6 +228,7 @@ export function PaperChat({ documents, selectedDocIds }: PaperChatProps) {
                 rows={1}
                 className={cn(
                   'w-full resize-none rounded-xl border border-gray-300 bg-white px-4 py-3 pr-12',
+                  'dark:bg-[#111111] dark:border-[#2a2a2a] dark:text-[#e8e8e8] dark:placeholder:text-zinc-500',
                   'text-sm placeholder:text-gray-400 transition-all duration-200',
                   'focus:border-gray-900 focus:outline-none focus:ring-2 focus:ring-gray-900 focus:ring-opacity-5',
                   'disabled:cursor-not-allowed disabled:opacity-50',

@@ -7,6 +7,7 @@ import { User, LogOut, Settings, Bell, Sun, Moon } from 'lucide-react';
 import { NotificationCenter } from './notification-center';
 import { useTheme } from '@/contexts/ThemeContext';
 import { cn } from '@/lib/utils';
+import { authService } from '@/services/auth.service';
 
 interface NavbarProps {
   title?: string;
@@ -28,9 +29,7 @@ export function Navbar({ title, description }: NavbarProps) {
   }, []);
 
   const handleLogout = () => {
-    sessionStorage.removeItem('auth_token');
-    document.cookie = 'is_logged_in=; path=/; max-age=0; SameSite=Strict';
-    router.push('/login');
+    authService.logout();
   };
 
   const isDashboardOrProjects = pathname === '/dashboard' || pathname === '/projects';
@@ -118,7 +117,7 @@ export function Navbar({ title, description }: NavbarProps) {
                   Account Settings
                 </Link>
                 <div className="h-px bg-gray-200 dark:bg-[#1f1f1f]" />
-                <button onClick={handleLogout} className="flex items-center gap-3 px-4 py-3 text-sm font-medium text-red-600 hover:bg-red-50 rounded-b-lg transition-colors w-full text-left">
+                <button onClick={handleLogout} className="flex items-center gap-3 px-4 py-3 text-sm font-medium text-red-600 hover:bg-red-50 dark:hover:bg-red-900/20 rounded-b-lg transition-colors w-full text-left">
                   <LogOut className="h-4 w-4" />
                   Sign Out
                 </button>

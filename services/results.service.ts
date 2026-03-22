@@ -1,5 +1,5 @@
 import { apiClient } from '@/lib/api';
-import type { ExtractionResult } from '@/types/api';
+import type { ExtractionResult, ConsensusSummary, ConsensusResult, SourceIndexResponse, PageMapResponse } from '@/types/api';
 
 export interface GetResultsOptions {
   projectId?: string;
@@ -30,25 +30,31 @@ export const resultsService = {
     if (!options.extractionId) {
       throw new Error('extractionId is required for export');
     }
-    return apiClient.get<Blob>(`/api/v1/results/extraction/${encodeURIComponent(options.extractionId)}/export?format=csv`, {
-      responseType: 'blob',
-    });
+    const token = apiClient.getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const response = await fetch(`/api/v1/results/extraction/${encodeURIComponent(options.extractionId)}/export?format=csv`, { headers });
+    if (!response.ok) throw new Error(`Export failed with status ${response.status}`);
+    return response.blob();
   },
 
   async exportJSON(options: GetResultsOptions = {}): Promise<Blob> {
     if (!options.extractionId) {
       throw new Error('extractionId is required for export');
     }
-    return apiClient.get<Blob>(`/api/v1/results/extraction/${encodeURIComponent(options.extractionId)}/export?format=json`, {
-      responseType: 'blob',
-    });
+    const token = apiClient.getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const response = await fetch(`/api/v1/results/extraction/${encodeURIComponent(options.extractionId)}/export?format=json`, { headers });
+    if (!response.ok) throw new Error(`Export failed with status ${response.status}`);
+    return response.blob();
   },
 
   async saveManualExtraction(data: {
     document_id: string;
     form_id: string;
     extracted_data: Record<string, any>;
-    extraction_type: 'manual';
+    extraction_type: 'manual' | 'consensus';
   }): Promise<ExtractionResult> {
     return apiClient.post<ExtractionResult>('/api/v1/results/manual', data);
   },
@@ -61,5 +67,42 @@ export const resultsService = {
     params.append('document_id', options.document_id);
     params.append('form_id', options.form_id);
     return apiClient.get<unknown>(`/api/v1/results/compare?${params.toString()}`);
+  },
+
+  async getConsensusSummary(projectId: string, formId: string): Promise<ConsensusSummary> {
+    return apiClient.get<ConsensusSummary>(
+      `/api/v1/results/consensus-summary?project_id=${projectId}&form_id=${formId}`
+    );
+  },
+
+  async saveConsensus(data: {
+    document_id: string;
+    form_id: string;
+    review_mode: 'ai_only' | 'ai_manual';
+    field_decisions: Record<string, any>;
+    agreed_count: number;
+    disputed_count: number;
+    total_fields: number;
+    agreement_pct: number | null;
+  }): Promise<ConsensusResult> {
+    return apiClient.post<ConsensusResult>('/api/v1/results/consensus', data);
+  },
+
+  async getConsensus(documentId: string, formId: string): Promise<ConsensusResult | null> {
+    try {
+      return await apiClient.get<ConsensusResult>(
+        `/api/v1/results/consensus/${documentId}?form_id=${formId}`
+      );
+    } catch {
+      return null;
+    }
+  },
+
+  async getSourceIndex(resultId: string): Promise<SourceIndexResponse> {
+    return apiClient.get<SourceIndexResponse>(`/api/v1/results/${resultId}/source-index`);
+  },
+
+  async getPageMap(resultId: string): Promise<PageMapResponse> {
+    return apiClient.get<PageMapResponse>(`/api/v1/results/${resultId}/page-map`);
   },
 };

@@ -32,7 +32,7 @@ export function StatsCard({
           {title}
         </CardTitle>
         {Icon && (
-          <Icon className="h-4 w-4 text-gray-500" />
+          <Icon className="h-4 w-4 text-gray-500 dark:text-gray-400" />
         )}
       </CardHeader>
       <CardContent>
@@ -50,7 +50,7 @@ export function StatsCard({
               <div
                 className={cn(
                   'inline-flex items-center text-xs font-medium',
-                  trend.isPositive ? 'text-green-600' : 'text-red-600'
+                  trend.isPositive ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'
                 )}
               >
                 {trend.isPositive ? (
@@ -62,7 +62,7 @@ export function StatsCard({
               </div>
             )}
             {description && (
-              <p className="text-xs text-gray-600">
+              <p className="text-xs text-gray-600 dark:text-zinc-400">
                 {description}
               </p>
             )}
@@ -88,18 +88,18 @@ export function StatsCardCompact({
   className?: string;
 }) {
   const colorClasses = {
-    gray: 'bg-gray-100 text-gray-600',
-    blue: 'bg-zinc-100 text-zinc-700',
-    green: 'bg-green-100 text-green-600',
-    yellow: 'bg-yellow-100 text-yellow-600',
-    red: 'bg-red-100 text-red-600',
-    purple: 'bg-purple-100 text-purple-600',
+    gray: 'bg-gray-100 text-gray-600 dark:bg-zinc-800 dark:text-zinc-300',
+    blue: 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
+    green: 'bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400',
+    yellow: 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/30 dark:text-yellow-400',
+    red: 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400',
+    purple: 'bg-purple-100 text-purple-600 dark:bg-purple-900/30 dark:text-purple-400',
   };
 
   return (
     <div
       className={cn(
-        'flex items-center gap-3 rounded-lg border border-border bg-white p-4',
+        'flex items-center gap-3 rounded-lg border border-border bg-white dark:bg-[#111111] p-4',
         className
       )}
     >
@@ -109,8 +109,8 @@ export function StatsCardCompact({
         </div>
       )}
       <div className="flex-1">
-        <p className="text-sm text-gray-600">{label}</p>
-        <p className="text-xl font-semibold text-gray-900">{value}</p>
+        <p className="text-sm text-gray-600 dark:text-zinc-400">{label}</p>
+        <p className="text-xl font-semibold text-gray-900 dark:text-zinc-100">{value}</p>
       </div>
     </div>
   );

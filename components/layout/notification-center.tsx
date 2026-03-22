@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { X, CheckCircle2, AlertCircle, Info, Loader2, Clock, PlayCircle, FileText, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -21,13 +21,7 @@ export function NotificationCenter({ isOpen, onClose }: NotificationCenterProps)
 
   const unreadCount = notifications.filter(n => !n.read).length;
 
-  useEffect(() => {
-    if (isOpen) {
-      fetchNotifications();
-    }
-  }, [isOpen]);
-
-  const fetchNotifications = async () => {
+  const fetchNotifications = useCallback(async () => {
     setLoading(true);
     try {
       const data = await notificationsService.getAll();
@@ -37,7 +31,13 @@ export function NotificationCenter({ isOpen, onClose }: NotificationCenterProps)
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (isOpen) {
+      fetchNotifications();
+    }
+  }, [isOpen, fetchNotifications]);
 
   const markAsRead = async (id: string) => {
     try {
@@ -71,27 +71,27 @@ export function NotificationCenter({ isOpen, onClose }: NotificationCenterProps)
   const getIcon = (type: Notification['type']) => {
     switch (type) {
       case 'success':
-        return <CheckCircle2 className="h-5 w-5 text-green-600" />;
+        return <CheckCircle2 className="h-5 w-5 text-green-600 dark:text-green-400" />;
       case 'error':
-        return <AlertCircle className="h-5 w-5 text-red-600" />;
+        return <AlertCircle className="h-5 w-5 text-red-600 dark:text-red-400" />;
       case 'warning':
-        return <AlertCircle className="h-5 w-5 text-yellow-600" />;
+        return <AlertCircle className="h-5 w-5 text-yellow-600 dark:text-yellow-400" />;
       default:
-        return <Info className="h-5 w-5 text-zinc-700" />;
+        return <Info className="h-5 w-5 text-zinc-700 dark:text-zinc-400" />;
     }
   };
 
   const getBackgroundColor = (type: Notification['type'], read: boolean) => {
-    if (read) return 'bg-white';
+    if (read) return 'bg-white dark:bg-[#111111]';
     switch (type) {
       case 'success':
-        return 'bg-green-50';
+        return 'bg-green-50 dark:bg-green-900/20';
       case 'error':
-        return 'bg-red-50';
+        return 'bg-red-50 dark:bg-red-900/20';
       case 'warning':
-        return 'bg-yellow-50';
+        return 'bg-yellow-50 dark:bg-yellow-900/20';
       default:
-        return 'bg-zinc-50';
+        return 'bg-zinc-50 dark:bg-zinc-800/50';
     }
   };
 
@@ -108,21 +108,21 @@ export function NotificationCenter({ isOpen, onClose }: NotificationCenterProps)
       {/* Slide-out Panel */}
       <div
         className={cn(
-          'fixed top-0 right-0 h-full w-full sm:w-96 bg-white shadow-2xl z-50 transition-transform duration-300 ease-in-out',
+          'fixed top-0 right-0 h-full w-full sm:w-96 bg-white dark:bg-[#111111] shadow-2xl z-50 transition-transform duration-300 ease-in-out',
           isOpen ? 'translate-x-0' : 'translate-x-full'
         )}
       >
         {/* Header */}
-        <div className="flex items-center justify-between p-4 border-b border-gray-200">
+        <div className="flex items-center justify-between p-4 border-b border-gray-200 dark:border-[#222]">
           <div>
             <h2 className="text-lg font-semibold">Notifications</h2>
             {unreadCount > 0 && (
-              <p className="text-sm text-gray-500">{unreadCount} unread</p>
+              <p className="text-sm text-gray-500 dark:text-zinc-400">{unreadCount} unread</p>
             )}
           </div>
           <button
             onClick={onClose}
-            className="p-2 hover:bg-gray-100 rounded-lg transition-colors"
+            className="p-2 hover:bg-gray-100 dark:hover:bg-white/5 rounded-lg transition-colors"
           >
             <X className="h-5 w-5" />
           </button>
@@ -130,7 +130,7 @@ export function NotificationCenter({ isOpen, onClose }: NotificationCenterProps)
 
         {/* Actions */}
         {notifications.length > 0 && (
-          <div className="flex items-center gap-2 p-4 border-b border-gray-200 bg-gray-50">
+          <div className="flex items-center gap-2 p-4 border-b border-gray-200 dark:border-[#222] bg-gray-50 dark:bg-[#111111]">
             {unreadCount > 0 && (
               <Button variant="ghost" size="sm" onClick={markAllAsRead}>
                 Mark all as read
@@ -150,23 +150,23 @@ export function NotificationCenter({ isOpen, onClose }: NotificationCenterProps)
             </div>
           ) : notifications.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-full text-center p-8">
-              <div className="rounded-full bg-gray-100 p-4 mb-4">
+              <div className="rounded-full bg-gray-100 dark:bg-zinc-800 p-4 mb-4">
                 <CheckCircle2 className="h-12 w-12 text-gray-400" />
               </div>
-              <h3 className="text-lg font-semibold text-gray-900 mb-2">
+              <h3 className="text-lg font-semibold text-gray-900 dark:text-white mb-2">
                 All caught up!
               </h3>
-              <p className="text-sm text-gray-500">
+              <p className="text-sm text-gray-500 dark:text-zinc-400">
                 No new notifications right now
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-gray-200">
+            <div className="divide-y divide-gray-200 dark:divide-[#222]">
               {notifications.map((notification) => (
                 <div
                   key={notification.id}
                   className={cn(
-                    'p-4 transition-colors hover:bg-gray-50 cursor-pointer',
+                    'p-4 transition-colors hover:bg-gray-50 dark:hover:bg-white/5 cursor-pointer',
                     getBackgroundColor(notification.type, notification.read),
                     !notification.read && 'border-l-4 border-l-zinc-400'
                   )}
@@ -178,18 +178,18 @@ export function NotificationCenter({ isOpen, onClose }: NotificationCenterProps)
                     </div>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-start justify-between gap-2">
-                        <h4 className="text-sm font-semibold text-gray-900">
+                        <h4 className="text-sm font-semibold text-gray-900 dark:text-zinc-100">
                           {notification.title}
                         </h4>
                         {!notification.read && (
                           <div className="flex-shrink-0 w-2 h-2 bg-zinc-700 rounded-full mt-1" />
                         )}
                       </div>
-                      <p className="text-sm text-gray-600 mt-1">
+                      <p className="text-sm text-gray-600 dark:text-zinc-400 mt-1">
                         {notification.message}
                       </p>
                       <div className="flex items-center gap-2 mt-2">
-                        <span className="text-xs text-gray-500">
+                        <span className="text-xs text-gray-500 dark:text-zinc-500">
                           {formatDate(notification.created_at)}
                         </span>
                       </div>
@@ -233,8 +233,8 @@ export function ActivityTimeline() {
       description: 'Job #123 finished successfully',
       metadata: '15 results extracted',
       timestamp: new Date(Date.now() - 2 * 60 * 1000),
-      color: 'text-green-600',
-      bgColor: 'bg-green-100',
+      color: 'text-green-600 dark:text-green-400',
+      bgColor: 'bg-green-100 dark:bg-green-900/30',
     },
     {
       id: '2',
@@ -244,8 +244,8 @@ export function ActivityTimeline() {
       description: 'research_paper.pdf',
       metadata: '2.4 MB',
       timestamp: new Date(Date.now() - 5 * 60 * 1000),
-      color: 'text-zinc-700',
-      bgColor: 'bg-zinc-100',
+      color: 'text-zinc-700 dark:text-zinc-400',
+      bgColor: 'bg-zinc-100 dark:bg-zinc-800',
     },
     {
       id: '3',
@@ -255,8 +255,8 @@ export function ActivityTimeline() {
       description: 'Downloaded results.csv',
       metadata: '15 rows',
       timestamp: new Date(Date.now() - 10 * 60 * 1000),
-      color: 'text-purple-600',
-      bgColor: 'bg-purple-100',
+      color: 'text-purple-600 dark:text-purple-400',
+      bgColor: 'bg-purple-100 dark:bg-purple-900/30',
     },
   ];
 
@@ -272,21 +272,21 @@ export function ActivityTimeline() {
                 <Icon className={cn('h-5 w-5', activity.color)} />
               </div>
               {index < activities.length - 1 && (
-                <div className="w-0.5 h-full bg-gray-200 mt-2" />
+                <div className="w-0.5 h-full bg-gray-200 dark:bg-[#2a2a2a] mt-2" />
               )}
             </div>
 
             {/* Content */}
             <div className="flex-1 pb-8">
-              <div className="bg-white border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow">
-                <h4 className="font-semibold text-gray-900">{activity.title}</h4>
-                <p className="text-sm text-gray-600 mt-1">{activity.description}</p>
+              <div className="bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#222] rounded-lg p-4 hover:shadow-md transition-shadow">
+                <h4 className="font-semibold text-gray-900 dark:text-zinc-100">{activity.title}</h4>
+                <p className="text-sm text-gray-600 dark:text-zinc-400 mt-1">{activity.description}</p>
                 {activity.metadata && (
-                  <p className="text-xs text-gray-500 mt-1">{activity.metadata}</p>
+                  <p className="text-xs text-gray-500 dark:text-zinc-500 mt-1">{activity.metadata}</p>
                 )}
                 <div className="flex items-center gap-2 mt-2">
-                  <Clock className="h-3 w-3 text-gray-400" />
-                  <span className="text-xs text-gray-500">
+                  <Clock className="h-3 w-3 text-gray-400 dark:text-zinc-600" />
+                  <span className="text-xs text-gray-500 dark:text-zinc-500">
                     {formatDate(activity.timestamp.toISOString())}
                   </span>
                 </div>

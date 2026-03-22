@@ -18,12 +18,14 @@ import {
   MessageSquare,
   PanelLeft,
   PanelLeftClose,
-  CheckSquare,
+  CheckSquare2,
+  Shield,
 } from 'lucide-react';
 import { Logo } from '@/components/ui/logo';
 import { cn } from '@/lib/utils';
 import { typography } from '@/lib/typography';
 import type { LucideIcon } from 'lucide-react';
+import { useAuth } from '@/contexts/AuthContext';
 
 interface NavigationItem {
   name: string;
@@ -39,18 +41,10 @@ interface NavigationSection {
 
 const navigationSections: NavigationSection[] = [
   {
-    title: 'Monitoring',
-    items: [
-{ name: 'Jobs Monitor', href: '/jobs', icon: Loader2 },
-      { name: 'Activity Feed', href: '/activity', icon: Activity },
-    ],
-  },
-  {
     title: 'Data Management',
     items: [
       { name: 'Documents', href: '/documents', icon: FileText },
       { name: 'Forms', href: '/forms', icon: FileCheck },
-      { name: 'Paper Chat', href: '/chat', icon: MessageSquare },
     ],
   },
   {
@@ -58,8 +52,14 @@ const navigationSections: NavigationSection[] = [
     items: [
       { name: 'Run Extraction', href: '/extractions', icon: PlayCircle },
       { name: 'Manual Extract', href: '/manual-extraction', icon: Edit },
-      { name: 'Consensus', href: '/consensus', icon: CheckSquare },
+      { name: 'Consensus', href: '/consensus', icon: CheckSquare2 },
       { name: 'Results', href: '/results', icon: BarChart3 },
+    ],
+  },
+  {
+    title: 'Monitoring',
+    items: [
+      { name: 'Jobs', href: '/jobs', icon: Loader2 },
     ],
   },
   {
@@ -73,11 +73,12 @@ const navigationSections: NavigationSection[] = [
 export function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(true);
+  const { isAdmin } = useAuth();
 
   return (
     <div
       className={cn(
-        'sticky top-0 flex h-screen flex-col border-r border-gray-200 bg-gray-50 transition-all duration-200 flex-shrink-0 overflow-y-auto dark:bg-[#0a0a0a] dark:border-[#1a1a1a]',
+        'sticky top-0 flex h-screen flex-col border-r border-gray-200 bg-gray-50 transition-[width] duration-200 flex-shrink-0 overflow-y-auto dark:bg-[#0a0a0a] dark:border-[#1a1a1a]',
         collapsed ? 'w-16' : 'w-56'
       )}
     >
@@ -86,7 +87,7 @@ export function Sidebar() {
           <Logo size={28} />
           {!collapsed && (
             <div className="flex flex-col">
-              <span className="text-base font-bold leading-none dark:text-white">eviStream</span>
+              <span className="text-base font-bold leading-none dark:text-white">eviStreams</span>
               <span className="text-xs text-gray-500 leading-none mt-0.5 dark:text-[#888888]">Medical AI</span>
             </div>
           )}
@@ -116,7 +117,10 @@ export function Sidebar() {
       )}
 
       <nav className="flex-1 overflow-y-auto p-2">
-        {navigationSections.map((section, sectionIndex) => (
+        {[...navigationSections, ...(isAdmin ? [{
+          title: 'Administration',
+          items: [{ name: 'Admin Panel', href: '/admin', icon: Shield }],
+        }] : [])].map((section, sectionIndex) => (
           <div key={section.title} className={sectionIndex > 0 ? 'mt-6' : ''}>
             {!collapsed && (
               <h3 className={cn(typography.nav.section, 'px-3 mb-2')}>
@@ -124,7 +128,7 @@ export function Sidebar() {
               </h3>
             )}
             {collapsed && sectionIndex > 0 && (
-              <div className="h-px bg-gray-100 my-2 mx-2 dark:bg-[#1f1f1f]" />
+              <div className="h-px bg-gray-100 my-2 mx-2 dark:bg-[#2a2a2a]" />
             )}
             <div className="space-y-1">
               {section.items.map((item) => {
@@ -152,6 +156,7 @@ export function Sidebar() {
           </div>
         ))}
       </nav>
+
     </div>
   );
 }

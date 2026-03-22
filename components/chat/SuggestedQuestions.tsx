@@ -27,7 +27,7 @@ export function SuggestedQuestions({ questions, onSelect, disabled }: SuggestedQ
             onClick={() => onSelect(question)}
             disabled={disabled}
             className={cn(
-              'px-4 py-2 rounded-xl text-sm bg-white border border-gray-200',
+              'px-4 py-2 rounded-xl text-sm bg-white border border-gray-200 dark:bg-[#111111] dark:border-[#222] dark:text-zinc-100',
               'hover:border-gray-300 hover:shadow-md transition-all duration-200',
               'disabled:opacity-50 disabled:cursor-not-allowed',
               'text-gray-700 hover:text-gray-900 font-medium'

@@ -39,7 +39,7 @@ export function SuccessAnimation({
 
       {/* Success Card */}
       <div className="relative animate-scale-in">
-        <div className="bg-white rounded-2xl shadow-2xl p-8 max-w-sm mx-4">
+        <div className="bg-white dark:bg-[#111111] rounded-2xl shadow-2xl p-8 max-w-sm mx-4">
           {/* Success Icon with pulse */}
           <div className="flex justify-center mb-4">
             <div className="relative">
@@ -51,7 +51,7 @@ export function SuccessAnimation({
           </div>
 
           {/* Message */}
-          <h3 className="text-2xl font-bold text-center text-gray-900 mb-2 animate-slide-up">
+          <h3 className="text-2xl font-bold text-center text-gray-900 dark:text-zinc-100 mb-2 animate-slide-up">
             {message}
           </h3>
 
@@ -131,7 +131,7 @@ export function ProgressCelebration({
       <div className="absolute inset-0 bg-gradient-to-br from-blue-500/20 to-purple-500/20 animate-fade-in" />
 
       <div className="relative animate-scale-in-bounce">
-        <div className="bg-white rounded-3xl shadow-2xl p-12 max-w-md mx-4 text-center">
+        <div className="bg-white dark:bg-[#111111] rounded-3xl shadow-2xl p-12 max-w-md mx-4 text-center">
           {/* Animated Trophy/Star */}
           <div className="flex justify-center mb-6">
             <div className="relative">
@@ -141,12 +141,12 @@ export function ProgressCelebration({
           </div>
 
           {/* Title */}
-          <h2 className="text-3xl font-bold text-gray-900 mb-2 animate-slide-up">
+          <h2 className="text-3xl font-bold text-gray-900 dark:text-zinc-100 mb-2 animate-slide-up">
             {title}
           </h2>
 
           {/* Subtitle */}
-          <p className="text-lg text-gray-600 animate-slide-up delay-100">
+          <p className="text-lg text-gray-600 dark:text-zinc-400 animate-slide-up delay-100">
             {subtitle}
           </p>
 

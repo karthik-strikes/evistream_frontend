@@ -4,7 +4,7 @@ import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
 import { formsService } from '@/services';
 import { Form, CreateFormRequest, FormField } from '@/types/api';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useMemo } from 'react';
 import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
 import {
@@ -13,6 +13,7 @@ import {
   Badge,
   Dialog,
   DialogContent,
+  DialogTitle,
   Spinner,
 } from '@/components/ui';
 import { Plus, Trash2, FileText, Code, AlertCircle, Check, Edit3, ThumbsUp, ThumbsDown, MessageSquare, ChevronDown, ChevronUp, ChevronRight } from 'lucide-react';
@@ -20,9 +21,11 @@ import { JobLogsViewer } from '@/components/JobLogsViewer';
 import { cn, formatDate, getErrorMessage } from '@/lib/utils';
 import { typography } from '@/lib/typography';
 import { statusColors, statusBgs } from '@/lib/colors';
+import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 
 export default function FormsPage() {
   const { selectedProject } = useProject();
+  const { can_create_forms, can_view_docs } = useProjectPermissions();
   const { toast } = useToast();
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [selectedForm, setSelectedForm] = useState<Form | null>(null);
@@ -30,28 +33,33 @@ export default function FormsPage() {
   const [reviewForm, setReviewForm] = useState<Form | null>(null);
   const [editForm, setEditForm] = useState<Form | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  // Debounce search query (300ms) so we don't hit the API on every keystroke
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(searchQuery.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   const queryClient = useQueryClient();
   const { data: forms = [], isLoading, error: queryError } = useQuery({
-    queryKey: ['forms', selectedProject?.id],
-    queryFn: () => formsService.getAll(selectedProject!.id),
+    queryKey: ['forms', selectedProject?.id, debouncedSearch],
+    queryFn: () => formsService.getAll(selectedProject!.id, debouncedSearch || undefined),
     enabled: !!selectedProject,
     refetchInterval: (query) => {
       const data = query.state.data ?? [];
-      return data.some((f: Form) => f.status === 'generating' || f.status === 'regenerating') ? 4000 : false;
+      return data.some((f: Form) => f.status === 'generating' || f.status === 'regenerating' || f.status === 'awaiting_review') ? 2000 : false;
     },
     placeholderData: keepPreviousData,
   });
 
   const error = queryError ? getErrorMessage(queryError as any, 'Failed to load forms') : null;
 
-  const filteredForms = searchQuery.trim()
-    ? forms.filter((f) => f.form_name?.toLowerCase().includes(searchQuery.toLowerCase()))
-    : forms;
+  const filteredForms = forms;
 
-  const handleGenerateCode = async (formId: string) => {
+  const handleGenerateCode = async (formId: string, enableReview?: boolean) => {
     try {
-      const response = await formsService.generateCode(formId);
+      const response = await formsService.generateCode(formId, enableReview);
 
       // Set active job ID for live log streaming
       if (response.job_id) {
@@ -138,21 +146,11 @@ export default function FormsPage() {
   };
 
   const handleUpdateForm = async (formId: string, data: Partial<CreateFormRequest>) => {
+    await formsService.update(formId, data);
     try {
-      await formsService.update(formId, data);
-      toast({
-        title: 'Success',
-        description: 'Form updated successfully',
-        variant: 'success',
-      });
       await queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id] });
-    } catch (err: any) {
-      console.error('Failed to update form:', err);
-      toast({
-        title: 'Error',
-        description: getErrorMessage(err, 'Failed to update form'),
-        variant: 'error',
-      });
+    } catch (err) {
+      console.error('Failed to refresh forms list after update:', err);
     }
   };
 
@@ -165,6 +163,16 @@ export default function FormsPage() {
           <p className="text-yellow-600 text-sm mt-1">
             Please select a project from the dropdown above to manage forms.
           </p>
+        </div>
+      </DashboardLayout>
+    );
+  }
+
+  if (!can_view_docs) {
+    return (
+      <DashboardLayout title="Forms" description="Create and manage extraction forms">
+        <div className="flex items-center justify-center h-64">
+          <p className="text-muted-foreground">You do not have permission to view forms in this project.</p>
         </div>
       </DashboardLayout>
     );
@@ -194,10 +202,12 @@ export default function FormsPage() {
           <p className={cn(typography.emptyState.description, "mb-6")}>
             Create your first extraction form to start extracting data from documents.
           </p>
+          {can_create_forms && (
           <Button onClick={() => setShowCreateDialog(true)}>
             <Plus className="h-4 w-4 mr-2" />
             Create Your First Form
           </Button>
+          )}
         </Card>
       ) : (
         <div className="space-y-6">
@@ -215,6 +225,7 @@ export default function FormsPage() {
                 className="w-56 text-sm text-gray-900 dark:text-white bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-2 pl-9 pr-3 outline-none focus:border-gray-400 dark:focus:border-[#3f3f3f] placeholder:text-gray-400"
               />
             </div>
+            {can_create_forms && (
             <button
               onClick={() => setShowCreateDialog(true)}
               className="text-sm font-semibold text-white bg-gray-900 dark:bg-white dark:text-black border-none rounded-lg px-4 py-2 cursor-pointer flex items-center gap-1.5 hover:bg-gray-700 dark:hover:bg-zinc-100 transition-colors"
@@ -222,6 +233,7 @@ export default function FormsPage() {
               <Plus className="h-4 w-4" />
               Create Form
             </button>
+            )}
           </div>
 
           {/* Live Log Streaming */}
@@ -296,8 +308,38 @@ export default function FormsPage() {
                 </div>
               )}
 
+              {/* Draft Section */}
+              {filteredForms.filter(f => f.status === 'draft').length > 0 && (
+                <div>
+                  <div className="flex items-center gap-2 mb-4">
+                    <div className="h-1.5 w-1.5 rounded-full bg-gray-400" />
+                    <h2 className={cn(typography.sectionHeader.default, "text-gray-500")}>
+                      Draft
+                    </h2>
+                    <span className={cn(typography.body.tiny, "text-gray-400")}>
+                      {filteredForms.filter(f => f.status === 'draft').length}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {filteredForms
+                      .filter(f => f.status === 'draft')
+                      .map((form) => (
+                        <FormCard
+                          key={form.id}
+                          form={form}
+                          onGenerateCode={handleGenerateCode}
+                          onDelete={handleDeleteForm}
+                          onClick={() => setSelectedForm(form)}
+                          onReview={(form) => setReviewForm(form)}
+                          onEdit={(form) => setEditForm(form)}
+                        />
+                      ))}
+                  </div>
+                </div>
+              )}
+
               {/* Active Section */}
-              {filteredForms.filter(f => f.status === 'active' || f.status === 'draft').length > 0 && (
+              {filteredForms.filter(f => f.status === 'active').length > 0 && (
                 <div>
                   <div className="flex items-center gap-2 mb-4">
                     <div className="h-1.5 w-1.5 rounded-full bg-green-500" />
@@ -305,12 +347,12 @@ export default function FormsPage() {
                       Active
                     </h2>
                     <span className={cn(typography.body.tiny, "text-gray-400")}>
-                      {filteredForms.filter(f => f.status === 'active' || f.status === 'draft').length}
+                      {filteredForms.filter(f => f.status === 'active').length}
                     </span>
                   </div>
                   <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                     {filteredForms
-                      .filter(f => f.status === 'active' || f.status === 'draft')
+                      .filter(f => f.status === 'active')
                       .map((form) => (
                         <FormCard
                           key={form.id}
@@ -333,6 +375,7 @@ export default function FormsPage() {
       {showCreateDialog && (
         <CreateFormDialog
           projectId={selectedProject.id}
+          existingForms={forms}
           onClose={() => setShowCreateDialog(false)}
           onSuccess={() => {
             setShowCreateDialog(false);
@@ -362,6 +405,7 @@ export default function FormsPage() {
       {editForm && (
         <EditFormDialog
           form={editForm}
+          existingForms={forms}
           onClose={() => setEditForm(null)}
           onSuccess={() => {
             setEditForm(null);
@@ -385,13 +429,22 @@ function FormCard({
   onEdit,
 }: {
   form: Form;
-  onGenerateCode: (id: string) => void;
+  onGenerateCode: (id: string, enableReview?: boolean) => void;
   onDelete: (id: string) => void;
   onClick: () => void;
   onReview?: (form: Form) => void;
   onEdit?: (form: Form) => void;
 }) {
   const [showError, setShowError] = useState(false);
+
+  const isGenerating = form.status === 'generating' || form.status === 'regenerating';
+
+  const elapsedLabel = (dateStr: string) => {
+    const mins = Math.floor((Date.now() - new Date(dateStr).getTime()) / 60000);
+    if (mins < 1) return 'just started';
+    if (mins === 1) return '1 min';
+    return `${mins} min`;
+  };
 
   const statusConfig: Record<string, { label: string; cls: string }> = {
     draft: { label: 'Draft', cls: 'text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a]' },
@@ -404,6 +457,7 @@ function FormCard({
 
   const s = statusConfig[form.status];
   const isFailed = form.status === 'failed';
+  const isDraft = form.status === 'draft';
   const isReview = form.status === 'awaiting_review';
 
   const timeAgo = (dateStr: string) => {
@@ -424,6 +478,7 @@ function FormCard({
         "bg-white rounded-xl border border-gray-200 flex flex-col transition-all duration-150 cursor-pointer relative overflow-hidden hover:shadow-card-hover hover:-translate-y-px dark:bg-[#111111] dark:border-[#1f1f1f]",
         isFailed && "border-l-[4px] border-l-purple-500 dark:border-l-purple-400 bg-gradient-to-r from-purple-50 to-white dark:from-purple-400/10 dark:to-[#111111]",
         isReview && "border-l-[4px] border-l-amber-500 dark:border-l-amber-400 bg-gradient-to-r from-amber-50 to-white dark:from-amber-400/10 dark:to-[#111111]",
+        isDraft && "border-l-[4px] border-l-gray-400 dark:border-l-zinc-500",
       )}
     >
       <div className="pt-5 px-[22px]" onClick={onClick}>
@@ -480,6 +535,21 @@ function FormCard({
         </div>
       )}
 
+      {/* Draft CTA */}
+      {isDraft && (
+        <div className="px-[22px] pb-3.5">
+          <button
+            onClick={e => { e.stopPropagation(); onGenerateCode(form.id); }}
+            className="w-full text-sm font-semibold rounded-lg py-2.5 cursor-pointer flex items-center justify-center gap-2 transition-all duration-200 hover:-translate-y-px text-white border-none bg-gradient-to-br from-gray-700 to-gray-900 shadow-[0_4px_14px_rgba(0,0,0,0.18)] dark:from-zinc-600 dark:to-zinc-800"
+          >
+            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="4 7 8 3 12 7"/><polyline points="4 13 8 9 12 13"/>
+            </svg>
+            Generate Code
+          </button>
+        </div>
+      )}
+
       {/* Review CTA */}
       {isReview && onReview && (
         <div className="px-[22px] pb-3.5">
@@ -492,6 +562,22 @@ function FormCard({
             </svg>
             Review Schema
           </button>
+        </div>
+      )}
+
+      {/* Generating progress indicator */}
+      {isGenerating && (
+        <div className="px-[22px] pb-3.5">
+          <div className="flex items-center gap-2 mb-1.5">
+            <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse shrink-0" />
+            <span className="text-xs text-blue-600 dark:text-blue-400 font-medium">
+              {form.status === 'regenerating' ? 'Regenerating code…' : 'Generating code…'} (~5–10 min)
+            </span>
+            <span className="text-xs text-gray-400 dark:text-zinc-500 ml-auto shrink-0">{elapsedLabel(form.updated_at)}</span>
+          </div>
+          <div className="h-[3px] w-full rounded-full bg-blue-100 dark:bg-blue-900/30 overflow-hidden">
+            <div className="h-full rounded-full bg-gradient-to-r from-blue-400 to-indigo-500 animate-[shimmer_2s_linear_infinite]" style={{ width: '45%', backgroundSize: '200% 100%' }} />
+          </div>
         </div>
       )}
 
@@ -521,6 +607,35 @@ function FormCard({
   );
 }
 
+const TYPE_LABELS: Record<string, string> = {
+  text:   "Text",
+  number: "Number",
+  enum:   "Multiple Choice",
+  array:  "Table",
+};
+
+const TYPE_ALIASES: Record<string, string> = {
+  // human-friendly labels
+  "text":             "text",
+  "number":           "number",
+  "multiple choice":  "enum",
+  "table / list":     "array",
+  "table":            "array",
+  "structured object":"array",
+  "object":           "array",
+  // developer aliases
+  text_long:        "text",
+  long_text:        "text",
+  dropdown:         "enum",
+  multiple_choice:  "enum",
+  select:           "enum",
+  list:             "array",
+  integer:          "number",
+  float:            "number",
+  decimal:          "number",
+  boolean:          "text",
+};
+
 // Form Detail Dialog Component
 function FormDetailDialog({
   form,
@@ -530,7 +645,7 @@ function FormDetailDialog({
 }: {
   form: Form;
   onClose: () => void;
-  onGenerateCode: (id: string) => void;
+  onGenerateCode: (id: string, enableReview?: boolean) => void;
   onDelete: (id: string) => void;
 }) {
   const [openSet, setOpenSet] = useState<Set<number>>(new Set());
@@ -570,6 +685,8 @@ function FormDetailDialog({
 
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable) return;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
         setFocus(p => Math.min(p + 1, form.fields.length - 1));
@@ -577,7 +694,7 @@ function FormDetailDialog({
         e.preventDefault();
         setFocus(p => Math.max(p - 1, 0));
       } else if (e.key === 'Enter' || e.key === ' ') {
-        if ((e.target as HTMLElement).tagName !== 'INPUT' && (e.target as HTMLElement).tagName !== 'TEXTAREA' && (e.target as HTMLElement).tagName !== 'BUTTON') {
+        if (tag !== 'BUTTON') {
           e.preventDefault();
           toggle(focus);
         }
@@ -605,6 +722,7 @@ function FormDetailDialog({
   return (
     <Dialog open onOpenChange={onClose}>
       <DialogContent className="max-w-[900px] max-h-[90vh] overflow-y-auto border-0 shadow-2xl p-0 bg-white dark:bg-[#111111]">
+        <DialogTitle className="sr-only">{form.form_name}</DialogTitle>
         <style>{`
           @keyframes shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
           .field-row-detail { transition: all 0.15s ease; outline: none; }
@@ -670,7 +788,7 @@ function FormDetailDialog({
             {/* Legend */}
             <div className="flex gap-4 flex-wrap">
               {Object.keys(typeColors).map((type) => (
-                <span key={type} className="text-xs font-medium text-gray-400 dark:text-zinc-500">{type}</span>
+                <span key={type} className="text-xs font-medium text-gray-400 dark:text-zinc-500">{TYPE_LABELS[type] ?? type}</span>
               ))}
             </div>
 
@@ -719,7 +837,7 @@ function FormDetailDialog({
                     </div>
 
                     {/* Type */}
-                    <span className="text-xs font-medium py-0.5 px-2 rounded-[5px] mt-0.5 tracking-tight text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a]">{field.field_type}</span>
+                    <span className="text-xs font-medium py-0.5 px-2 rounded-[5px] mt-0.5 tracking-tight text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a]">{TYPE_LABELS[field.field_type] ?? field.field_type}</span>
 
                     {/* Chevron */}
                     <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="opacity-20 mt-1 transition-transform duration-300 text-gray-700 dark:text-zinc-400" style={{ transform: isOpen ? "rotate(180deg)" : "rotate(0)" }}>
@@ -797,10 +915,12 @@ function FormDetailDialog({
 // Create Form Dialog Component
 function CreateFormDialog({
   projectId,
+  existingForms,
   onClose,
   onSuccess,
 }: {
   projectId: string;
+  existingForms: Form[];
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -822,7 +942,6 @@ function CreateFormDialog({
     text: { bg: "rgba(99, 102, 241, 0.08)", border: "rgba(99, 102, 241, 0.2)", text: "#6366f1" },
     number: { bg: "rgba(8, 145, 178, 0.08)", border: "rgba(8, 145, 178, 0.2)", text: "#0891b2" },
     enum: { bg: "rgba(139, 92, 246, 0.08)", border: "rgba(139, 92, 246, 0.2)", text: "#8b5cf6" },
-    object: { bg: "rgba(245, 158, 11, 0.08)", border: "rgba(245, 158, 11, 0.2)", text: "#f59e0b" },
     array: { bg: "rgba(236, 72, 153, 0.08)", border: "rgba(236, 72, 153, 0.2)", text: "#ec4899" },
   };
 
@@ -891,6 +1010,24 @@ function CreateFormDialog({
     updateField(fieldIndex, { options: newOptions });
   };
 
+  const addSubfield = (fieldIndex: number) => {
+    const field = fields[fieldIndex];
+    const newSub: FormField = { field_name: '', field_type: 'text', field_description: '', example: '' };
+    updateField(fieldIndex, { subform_fields: [...(field.subform_fields || []), newSub] });
+  };
+
+  const removeSubfield = (fieldIndex: number, subIndex: number) => {
+    const field = fields[fieldIndex];
+    updateField(fieldIndex, { subform_fields: (field.subform_fields || []).filter((_: any, i: number) => i !== subIndex) });
+  };
+
+  const updateSubfield = (fieldIndex: number, subIndex: number, updates: Partial<FormField>) => {
+    const field = fields[fieldIndex];
+    const subs = [...(field.subform_fields || [])];
+    subs[subIndex] = { ...subs[subIndex], ...updates };
+    updateField(fieldIndex, { subform_fields: subs });
+  };
+
   const sanitizeFieldName = (name: string): string => {
     // Convert to snake_case: "Author Name" -> "author_name"
     return name
@@ -936,9 +1073,9 @@ function CreateFormDialog({
 
     const normalized: FormField[] = newFields.map((f: any) => ({
       field_name: f.field_name || f.name || '',
-      field_type: f.field_type || f.type || 'text',
+      field_type: (() => { const raw = (f.field_type || f.type || 'text').toLowerCase().trim(); return TYPE_ALIASES[raw] ?? raw; })(),
       field_description: f.field_description || f.description || '',
-      example: f.example || '',
+      example: f.example != null ? String(f.example) : '',
       ...(f.options ? { options: f.options } : {}),
       ...(f.extraction_hints ? { extraction_hints: f.extraction_hints } : {}),
       ...(f.subform_fields ? { subform_fields: f.subform_fields } : {}),
@@ -970,6 +1107,13 @@ function CreateFormDialog({
     // Validation
     if (!formName.trim()) {
       toast({ title: 'Validation', description: 'Please enter a form name', variant: 'error' });
+      return;
+    }
+    const duplicate = existingForms.some(
+      (f) => f.form_name.trim().toLowerCase() === formName.trim().toLowerCase()
+    );
+    if (duplicate) {
+      toast({ title: 'Duplicate name', description: `A form named "${formName.trim()}" already exists. Please use a different name.`, variant: 'error' });
       return;
     }
     if (!formDescription.trim()) {
@@ -1158,7 +1302,7 @@ function CreateFormDialog({
                 <textarea
                   value={jsonInput}
                   onChange={e => { setJsonInput(e.target.value); setJsonError(''); }}
-                  placeholder={`{\n  "form_name": "My Form",\n  "form_description": "Extracts ...",\n  "fields": [\n    {\n      "field_name": "age",\n      "field_type": "number",\n      "field_description": "Patient age in years"\n    }\n  ]\n}`}
+                  placeholder={`{\n  "form_name": "My Form",\n  "form_description": "Extracts ...",\n  "fields": [\n    {\n      "field_name": "age",\n      "field_type": "number",\n      "field_description": "Patient age in years"\n    },\n    {\n      "field_name": "diagnosis",\n      "field_type": "text",\n      "field_description": "Primary diagnosis"\n    },\n    {\n      "field_name": "severity",\n      "field_type": "enum",\n      "field_description": "Severity level",\n      "options": ["mild", "moderate", "severe"]\n    },\n    {\n      "field_name": "interventions",\n      "field_type": "array",\n      "field_description": "List of interventions",\n      "subform_fields": [\n        { "field_name": "drug", "field_type": "text" },\n        { "field_name": "dose_mg", "field_type": "number" }\n      ]\n    }\n  ]\n}\n\n// field_type options: text, number, enum, array\n// aliases: text_long→text, dropdown→enum, list→array, integer→number`}
                   rows={12}
                   className={cn("w-full text-xs font-mono text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-[#1a1a1a] rounded-xl p-4 outline-none leading-[1.7] resize-none mb-3 transition-colors duration-150", jsonError ? "border border-red-500" : "border border-gray-200 dark:border-[#2a2a2a]")}
                   onFocus={e => { e.currentTarget.style.borderColor = jsonError ? "#ef4444" : "#6b7280"; }}
@@ -1170,6 +1314,7 @@ function CreateFormDialog({
                     {jsonError}
                   </div>
                 )}
+
                 <div className="flex gap-2.5 items-center">
                   <label className="text-xs font-semibold text-gray-600 dark:text-zinc-300 rounded-lg py-2 px-4 cursor-pointer flex items-center gap-1.5 transition-all duration-150 hover:bg-gray-100 dark:hover:bg-[#1a1a1a]" style={{ background: "rgba(0,0,0,0.03)", border: "1px solid rgba(0,0,0,0.08)" }}>
                     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M14 10v2a2 2 0 01-2 2H4a2 2 0 01-2-2v-2M8 2v8M5 5l3-3 3 3"/></svg>
@@ -1214,7 +1359,7 @@ function CreateFormDialog({
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2">
                                 <span className={cn("text-sm overflow-hidden text-ellipsis whitespace-nowrap", isOpen ? "font-semibold text-gray-900 dark:text-white" : field.field_name.trim() ? "font-medium text-gray-600 dark:text-zinc-300" : "font-medium text-gray-300 dark:text-zinc-600")}>{field.field_name.trim() || `field_${idx + 1}`}</span>
-                                <span className="text-xs font-medium py-0.5 px-2 rounded-[5px] tracking-tight" style={{ color: tc.text, background: tc.bg, border: `1px solid ${tc.border}` }}>{field.field_type}</span>
+                                <span className="text-xs font-medium py-0.5 px-2 rounded-[5px] tracking-tight" style={{ color: tc.text, background: tc.bg, border: `1px solid ${tc.border}` }}>{TYPE_LABELS[field.field_type] ?? field.field_type}</span>
                                 {field.field_type === 'enum' && field.options && field.options.filter((o: string) => o.trim()).length > 0 && <span className="text-xs text-gray-300 dark:text-zinc-600">{field.options.filter((o: string) => o.trim()).length} opts</span>}
                               </div>
                               {!isOpen && field.field_description.trim() && <div className="text-xs text-gray-400 dark:text-zinc-500 mt-[3px] overflow-hidden text-ellipsis whitespace-nowrap">{field.field_description}</div>}
@@ -1235,7 +1380,7 @@ function CreateFormDialog({
                                     <label className="text-xs font-semibold text-gray-400 dark:text-zinc-600 block mb-1.5">TYPE</label>
                                     <div className="relative">
                                       <select value={field.field_type} onChange={e => updateField(idx, { field_type: e.target.value })} onClick={e => e.stopPropagation()} className="w-full text-sm font-medium rounded-md py-2 pr-7 pl-3 outline-none cursor-pointer appearance-none transition-all duration-150 dark:[color-scheme:dark]" style={{ color: tc.text, background: `${tc.text}08`, border: `1px solid ${tc.text}20` }} onFocus={e => e.currentTarget.style.borderColor = `${tc.text}50`} onBlur={e => e.currentTarget.style.borderColor = `${tc.text}20`}>
-                                        {Object.keys(typeColors).map(t => <option key={t} value={t}>{t}</option>)}
+                                        {Object.keys(typeColors).map(t => <option key={t} value={t}>{TYPE_LABELS[t] ?? t}</option>)}
                                       </select>
                                       <svg width="10" height="10" viewBox="0 0 16 16" fill="none" className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none opacity-35"><path d="M4 6l4 4 4-4" stroke={tc.text} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
                                     </div>
@@ -1256,6 +1401,53 @@ function CreateFormDialog({
                                         add
                                       </button>
                                     </div>
+                                  </div>
+                                )}
+                                {/* Subform fields for array/object types */}
+                                {(field.field_type === 'array' || field.field_type === 'object') && (
+                                  <div className="mb-4 rounded-lg overflow-hidden" style={{ background: `${tc.text}05`, border: `1px solid ${tc.text}18` }}>
+                                    <div className="flex items-center justify-between px-3 py-2" style={{ borderBottom: `1px solid ${tc.text}12` }}>
+                                      <div className="flex items-center gap-2">
+                                        <label className="text-xs font-semibold opacity-70" style={{ color: tc.text }}>SUBFIELDS</label>
+                                        <span className="text-[10px] font-semibold px-1.5 py-[1px] rounded-[4px]" style={{ background: `${tc.text}10`, color: tc.text }}>{(field.subform_fields || []).length}</span>
+                                      </div>
+                                      <button type="button" onClick={e => { e.stopPropagation(); addSubfield(idx); }} className="text-[11px] font-medium flex items-center gap-1 bg-transparent border-none cursor-pointer transition-opacity hover:opacity-100 opacity-60" style={{ color: tc.text }}>
+                                        <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M8 3v10M3 8h10" /></svg>
+                                        Add
+                                      </button>
+                                    </div>
+                                    {(field.subform_fields || []).length > 0 && (
+                                      <div className="divide-y" style={{ borderColor: `${tc.text}10` }}>
+                                        {(field.subform_fields || []).map((sf: FormField, si: number) => {
+                                          const stc = typeColors[sf.field_type] || typeColors.text;
+                                          return (
+                                            <div key={si} className="px-3 py-2.5 flex items-start gap-2" onClick={e => e.stopPropagation()}>
+                                              <div className="w-1.5 h-1.5 rounded-full mt-2 shrink-0" style={{ background: stc.text }} />
+                                              <div className="flex-1 min-w-0 space-y-1.5">
+                                                <div className="flex gap-2">
+                                                  <input value={sf.field_name} onChange={e => updateSubfield(idx, si, { field_name: e.target.value })} placeholder="field_name" className="flex-1 text-xs font-mono text-gray-700 dark:text-zinc-300 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-md py-1.5 px-2.5 outline-none transition-all duration-150 focus:border-gray-400 dark:focus:border-[#3f3f3f]" />
+                                                  <div className="relative w-[90px] shrink-0">
+                                                    <select value={sf.field_type} onChange={e => updateSubfield(idx, si, { field_type: e.target.value })} className="w-full text-[11px] font-medium rounded-md py-1.5 pr-5 pl-2 outline-none cursor-pointer appearance-none transition-all duration-150 dark:[color-scheme:dark]" style={{ color: stc.text, background: `${stc.text}08`, border: `1px solid ${stc.text}20` }}>
+                                                      {Object.keys(typeColors).filter(t => t !== 'array' && t !== 'object').map(t => <option key={t} value={t}>{t}</option>)}
+                                                    </select>
+                                                    <svg width="8" height="8" viewBox="0 0 16 16" fill="none" className="absolute right-2 top-1/2 -translate-y-1/2 pointer-events-none opacity-35"><path d="M4 6l4 4 4-4" stroke={stc.text} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                                                  </div>
+                                                </div>
+                                                <input value={sf.field_description || ''} onChange={e => updateSubfield(idx, si, { field_description: e.target.value })} placeholder="Description..." className="w-full text-[11px] text-gray-500 dark:text-zinc-400 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-md py-1.5 px-2.5 outline-none transition-all duration-150 focus:border-gray-400 dark:focus:border-[#3f3f3f]" />
+                                              </div>
+                                              <button type="button" onClick={() => removeSubfield(idx, si)} className="mt-1 bg-transparent border-none cursor-pointer text-gray-300 dark:text-zinc-600 p-0.5 flex transition-colors duration-100 hover:text-red-500 shrink-0">
+                                                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                                              </button>
+                                            </div>
+                                          );
+                                        })}
+                                      </div>
+                                    )}
+                                    {(field.subform_fields || []).length === 0 && (
+                                      <div className="px-3 py-3 text-center">
+                                        <span className="text-[11px] text-gray-300 dark:text-zinc-600">No subfields yet</span>
+                                      </div>
+                                    )}
                                   </div>
                                 )}
                                 <div className="mb-4">
@@ -1328,32 +1520,34 @@ function CreateFormDialog({
 // Edit Form Dialog Component
 function EditFormDialog({
   form,
+  existingForms,
   onClose,
   onSuccess,
   onUpdate,
   onGenerateCode,
 }: {
   form: Form;
+  existingForms: Form[];
   onClose: () => void;
   onSuccess: () => void;
   onUpdate: (formId: string, data: Partial<CreateFormRequest>) => Promise<void>;
-  onGenerateCode: (formId: string) => void;
+  onGenerateCode: (formId: string, enableReview?: boolean) => void;
 }) {
   const { toast } = useToast();
   const [formName, setFormName] = useState(form.form_name);
   const [formDescription, setFormDescription] = useState(form.form_description || '');
   const [fields, setFields] = useState<FormField[]>(form.fields);
   const [saving, setSaving] = useState(false);
-  const [needsRegeneration, setNeedsRegeneration] = useState(false);
+  const [enableReview, setEnableReview] = useState<boolean>(form.metadata?.enable_review ?? false);
   const [openSet, setOpenSet] = useState<Set<number>>(new Set());
   const [focusIndex, setFocusIndex] = useState(0);
+  const [fieldSearch, setFieldSearch] = useState('');
   const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
 
   const typeColors: Record<string, { bg: string; border: string; text: string }> = {
     text: { bg: "rgba(99, 102, 241, 0.08)", border: "rgba(99, 102, 241, 0.2)", text: "#6366f1" },
     number: { bg: "rgba(8, 145, 178, 0.08)", border: "rgba(8, 145, 178, 0.2)", text: "#0891b2" },
     enum: { bg: "rgba(139, 92, 246, 0.08)", border: "rgba(139, 92, 246, 0.2)", text: "#8b5cf6" },
-    object: { bg: "rgba(245, 158, 11, 0.08)", border: "rgba(245, 158, 11, 0.2)", text: "#f59e0b" },
     array: { bg: "rgba(236, 72, 153, 0.08)", border: "rgba(236, 72, 153, 0.2)", text: "#ec4899" },
   };
 
@@ -1437,6 +1631,10 @@ function EditFormDialog({
   // Keyboard navigation
   useEffect(() => {
     const handleKey = (e: KeyboardEvent) => {
+      const tag = (e.target as HTMLElement).tagName;
+      const isEditable = tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable;
+      if (isEditable) return;
+
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
         setFocusIndex(p => Math.min(p + 1, fields.length - 1));
@@ -1444,10 +1642,8 @@ function EditFormDialog({
         e.preventDefault();
         setFocusIndex(p => Math.max(p - 1, 0));
       } else if (e.key === 'Enter' || e.key === ' ') {
-        if ((e.target as HTMLElement).tagName !== 'INPUT' && (e.target as HTMLElement).tagName !== 'TEXTAREA') {
-          e.preventDefault();
-          toggle(focusIndex);
-        }
+        e.preventDefault();
+        toggle(focusIndex);
       }
     };
     window.addEventListener('keydown', handleKey);
@@ -1465,6 +1661,13 @@ function EditFormDialog({
     // Validation
     if (!formName.trim()) {
       toast({ title: 'Validation', description: 'Please enter a form name', variant: 'error' });
+      return;
+    }
+    const duplicate = existingForms.some(
+      (f) => f.id !== form.id && f.form_name.trim().toLowerCase() === formName.trim().toLowerCase()
+    );
+    if (duplicate) {
+      toast({ title: 'Duplicate name', description: `A form named "${formName.trim()}" already exists. Please use a different name.`, variant: 'error' });
       return;
     }
     if (!formDescription.trim()) {
@@ -1520,17 +1723,17 @@ function EditFormDialog({
         form_name: formName,
         form_description: formDescription,
         fields: sanitizedFields,
+        enable_review: enableReview,
       };
 
       await onUpdate(form.id, updateData);
 
-      // Check if fields changed and form is active
       if (hasFieldChanges() && form.status === 'active') {
-        setNeedsRegeneration(true);
+        await onGenerateCode(form.id, enableReview);
         toast({
-          title: 'Form Updated',
-          description: 'Fields changed. Code regeneration required.',
-          variant: 'default',
+          title: 'Regenerating',
+          description: 'Fields changed — code regeneration started.',
+          variant: 'success',
         });
       } else {
         toast({
@@ -1538,8 +1741,8 @@ function EditFormDialog({
           description: 'Form updated successfully',
           variant: 'success',
         });
-        onSuccess();
       }
+      onSuccess();
     } catch (err: any) {
       console.error('Failed to update form:', err);
       toast({
@@ -1552,11 +1755,6 @@ function EditFormDialog({
     }
   };
 
-  const handleRegenerateAndClose = () => {
-    onGenerateCode(form.id);
-    onClose();
-  };
-
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div
@@ -1564,20 +1762,15 @@ function EditFormDialog({
         onClick={e => e.stopPropagation()}
       >
         <style>{`
-          .row-hover-edit { transition: all 0.15s ease; outline: none; }
-          .row-hover-edit:hover { background: rgba(0,0,0,0.025) !important; }
-          .row-hover-edit.focused-edit-new { background: rgba(0,0,0,0.035) !important; }
-          .dark .row-hover-edit:hover { background: rgba(255,255,255,0.03) !important; }
-          .dark .row-hover-edit.focused-edit-new { background: rgba(255,255,255,0.04) !important; }
-          .expand-btn-edit-new { transition: all 0.15s ease; }
-          .expand-btn-edit-new:hover {
-            background: #f3f4f6 !important;
+          @keyframes slideOpen {
+            from { opacity: 0; transform: translateY(-4px); }
+            to   { opacity: 1; transform: translateY(0);    }
           }
-          .dark .expand-btn-edit-new:hover {
-            background: rgba(255,255,255,0.06) !important;
-          }
-          input::placeholder, textarea::placeholder { color: #ccc; }
-          .dark input::placeholder, .dark textarea::placeholder { color: #3f3f3f; }
+          .efd-row { transition: background 0.12s ease; outline: none; }
+          .efd-row:hover { background: rgba(0,0,0,0.025) !important; }
+          .efd-row.efd-focused { background: rgba(0,0,0,0.03) !important; }
+          .dark .efd-row:hover { background: rgba(255,255,255,0.03) !important; }
+          .dark .efd-row.efd-focused { background: rgba(255,255,255,0.035) !important; }
         `}</style>
 
         {/* Header */}
@@ -1607,112 +1800,103 @@ function EditFormDialog({
           </button>
         </div>
 
-        {needsRegeneration ? (
-          <div className="flex-1 flex items-center justify-center p-8">
-            <div className="text-center max-w-sm">
-              <div className="w-14 h-14 bg-amber-500/10 dark:bg-amber-500/15 border border-amber-200 dark:border-amber-500/30 rounded-2xl flex items-center justify-center mx-auto mb-5">
-                <AlertCircle className="h-7 w-7 text-amber-500" />
-              </div>
-              <h3 className="text-base font-semibold text-gray-900 dark:text-white mb-2">Regeneration Required</h3>
-              <p className="text-sm text-gray-500 dark:text-zinc-400 mb-6 leading-relaxed">
-                You've updated the extraction fields. The generated DSPy code needs to be regenerated to reflect these changes.
-              </p>
-              <div className="flex gap-2.5 justify-center">
-                <button
-                  type="button"
-                  onClick={() => { onSuccess(); onClose(); }}
-                  className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-zinc-300 bg-transparent border border-gray-200 dark:border-[#2a2a2a] rounded-lg hover:bg-gray-100 dark:hover:bg-[#1a1a1a] cursor-pointer transition-colors"
-                >
-                  Close Without Regenerating
-                </button>
-                <button
-                  type="button"
-                  onClick={handleRegenerateAndClose}
-                  className="px-4 py-2 text-sm font-semibold text-white bg-amber-500 hover:bg-amber-600 border-none rounded-lg cursor-pointer transition-colors flex items-center gap-1.5"
-                >
-                  <Code className="h-4 w-4" />
-                  Regenerate Now
-                </button>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <>
-            {/* Two-column body */}
-            <form onSubmit={handleSubmit} className="flex flex-1 min-h-0">
+        <>
+            <form id="edit-form-body" onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
 
-              {/* Left — Form Details */}
-              <div className="w-[38%] flex flex-col border-r border-gray-100 dark:border-[#1f1f1f] min-h-0">
-                <div className="flex-1 overflow-y-auto px-5 pt-5 pb-4 space-y-4">
-
-                  {/* Form name */}
-                  <div>
-                    <label className="text-[11px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider block mb-1.5">Form Name</label>
-                    <input
-                      value={formName}
-                      onChange={e => setFormName(e.target.value)}
-                      placeholder="e.g., Patient Population"
-                      className="w-full text-sm font-medium text-gray-900 dark:text-white bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-2 px-3 outline-none transition-colors duration-150 focus:border-gray-400 dark:focus:border-[#3f3f3f] placeholder:text-gray-300 dark:placeholder:text-zinc-600"
-                    />
-                  </div>
-
-                  {/* Description */}
-                  <div>
-                    <label className="text-[11px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider block mb-1.5">Description</label>
+              {/* Metadata — full width, fixed height */}
+              <div className="flex-shrink-0 px-6 pt-4 pb-4 border-b border-gray-100 dark:border-[#1f1f1f] grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[11px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider block mb-1.5">Form Name</label>
+                  <input
+                    autoFocus
+                    value={formName}
+                    onChange={e => setFormName(e.target.value)}
+                    placeholder="e.g., Patient Population"
+                    className="w-full text-sm font-medium text-gray-900 dark:text-white bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-2 px-3 outline-none transition-colors focus:border-gray-400 dark:focus:border-[#3f3f3f]"
+                  />
+                </div>
+                <div>
+                  <label className="text-[11px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider block mb-1.5">Description</label>
+                  <div className="relative">
                     <textarea
                       value={formDescription}
                       onChange={e => setFormDescription(e.target.value)}
-                      placeholder="Describe what this form extracts..."
-                      rows={4}
-                      className="w-full text-sm text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-2 px-3 outline-none leading-relaxed transition-colors duration-150 focus:border-gray-400 dark:focus:border-[#3f3f3f] placeholder:text-gray-300 dark:placeholder:text-zinc-600 resize-none"
+                      placeholder="Describe what this form extracts…"
+                      rows={3}
+                      className="w-full text-sm text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-2 px-3 outline-none transition-colors focus:border-gray-400 dark:focus:border-[#3f3f3f] resize-none"
                     />
-                    <div className={cn("text-xs mt-1 transition-colors duration-150", formDescription.length >= 10 ? "text-green-600 dark:text-green-400" : "text-gray-300 dark:text-zinc-600")}>
-                      {formDescription.length < 10 ? `${formDescription.length}/10 min` : "Good"}
-                    </div>
                   </div>
-
-                  {/* Unsaved warning — only shown when needed */}
-                  {hasFieldChanges() && (
-                    <div className="flex items-center gap-2 p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/40">
-                      <svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="text-amber-500 shrink-0"><circle cx="8" cy="8" r="7"/><path d="M8 5v3M8 11h.01"/></svg>
-                      <span className="text-xs text-amber-700 dark:text-amber-400 leading-none">Unsaved field changes</span>
-                    </div>
+                  {formDescription.length < 10 && formDescription.length > 0 && (
+                    <p className="text-[11px] text-gray-300 dark:text-zinc-600 mt-1">{formDescription.length} / 10 chars min</p>
                   )}
                 </div>
               </div>
 
-              {/* Right — Fields */}
-              <div className="flex-1 flex flex-col min-h-0">
-                {/* Fields header */}
-                <div className="px-5 pt-4 pb-3 flex-shrink-0">
-                  <div className="flex items-center justify-between mb-3">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider">Fields</span>
-                      <span className="text-[10px] font-semibold text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] px-1.5 py-0.5 rounded-[4px]">{fields.length}</span>
+              {/* Human review toggle */}
+              <div className="flex-shrink-0 px-6 py-3 border-b border-gray-100 dark:border-[#1f1f1f]">
+                <div
+                  onClick={() => setEnableReview(!enableReview)}
+                  className={cn(
+                    "flex items-center gap-3 p-3.5 rounded-xl cursor-pointer transition-all duration-150 border",
+                    enableReview ? "bg-amber-50 dark:bg-amber-900/10 border-amber-200 dark:border-amber-800/40" : "bg-gray-50 dark:bg-[#1a1a1a] border-gray-200 dark:border-[#2a2a2a] hover:border-gray-300 dark:hover:border-[#3a3a3a]"
+                  )}
+                >
+                  <div className={cn("w-5 h-5 rounded-[5px] flex items-center justify-center transition-all duration-150 shrink-0", enableReview ? "bg-amber-500" : "border-[1.5px] border-gray-300 dark:border-zinc-600 bg-transparent")}>
+                    {enableReview && <svg width="11" height="11" viewBox="0 0 16 16" fill="none"><path d="M3.5 8.5l3 3 6-6" stroke="#fff" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" /></svg>}
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-1.5">
+                      <span className={cn("text-sm font-semibold", enableReview ? "text-amber-800 dark:text-amber-300" : "text-gray-700 dark:text-zinc-300")}>Human Review</span>
+                      {enableReview && <span className="text-[10px] font-semibold text-amber-500 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/40 px-[7px] py-px rounded-sm">ON</span>}
                     </div>
-                    <div className="flex items-center gap-3">
-                      <button type="button" onClick={toggleAll} className="expand-btn-edit-new text-[11px] font-semibold text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] rounded-lg py-1 px-2.5 cursor-pointer border border-gray-200 dark:border-[#2a2a2a]">{openSet.size === fields.length ? "Collapse" : "Expand all"}</button>
-                    </div>
+                    <span className="text-xs text-gray-400 dark:text-zinc-500 leading-[1.4]">Pause after decomposition to review extraction plan</span>
                   </div>
                 </div>
+              </div>
 
-                {/* Field tree */}
-                <div className="flex-1 overflow-y-auto px-5 pb-3">
+              {/* Fields section — scrollable */}
+              <div className="flex flex-col flex-1 min-h-0">
+                {/* Fields toolbar */}
+                <div className="flex-shrink-0 flex items-center gap-3 px-6 py-3 border-b border-gray-100 dark:border-[#1f1f1f]">
+                  <div className="relative flex-1">
+                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-300 dark:text-zinc-600 pointer-events-none"><circle cx="7" cy="7" r="5"/><path d="M12 12l-2.5-2.5"/></svg>
+                    <input
+                      type="text"
+                      placeholder={`Search ${fields.length} fields…`}
+                      value={fieldSearch}
+                      onChange={e => setFieldSearch(e.target.value)}
+                      className="w-full text-xs text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-1.5 pl-8 pr-3 outline-none focus:border-gray-300 dark:focus:border-[#3a3a3a]"
+                    />
+                  </div>
+                  <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">
+                    {fields.filter(f => f.field_name.trim()).length}/{fields.length} named
+                    {hasFieldChanges() && <span className="text-amber-500 ml-1">· unsaved</span>}
+                  </span>
+                  <button type="button" onClick={toggleAll} className="shrink-0 text-[11px] font-semibold text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] rounded-lg py-1.5 px-2.5 cursor-pointer border border-gray-200 dark:border-[#2a2a2a] hover:bg-gray-200 dark:hover:bg-[#222] transition-colors">
+                    {openSet.size === fields.length ? 'Collapse' : 'Expand all'}
+                  </button>
+                </div>
+
+                {/* Field list */}
+                <div className="flex-1 overflow-y-auto px-6 pb-3 pt-1">
                   <div>
                     {fields.map((field, idx) => {
                       const isOpen = openSet.has(idx);
                       const isFocused = focusIndex === idx;
-                      const isLast = idx === fields.length - 1;
                       const tc = typeColors[field.field_type] || { bg: "rgba(99, 102, 241, 0.08)", border: "rgba(99, 102, 241, 0.2)", text: "#6366f1" };
                       const lineC = tc.border;
+                      const matchesSearch = !fieldSearch.trim() ||
+                        field.field_name.toLowerCase().includes(fieldSearch.toLowerCase()) ||
+                        field.field_description.toLowerCase().includes(fieldSearch.toLowerCase());
+                      if (!matchesSearch) return null;
                       return (
                         <div key={idx}>
-                          <div ref={el => { rowRefs.current[idx] = el; }} className={cn("row-hover-edit flex items-center gap-3 py-3 px-3 cursor-pointer rounded-lg relative", isFocused ? "focused-edit-new border-l-2 border-l-gray-300 dark:border-l-zinc-600" : "border-l-2 border-l-transparent")} onClick={() => { setFocusIndex(idx); toggle(idx); }}>
+                          <div ref={el => { rowRefs.current[idx] = el; }} className={cn("efd-row flex items-center gap-3 py-2.5 px-3 cursor-pointer rounded-lg relative", isFocused ? "efd-focused border-l-2 border-l-gray-300 dark:border-l-zinc-600" : "border-l-2 border-l-transparent")} onClick={() => { setFocusIndex(idx); toggle(idx); }}>
                             <div className="w-2 h-2 rounded-full transition-opacity duration-150" style={{ background: tc.text, opacity: isOpen ? 0.6 : 0.3 }} />
                             <div className="flex-1 min-w-0">
                               <div className="flex items-center gap-2">
                                 <span className={cn("text-sm overflow-hidden text-ellipsis whitespace-nowrap", isOpen ? "font-semibold text-gray-900 dark:text-white" : field.field_name.trim() ? "font-medium text-gray-600 dark:text-zinc-300" : "font-medium text-gray-300 dark:text-zinc-600")}>{field.field_name.trim() || `field_${idx + 1}`}</span>
-                                <span className="text-xs font-medium py-0.5 px-2 rounded-[5px] tracking-tight" style={{ color: tc.text, background: tc.bg, border: `1px solid ${tc.border}` }}>{field.field_type}</span>
+                                <span className="text-xs font-medium py-0.5 px-2 rounded-[5px] tracking-tight" style={{ color: tc.text, background: tc.bg, border: `1px solid ${tc.border}` }}>{TYPE_LABELS[field.field_type] ?? field.field_type}</span>
                                 {field.field_type === 'enum' && field.options && field.options.filter((o: string) => o.trim()).length > 0 && <span className="text-xs text-gray-300 dark:text-zinc-600">{field.options.filter((o: string) => o.trim()).length} opts</span>}
                               </div>
                               {!isOpen && field.field_description.trim() && <div className="text-xs text-gray-400 dark:text-zinc-500 mt-[3px] overflow-hidden text-ellipsis whitespace-nowrap">{field.field_description}</div>}
@@ -1730,7 +1914,7 @@ function EditFormDialog({
                                     <label className="text-xs font-semibold text-gray-400 dark:text-zinc-600 block mb-1.5">TYPE</label>
                                     <div className="relative">
                                       <select value={field.field_type} onChange={e => updateField(idx, { field_type: e.target.value })} onClick={e => e.stopPropagation()} className="w-full text-sm font-medium rounded-md py-2 pr-7 pl-3 outline-none cursor-pointer appearance-none transition-all duration-150 dark:[color-scheme:dark]" style={{ color: tc.text, background: `${tc.text}08`, border: `1px solid ${tc.text}20` }} onFocus={e => e.currentTarget.style.borderColor = `${tc.text}50`} onBlur={e => e.currentTarget.style.borderColor = `${tc.text}20`}>
-                                        {Object.keys(typeColors).map(t => <option key={t} value={t}>{t}</option>)}
+                                        {Object.keys(typeColors).map(t => <option key={t} value={t}>{TYPE_LABELS[t] ?? t}</option>)}
                                       </select>
                                       <svg width="10" height="10" viewBox="0 0 16 16" fill="none" className="absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none opacity-35"><path d="M4 6l4 4 4-4" stroke={tc.text} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
                                     </div>
@@ -1778,42 +1962,36 @@ function EditFormDialog({
               </div>
             </form>
 
+
             {/* Footer */}
-            <div className="flex items-center justify-between gap-4 px-6 py-4 border-t border-gray-100 dark:border-[#1f1f1f] bg-gray-50/60 dark:bg-[#0a0a0a] rounded-b-2xl flex-shrink-0">
-              <p className="text-xs text-gray-400 dark:text-zinc-500 italic">
-                {fields.length} field{fields.length !== 1 ? 's' : ''} · {fields.filter(f => f.field_name.trim()).length} named
-                {hasFieldChanges() && <span className="text-amber-500 ml-1">· unsaved changes</span>}
-              </p>
-              <div className="flex items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={onClose}
-                  disabled={saving}
-                  className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-zinc-300 bg-transparent border border-gray-200 dark:border-[#2a2a2a] rounded-lg hover:bg-gray-100 dark:hover:bg-[#1a1a1a] dark:hover:border-[#3a3a3a] cursor-pointer transition-colors disabled:opacity-50"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSubmit as any}
-                  disabled={saving}
-                  className={cn(
-                    "inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg border-none transition-all duration-150 hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed",
-                    saving ? "cursor-not-allowed" : "cursor-pointer",
-                  )}
-                >
-                  {saving ? (
-                    <><div className="w-4 h-4 rounded-full border-2 border-white/30 dark:border-gray-900/30 border-t-white dark:border-t-gray-900 animate-spin" />Saving...</>
-                  ) : hasFieldChanges() && form.status === 'active' ? (
-                    <><Code className="h-4 w-4" />Save & Regenerate</>
-                  ) : (
-                    <>Update Form</>
-                  )}
-                </button>
-              </div>
+            <div className="flex items-center justify-end gap-2.5 px-6 py-4 border-t border-gray-100 dark:border-[#1f1f1f] bg-gray-50/60 dark:bg-[#0a0a0a] rounded-b-2xl flex-shrink-0">
+              <button
+                type="button"
+                onClick={onSuccess}
+                disabled={saving}
+                className="px-4 py-2 text-sm font-medium text-gray-600 dark:text-zinc-300 bg-transparent border border-gray-200 dark:border-[#2a2a2a] rounded-lg hover:bg-gray-100 dark:hover:bg-[#1a1a1a] dark:hover:border-[#3a3a3a] cursor-pointer transition-colors disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                form="edit-form-body"
+                disabled={saving}
+                className={cn(
+                  "inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg border-none transition-all duration-150 hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 disabled:cursor-not-allowed",
+                  saving ? "cursor-not-allowed" : "cursor-pointer",
+                )}
+              >
+                {saving ? (
+                  <><div className="w-4 h-4 rounded-full border-2 border-white/30 dark:border-gray-900/30 border-t-white dark:border-t-gray-900 animate-spin" />Saving…</>
+                ) : hasFieldChanges() && form.status === 'active' ? (
+                  <><Code className="h-4 w-4" />Save & Generate</>
+                ) : (
+                  <>Update Form</>
+                )}
+              </button>
             </div>
           </>
-        )}
       </div>
     </div>
   );
@@ -1840,9 +2018,9 @@ function DecompositionReviewDialog({
   const [expandedSignatures, setExpandedSignatures] = useState<Set<string>>(new Set());
 
   // Extract metadata early so functions can use it
-  const metadata = typeof form.metadata === 'string' ? JSON.parse(form.metadata) : form.metadata;
+  const metadata = useMemo(() => typeof form.metadata === 'string' ? JSON.parse(form.metadata) : form.metadata, [form.metadata]);
   const signatures = metadata?.decomposition?.signatures || [];
-  const pipeline = metadata?.decomposition?.pipeline || [];
+  const pipeline = useMemo(() => metadata?.decomposition?.pipeline || [], [metadata]);
   const summary = metadata?.decomposition_summary;
 
   const totalFields = signatures.reduce((sum: number, sig: any) =>

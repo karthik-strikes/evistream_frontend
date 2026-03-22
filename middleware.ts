@@ -4,6 +4,9 @@ import type { NextRequest } from 'next/server';
 // Routes that do not require authentication
 const PUBLIC_PATHS = ['/', '/login', '/register'];
 
+// Routes that require admin role
+const ADMIN_PATHS = ['/admin'];
+
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
@@ -27,10 +30,19 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl);
   }
 
+  // Gate admin routes — require user_role=admin cookie
+  const isAdminPath = ADMIN_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'));
+  if (isAdminPath) {
+    const userRole = request.cookies.get('user_role')?.value;
+    if (userRole !== 'admin') {
+      return NextResponse.redirect(new URL('/dashboard', request.url));
+    }
+  }
+
   return NextResponse.next();
 }
 
 export const config = {
   // Run on all routes except static files and Next.js internals
-  matcher: ['/((?!_next/static|_next/image|favicon.ico).*)'],
+  matcher: ['/((?!_next/static|_next/image|favicon.ico|.*\\.(?:png|jpg|jpeg|gif|svg|webp|ico|css|js|woff|woff2|ttf|eot)$).*)'],
 };

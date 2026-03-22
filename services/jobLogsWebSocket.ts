@@ -86,7 +86,7 @@ export class JobLogsWebSocket {
       if (!this.isIntentionallyClosed && this.reconnectAttempts < this.maxReconnectAttempts) {
         this.reconnectAttempts++;
         setTimeout(() => this.connect(token), this.reconnectDelay);
-        this.reconnectDelay *= 2; // Exponential backoff
+        this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000); // Exponential backoff, capped at 30s
       }
     };
   }

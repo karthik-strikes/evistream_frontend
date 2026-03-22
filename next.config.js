@@ -1,5 +1,5 @@
 /** @type {import('next').NextConfig} */
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8001';
 
 const securityHeaders = [
   {
@@ -11,8 +11,10 @@ const securityHeaders = [
     value: 'SAMEORIGIN',
   },
   {
+    // Deprecated header — set to 0 to disable buggy browser XSS auditors.
+    // CSP is the proper replacement.
     key: 'X-XSS-Protection',
-    value: '1; mode=block',
+    value: '0',
   },
   {
     key: 'Referrer-Policy',
@@ -21,6 +23,25 @@ const securityHeaders = [
   {
     key: 'Permissions-Policy',
     value: 'camera=(), microphone=(), geolocation=()',
+  },
+  {
+    key: 'Strict-Transport-Security',
+    value: 'max-age=63072000; includeSubDomains; preload',
+  },
+  {
+    key: 'Content-Security-Policy',
+    value: [
+      "default-src 'self'",
+      "script-src 'self' 'unsafe-inline' 'unsafe-eval'",  // Next.js requires unsafe-inline/eval in dev
+      "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+      "font-src 'self' https://fonts.gstatic.com",
+      "img-src 'self' data: blob:",
+      "connect-src 'self' ws: wss: https:",
+      "frame-src 'self' blob:",
+      "frame-ancestors 'self'",
+      "base-uri 'self'",
+      "form-action 'self'",
+    ].join('; '),
   },
 ];
 

@@ -150,7 +150,7 @@ export function EmptyStateError({
       <div className="flex flex-col items-center max-w-md mx-auto">
         <div className="rounded-full bg-red-100 p-4 mb-4 dark:bg-red-900/30">
           <svg
-            className="h-12 w-12 text-red-600"
+            className="h-12 w-12 text-red-600 dark:text-red-400"
             fill="none"
             viewBox="0 0 24 24"
             stroke="currentColor"

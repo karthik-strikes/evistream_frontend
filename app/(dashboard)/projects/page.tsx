@@ -9,6 +9,7 @@ import { useToast } from '@/hooks/use-toast';
 import { C } from '@/lib/colors';
 import { cn } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
+import { ProjectMembersModal } from '@/components/project/ProjectMembersModal';
 
 const fmtStatus = (s: string) => {
   const map: Record<string, string> = { active: 'Active', generating: 'Generating', awaiting_review: 'Review', regenerating: 'Generating', draft: 'Draft', failed: 'Failed' };
@@ -44,6 +45,7 @@ export default function ProjectsPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
+  const [membersModalProject, setMembersModalProject] = useState<{ id: string; name: string } | null>(null);
 
   // Close menu on outside click
   useEffect(() => {
@@ -116,14 +118,13 @@ export default function ProjectsPage() {
     setSubmitting(true);
     try {
       await deleteProject(id);
-      if (panelProject?.id === id) closePanel();
       toast({ title: 'Project deleted', variant: 'success' });
     } catch (err: any) {
       toast({ title: 'Error', description: err.message, variant: 'error' });
     } finally { setSubmitting(false); }
   };
 
-  const projects = projectsData.length ? projectsData : (contextProjects || []);
+  const projects = useMemo(() => projectsData.length ? projectsData : (contextProjects || []), [projectsData, contextProjects]);
 
   const filteredProjects = useMemo(() => {
     let list = projects;
@@ -296,13 +297,20 @@ export default function ProjectsPage() {
                           className="font-inherit text-base text-gray-400 bg-transparent border border-transparent rounded-md px-1.5 py-0.5 cursor-pointer leading-none hover:bg-gray-100 dark:hover:bg-[#1a1a1a] hover:border-gray-200"
                         >...</button>
                         {menuOpenId === proj.id && (
-                          <div className="absolute right-0 top-full mt-1 bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#1f1f1f] rounded-lg shadow-dropdown z-50 min-w-[120px] overflow-hidden animate-dashboard-fadeIn">
+                          <div className="absolute right-0 top-full mt-1 bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#1f1f1f] rounded-lg shadow-dropdown z-50 min-w-[130px] overflow-hidden animate-dashboard-fadeIn">
                             <button
                               className="menu-item font-inherit text-sm text-gray-700 dark:text-[#c0c0c0] bg-transparent border-none py-2 px-3.5 cursor-pointer flex items-center gap-2 w-full text-left"
                               onClick={() => { setEditingId(proj.id); setEditData({ name: proj.name, description: proj.description || '' }); setMenuOpenId(null); }}
                             >
                               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
                               Edit
+                            </button>
+                            <button
+                              className="menu-item font-inherit text-sm text-gray-700 dark:text-[#c0c0c0] bg-transparent border-none py-2 px-3.5 cursor-pointer flex items-center gap-2 w-full text-left"
+                              onClick={() => { setMembersModalProject({ id: proj.id, name: proj.name }); setMenuOpenId(null); }}
+                            >
+                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+                              Members
                             </button>
                             <div className="h-px bg-gray-100 dark:bg-[#1a1a1a]" />
                             <button
@@ -355,6 +363,14 @@ export default function ProjectsPage() {
           </button>
         </div>
       </div>
+
+      {/* Members modal */}
+      <ProjectMembersModal
+        projectId={membersModalProject?.id ?? ''}
+        projectName={membersModalProject?.name}
+        isOpen={!!membersModalProject}
+        onClose={() => setMembersModalProject(null)}
+      />
 
     </DashboardLayout>
   );

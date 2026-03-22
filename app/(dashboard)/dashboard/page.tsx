@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
@@ -219,6 +219,12 @@ export default function DashboardPage() {
   const cmdItems = allCmdItems.filter((i) => !cmdQuery || i.label.toLowerCase().includes(cmdQuery.toLowerCase()));
   const cmdCategories = [...new Set(cmdItems.map((i) => i.category))];
 
+  const closePanel = useCallback(() => {
+    if (!selectedProject) return;
+    setPanelClosing(true);
+    setTimeout(() => { setSelectedProjectPanel(null); setPanelClosing(false); }, 200);
+  }, [selectedProject]);
+
   useEffect(() => { setCmdIndex(0); }, [cmdQuery]);
   useEffect(() => { if (cmdOpen) cmdInputRef.current?.focus(); }, [cmdOpen]);
   useEffect(() => {
@@ -228,7 +234,7 @@ export default function DashboardPage() {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, []);
+  }, [closePanel]);
   const handleCmdKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); setCmdIndex((i) => Math.min(i + 1, cmdItems.length - 1)); }
     if (e.key === 'ArrowUp') { e.preventDefault(); setCmdIndex((i) => Math.max(i - 1, 0)); }
@@ -238,19 +244,13 @@ export default function DashboardPage() {
     cmdListRef.current?.querySelector(`[data-idx="${cmdIndex}"]`)?.scrollIntoView({ block: 'nearest' });
   }, [cmdIndex]);
 
-  const closePanel = () => {
-    if (!selectedProject) return;
-    setPanelClosing(true);
-    setTimeout(() => { setSelectedProjectPanel(null); setPanelClosing(false); }, 200);
-  };
-
   let flatIdx = 0;
 
   // Sidebar nav links
   const navLinks = [
-    { label: 'Jobs Monitor',  href: '/jobs',        icon: '↻' },
-    { label: 'Activity Feed', href: '/activity',     icon: '◎' },
-    { label: 'Consensus',      href: '/consensus',    icon: '⊕' },
+    { label: 'Jobs Monitor',  href: '/jobs',       icon: '↻' },
+    { label: 'Forms',         href: '/forms',      icon: '☰' },
+    { label: 'Consensus',     href: '/consensus',  icon: '⊕' },
   ];
 
   return (

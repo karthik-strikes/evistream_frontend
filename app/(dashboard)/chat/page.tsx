@@ -92,7 +92,7 @@ export default function ChatPage() {
             className="fixed inset-0 z-40"
             onClick={() => setIsExpanded(false)}
           />
-          <div className="absolute right-0 top-full mt-2 w-96 bg-white rounded-lg border border-gray-200 shadow-xl z-50 animate-reveal-fade-down">
+          <div className="absolute right-0 top-full mt-2 w-96 bg-white dark:bg-[#111111] rounded-lg border border-gray-200 dark:border-[#222] shadow-xl z-50 animate-reveal-fade-down">
             <div className="p-4">
               {selectedDocIds.length > 0 && (
                 <div className="flex items-center justify-end mb-3">
@@ -112,9 +112,9 @@ export default function ChatPage() {
                   {selectedDocs.map(doc => (
                     <div
                       key={doc.id}
-                      className="group flex items-center gap-1.5 px-2 py-1 bg-gray-50 border border-gray-200 rounded text-xs hover:bg-gray-100"
+                      className="group flex items-center gap-1.5 px-2 py-1 bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#333] rounded text-xs hover:bg-gray-100"
                     >
-                      <span className="max-w-[200px] truncate font-medium text-gray-700">
+                      <span className="max-w-[200px] truncate font-medium text-gray-700 dark:text-zinc-300">
                         {doc.filename.replace('.pdf', '')}
                       </span>
                       <button
@@ -150,13 +150,13 @@ export default function ChatPage() {
                         toggleDocument(doc.id);
                         setSearchQuery('');
                       }}
-                      className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-gray-50 flex items-center gap-2 group"
+                      className="w-full text-left px-2.5 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-[#1a1a1a] flex items-center gap-2 group"
                     >
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-gray-900 truncate">
+                        <p className="text-xs font-medium text-gray-900 dark:text-zinc-100 truncate">
                           {doc.filename.replace('.pdf', '')}
                         </p>
-                        <p className="text-[11px] text-gray-500">
+                        <p className="text-[11px] text-gray-500 dark:text-zinc-500">
                           {new Date(doc.created_at).toLocaleDateString()}
                         </p>
                       </div>
@@ -229,7 +229,7 @@ export default function ChatPage() {
       description={`Chat with ${documents.length} research paper${documents.length > 1 ? 's' : ''} using AI`}
       action={paperSelectorAction}
     >
-      <div className="-mx-6 -mb-4 -mt-4 border-t border-gray-200">
+      <div className="-mx-6 -mb-4 -mt-4 border-t border-gray-200 dark:border-[#222]">
         <PaperChat documents={documents} selectedDocIds={selectedDocIds} />
       </div>
     </DashboardLayout>

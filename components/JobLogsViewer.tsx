@@ -13,6 +13,7 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { connectToJobLogs, LogMessage, JobLogsWebSocket } from '@/services/jobLogsWebSocket';
+import { apiClient } from '@/lib/api';
 
 interface JobLogsViewerProps {
   jobId: string;
@@ -36,7 +37,7 @@ export function JobLogsViewer({
   const wsRef = useRef<JobLogsWebSocket | null>(null);
 
   useEffect(() => {
-    const token = typeof window !== 'undefined' ? sessionStorage.getItem('auth_token') || undefined : undefined;
+    const token = apiClient.getToken() || undefined;
     // Connect to WebSocket
     const ws = connectToJobLogs(jobId, {
       onConnected: () => {
@@ -135,7 +136,7 @@ export function JobLogsViewer({
   };
 
   return (
-    <div className="bg-white rounded-lg shadow-md border border-gray-200">
+    <div className="bg-white rounded-lg shadow-md border border-gray-200 dark:bg-[#111111] dark:border-[#222]">
       {/* Header */}
       <div className="p-4 border-b border-gray-200">
         <div className="flex items-center justify-between">

@@ -4,6 +4,7 @@ import {
   createContext,
   useContext,
   useEffect,
+  useLayoutEffect,
   useState,
   useCallback,
   type ReactNode,
@@ -24,9 +25,7 @@ const STORAGE_KEY = 'theme';
 
 function getSystemTheme(): ResolvedTheme {
   if (typeof window === 'undefined') return 'light';
-  return window.matchMedia('(prefers-color-scheme: dark)').matches
-    ? 'dark'
-    : 'light';
+  return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
 }
 
 function resolveTheme(theme: Theme): ResolvedTheme {
@@ -36,11 +35,10 @@ function resolveTheme(theme: Theme): ResolvedTheme {
 
 function applyThemeClass(resolved: ResolvedTheme) {
   if (typeof document === 'undefined') return;
-  const root = document.documentElement;
   if (resolved === 'dark') {
-    root.classList.add('dark');
+    document.documentElement.classList.add('dark');
   } else {
-    root.classList.remove('dark');
+    document.documentElement.classList.remove('dark');
   }
 }
 
@@ -50,20 +48,21 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>('light');
   const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>('light');
 
-  // After mount, read the real stored preference and apply it.
+  // After mount, read the real stored preference and sync both state values together.
   useEffect(() => {
     const stored = localStorage.getItem(STORAGE_KEY);
     const initial: Theme =
-      stored === 'light' || stored === 'dark' || stored === 'system'
-        ? stored
-        : 'light';
+      stored === 'light' || stored === 'dark' || stored === 'system' ? stored : 'light';
+    const resolved = resolveTheme(initial);
     setThemeState(initial);
+    setResolvedTheme(resolved);
   }, []);
 
   const setTheme = useCallback((newTheme: Theme) => {
     const resolved = resolveTheme(newTheme);
-    // Apply DOM class synchronously before React re-renders to eliminate flicker
-    applyThemeClass(resolved);
+    // Update React state only. The DOM class is applied in useLayoutEffect below,
+    // so Tailwind dark: classes and inline styles (driven by resolvedTheme) both
+    // update in the same browser paint — no visible desync between components.
     setThemeState(newTheme);
     setResolvedTheme(resolved);
     if (typeof window !== 'undefined') {
@@ -71,24 +70,21 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  // Apply theme on initial mount only (setTheme handles all subsequent changes)
-  useEffect(() => {
-    const resolved = resolveTheme(theme);
-    setResolvedTheme(resolved);
-    applyThemeClass(resolved);
-  }, [theme]);
+  // Apply the DOM class after React renders but before the browser paints.
+  // useLayoutEffect ensures Tailwind dark: (CSS) and resolvedTheme-driven inline
+  // styles are always in sync within the same paint frame.
+  useLayoutEffect(() => {
+    applyThemeClass(resolvedTheme);
+  }, [resolvedTheme]);
 
-  // Listen for system preference changes when in system mode
+  // Listen for system preference changes when in system mode.
   useEffect(() => {
     if (typeof window === 'undefined') return;
     if (theme !== 'system') return;
 
     const mediaQuery = window.matchMedia('(prefers-color-scheme: dark)');
-
     const handler = (e: MediaQueryListEvent) => {
-      const resolved: ResolvedTheme = e.matches ? 'dark' : 'light';
-      setResolvedTheme(resolved);
-      applyThemeClass(resolved);
+      setResolvedTheme(e.matches ? 'dark' : 'light');
     };
 
     mediaQuery.addEventListener('change', handler);

@@ -5,7 +5,7 @@ export const authService = {
   async login(credentials: LoginRequest): Promise<AuthResponse> {
     const response = await apiClient.post<AuthResponse>('/api/v1/auth/login', credentials);
     if (response.access_token) {
-      apiClient.setToken(response.access_token);
+      apiClient.setToken(response.access_token, response.refresh_token);
     }
     return response;
   },
@@ -13,7 +13,7 @@ export const authService = {
   async register(data: RegisterRequest): Promise<AuthResponse> {
     const response = await apiClient.post<AuthResponse>('/api/v1/auth/register', data);
     if (response.access_token) {
-      apiClient.setToken(response.access_token);
+      apiClient.setToken(response.access_token, response.refresh_token);
     }
     return response;
   },
@@ -23,9 +23,9 @@ export const authService = {
   },
 
   logout(): void {
+    apiClient.clearToken();
     if (typeof window !== 'undefined') {
-      sessionStorage.removeItem('auth_token');
-      document.cookie = 'is_logged_in=; path=/; max-age=0; SameSite=Strict';
+      document.cookie = 'user_role=; path=/; max-age=0; SameSite=Strict';
       window.location.href = '/login';
     }
   },

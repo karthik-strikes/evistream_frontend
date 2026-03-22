@@ -14,6 +14,7 @@ export const statusColor: Record<string, string> = {
   Generating: C.blue, generating: C.blue, running: C.blue, regenerating: C.blue,
   Review: C.amber, awaiting_review: C.amber, warn: C.amber, pending: C.amber, draft: C.amber,
   Failed: C.purple, failed: C.purple, error: C.purple,
+  Cancelled: '#9ca3af', cancelled: '#9ca3af',
 };
 
 export const statusBg: Record<string, string> = {
@@ -21,6 +22,7 @@ export const statusBg: Record<string, string> = {
   Generating: '#eff6ff', generating: '#eff6ff', running: '#eff6ff', regenerating: '#eff6ff',
   Review: '#fffbeb', awaiting_review: '#fffbeb', pending: '#fffbeb', draft: '#fffbeb',
   Failed: '#faf5ff', failed: '#faf5ff', error: '#faf5ff',
+  Cancelled: '#f9fafb', cancelled: '#f9fafb',
 };
 
 export const statusColors: Record<string, string> = {

@@ -51,20 +51,6 @@ export function FileDropzone({
     setIsDragging(false);
   }, []);
 
-  const validateFiles = (files: File[]): string | null => {
-    if (files.length > maxFiles) {
-      return `Maximum ${maxFiles} file${maxFiles > 1 ? 's' : ''} allowed`;
-    }
-
-    for (const file of files) {
-      if (file.size > maxSize) {
-        return `File size must be less than ${(maxSize / 1024 / 1024).toFixed(0)}MB`;
-      }
-    }
-
-    return null;
-  };
-
   const handleDrop = useCallback(
     (e: React.DragEvent) => {
       e.preventDefault();
@@ -75,11 +61,16 @@ export function FileDropzone({
       if (disabled) return;
 
       const files = Array.from(e.dataTransfer.files);
-      const validationError = validateFiles(files);
 
-      if (validationError) {
-        setError(validationError);
+      if (files.length > maxFiles) {
+        setError(`Maximum ${maxFiles} file${maxFiles > 1 ? 's' : ''} allowed`);
         return;
+      }
+      for (const file of files) {
+        if (file.size > maxSize) {
+          setError(`File size must be less than ${(maxSize / 1024 / 1024).toFixed(0)}MB`);
+          return;
+        }
       }
 
       onFilesSelected(files);
@@ -93,11 +84,16 @@ export function FileDropzone({
     if (!e.target.files) return;
 
     const files = Array.from(e.target.files);
-    const validationError = validateFiles(files);
 
-    if (validationError) {
-      setError(validationError);
+    if (files.length > maxFiles) {
+      setError(`Maximum ${maxFiles} file${maxFiles > 1 ? 's' : ''} allowed`);
       return;
+    }
+    for (const file of files) {
+      if (file.size > maxSize) {
+        setError(`File size must be less than ${(maxSize / 1024 / 1024).toFixed(0)}MB`);
+        return;
+      }
     }
 
     onFilesSelected(files);

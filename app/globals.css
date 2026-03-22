@@ -87,7 +87,13 @@ html.dark ::-webkit-scrollbar-thumb:hover {
 }
 
 ::selection {
-  background-color: rgba(0, 0, 0, 0.1);
+  background-color: rgba(0, 0, 0, 0.15);
+  color: inherit;
+}
+
+html.dark ::selection {
+  background-color: rgba(255, 255, 255, 0.2);
+  color: inherit;
 }
 
 /* Grid pattern background */

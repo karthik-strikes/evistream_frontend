@@ -1,17 +1,18 @@
 'use client';
 
-import { useState } from 'react';
-import { useQuery } from '@tanstack/react-query';
+import { useState, useEffect } from 'react';
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import {
-  User, Lock, Key, Zap, Download, Bell, Save, Loader2,
-  AlertCircle, ChevronRight,
+  User, Lock, Download, Bell, Save, Loader2,
+  AlertCircle, Key,
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
-import { authService } from '@/services';
+import { authService, settingsService } from '@/services';
+import type { UserSettingsUpdate } from '@/services/settings.service';
 import { cn } from '@/lib/utils';
 
-type Section = 'profile' | 'security' | 'api' | 'extraction' | 'export' | 'notifications';
+type Section = 'profile' | 'security' | 'export' | 'notifications';
 
 const NAV_GROUPS = [
   {
@@ -19,13 +20,6 @@ const NAV_GROUPS = [
     items: [
       { id: 'profile' as Section, label: 'Profile', icon: User },
       { id: 'security' as Section, label: 'Security', icon: Lock },
-    ],
-  },
-  {
-    label: 'Configuration',
-    items: [
-      { id: 'api' as Section, label: 'API Keys', icon: Key },
-      { id: 'extraction' as Section, label: 'Extraction', icon: Zap },
       { id: 'export' as Section, label: 'Export', icon: Download },
     ],
   },
@@ -100,13 +94,12 @@ function SectionCard({ title, description, children }: {
 
 export default function SettingsPage() {
   const { toast } = useToast();
+  const queryClient = useQueryClient();
   const [active, setActive] = useState<Section>('profile');
   const [saving, setSaving] = useState(false);
   const [passwordErrors, setPasswordErrors] = useState<string[]>([]);
 
   const [profile, setProfile] = useState({ fullName: '', email: '', currentPassword: '', newPassword: '', confirmPassword: '' });
-  const [apiSettings, setApiSettings] = useState({ model: 'gemini-2.0-flash-exp', temperature: '0.7', maxTokens: '4000', apiKey: '' });
-  const [extractionSettings, setExtractionSettings] = useState({ concurrency: '5', timeout: '300', enableCache: true, autoRetry: true });
   const [notificationSettings, setNotificationSettings] = useState({ email: true, browser: true, extractionComplete: true, extractionFailed: true, codeGeneration: true });
   const [exportSettings, setExportSettings] = useState({ format: 'csv', dateFormat: 'ISO', includeMetadata: true, includeConfidence: true });
 
@@ -116,6 +109,38 @@ export default function SettingsPage() {
       const user = await authService.getCurrentUser();
       setProfile(prev => ({ ...prev, fullName: user.full_name, email: user.email }));
       return user;
+    },
+  });
+
+  // Load persisted settings from API
+  const { data: savedSettings, isLoading: settingsLoading } = useQuery({
+    queryKey: ['userSettings'],
+    queryFn: () => settingsService.getSettings(),
+  });
+
+  // Sync API settings into local state when loaded
+  useEffect(() => {
+    if (savedSettings) {
+      setExportSettings({
+        format: savedSettings.export_format,
+        dateFormat: savedSettings.export_date_format,
+        includeMetadata: savedSettings.export_include_metadata,
+        includeConfidence: savedSettings.export_include_confidence,
+      });
+      setNotificationSettings({
+        email: savedSettings.notify_email,
+        browser: savedSettings.notify_browser,
+        extractionComplete: savedSettings.notify_extraction_completed,
+        extractionFailed: savedSettings.notify_extraction_failed,
+        codeGeneration: savedSettings.notify_code_generation,
+      });
+    }
+  }, [savedSettings]);
+
+  const settingsMutation = useMutation({
+    mutationFn: (data: UserSettingsUpdate) => settingsService.updateSettings(data),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['userSettings'] });
     },
   });
 
@@ -131,6 +156,30 @@ export default function SettingsPage() {
       setSaving(false);
     }
   };
+
+  const saveExport = () =>
+    save(async () => {
+      if (exportSettings.format === 'xlsx') {
+        toast({ title: 'Coming soon', description: 'Excel export is not yet available. Your other preferences have been saved.', variant: 'warning' });
+      }
+      await settingsMutation.mutateAsync({
+        export_format: exportSettings.format === 'xlsx' ? 'csv' : exportSettings.format,
+        export_date_format: exportSettings.dateFormat,
+        export_include_metadata: exportSettings.includeMetadata,
+        export_include_confidence: exportSettings.includeConfidence,
+      });
+    });
+
+  const saveNotifications = () =>
+    save(async () => {
+      await settingsMutation.mutateAsync({
+        notify_email: notificationSettings.email,
+        notify_browser: notificationSettings.browser,
+        notify_extraction_completed: notificationSettings.extractionComplete,
+        notify_extraction_failed: notificationSettings.extractionFailed,
+        notify_code_generation: notificationSettings.codeGeneration,
+      });
+    });
 
   const validateAndSavePassword = async () => {
     const errors: string[] = [];
@@ -150,8 +199,6 @@ export default function SettingsPage() {
   const sectionTitle: Record<Section, string> = {
     profile: 'Profile',
     security: 'Security',
-    api: 'API Keys',
-    extraction: 'Extraction',
     export: 'Export',
     notifications: 'Notifications',
   };
@@ -200,7 +247,7 @@ export default function SettingsPage() {
         {/* ── Content ──────────────────────────────────────────────── */}
         <div className="flex-1 min-w-0 overflow-y-auto pl-8">
 
-          {loading ? (
+          {(loading || settingsLoading) ? (
             <div className="flex items-center justify-center h-48">
               <Loader2 className="w-5 h-5 animate-spin text-gray-300 dark:text-zinc-600" />
             </div>
@@ -271,76 +318,6 @@ export default function SettingsPage() {
                 </>
               )}
 
-              {/* ── API Keys ── */}
-              {active === 'api' && (
-                <>
-                  <SectionCard title="Model Configuration" description="Configure the AI model used for extraction">
-                    <SettingRow label="AI Model" description="Select the model for extraction tasks">
-                      <select value={apiSettings.model} onChange={e => setApiSettings(p => ({ ...p, model: e.target.value }))} className={selectCls}>
-                        <option value="gemini-2.0-flash-exp">Gemini 2.0 Flash (Recommended)</option>
-                        <option value="gemini-3-pro-preview">Gemini 3 Pro Preview</option>
-                        <option value="gpt-4o">GPT-4o</option>
-                        <option value="claude-3-opus">Claude 3 Opus</option>
-                        <option value="claude-3-sonnet">Claude 3 Sonnet</option>
-                      </select>
-                    </SettingRow>
-                    <SettingRow label={`Temperature — ${apiSettings.temperature}`} description="Higher values produce more varied outputs">
-                      <input type="range" min="0" max="2" step="0.1" value={apiSettings.temperature} onChange={e => setApiSettings(p => ({ ...p, temperature: e.target.value }))} className="w-full accent-gray-900 dark:accent-zinc-200" />
-                      <div className="flex justify-between text-[10px] text-gray-300 dark:text-zinc-600 mt-1">
-                        <span>Focused</span><span>Creative</span>
-                      </div>
-                    </SettingRow>
-                    <SettingRow label="Max tokens" description="Maximum tokens per API call" last>
-                      <input type="number" value={apiSettings.maxTokens} onChange={e => setApiSettings(p => ({ ...p, maxTokens: e.target.value }))} placeholder="4000" className={inputCls} />
-                    </SettingRow>
-                  </SectionCard>
-
-                  <SectionCard title="API Key" description="Your key is encrypted and stored securely">
-                    <SettingRow label="API Key" last>
-                      <input type="password" value={apiSettings.apiKey} onChange={e => setApiSettings(p => ({ ...p, apiKey: e.target.value }))} placeholder="sk-••••••••••••••••" className={inputCls} />
-                    </SettingRow>
-                  </SectionCard>
-
-                  <div className="flex justify-end">
-                    <button onClick={() => save()} disabled={saving} className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 transition-colors">
-                      {saving ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Saving…</> : <><Save className="w-3.5 h-3.5" />Save changes</>}
-                    </button>
-                  </div>
-                </>
-              )}
-
-              {/* ── Extraction ── */}
-              {active === 'extraction' && (
-                <>
-                  <SectionCard title="Performance" description="Control how extractions are run">
-                    <SettingRow label={`Batch concurrency — ${extractionSettings.concurrency} documents`} description="Number of documents processed in parallel">
-                      <input type="range" min="1" max="20" value={extractionSettings.concurrency} onChange={e => setExtractionSettings(p => ({ ...p, concurrency: e.target.value }))} className="w-full accent-gray-900 dark:accent-zinc-200" />
-                      <div className="flex justify-between text-[10px] text-gray-300 dark:text-zinc-600 mt-1">
-                        <span>1</span><span>20</span>
-                      </div>
-                    </SettingRow>
-                    <SettingRow label="Timeout (seconds)" description="Maximum time allowed per document" last>
-                      <input type="number" value={extractionSettings.timeout} onChange={e => setExtractionSettings(p => ({ ...p, timeout: e.target.value }))} placeholder="300" className={inputCls} />
-                    </SettingRow>
-                  </SectionCard>
-
-                  <SectionCard title="Behavior">
-                    <SettingRow label="Enable cache" description="Cache results to improve speed on repeated extractions">
-                      <Toggle checked={extractionSettings.enableCache} onChange={v => setExtractionSettings(p => ({ ...p, enableCache: v }))} />
-                    </SettingRow>
-                    <SettingRow label="Auto retry" description="Automatically retry failed extractions up to 3 times" last>
-                      <Toggle checked={extractionSettings.autoRetry} onChange={v => setExtractionSettings(p => ({ ...p, autoRetry: v }))} />
-                    </SettingRow>
-                  </SectionCard>
-
-                  <div className="flex justify-end">
-                    <button onClick={() => save()} disabled={saving} className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 transition-colors">
-                      {saving ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Saving…</> : <><Save className="w-3.5 h-3.5" />Save changes</>}
-                    </button>
-                  </div>
-                </>
-              )}
-
               {/* ── Export ── */}
               {active === 'export' && (
                 <>
@@ -372,7 +349,7 @@ export default function SettingsPage() {
                   </SectionCard>
 
                   <div className="flex justify-end">
-                    <button onClick={() => save()} disabled={saving} className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 transition-colors">
+                    <button onClick={saveExport} disabled={saving} className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 transition-colors">
                       {saving ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Saving…</> : <><Save className="w-3.5 h-3.5" />Save changes</>}
                     </button>
                   </div>
@@ -404,7 +381,7 @@ export default function SettingsPage() {
                   </SectionCard>
 
                   <div className="flex justify-end">
-                    <button onClick={() => save()} disabled={saving} className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 transition-colors">
+                    <button onClick={saveNotifications} disabled={saving} className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 transition-colors">
                       {saving ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Saving…</> : <><Save className="w-3.5 h-3.5" />Save changes</>}
                     </button>
                   </div>
