@@ -67,7 +67,7 @@ export function UnifiedFieldCard({
           </div>
           <div className="flex items-center gap-2 mt-0.5 ml-5.5">
             <span className="text-xs text-gray-500 dark:text-zinc-500 truncate">{value || '—'}</span>
-            <span className="text-[10px] text-gray-300 dark:text-zinc-600 flex-shrink-0">{sourceLabels} all match</span>
+            <span className="text-[10px] text-gray-300 dark:text-zinc-600 flex-shrink-0">{sourceLabels.includes('·') ? `${sourceLabels} all match` : `${sourceLabels} only`}</span>
           </div>
         </div>
       );

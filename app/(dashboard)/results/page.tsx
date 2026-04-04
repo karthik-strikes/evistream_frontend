@@ -27,17 +27,50 @@ type SortKey = 'doc_name_asc' | 'doc_name_desc' | 'date_newest' | 'date_oldest' 
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
+// Unwrap {value, source_text, source_location} wrappers at any depth
+function unwrapValue(v: any): any {
+  if (v && typeof v === 'object' && !Array.isArray(v) && 'value' in v) return v.value;
+  return v;
+}
+
 function extractScalarValue(data: any): string {
   if (data === null || data === undefined) return '—';
   if (typeof data === 'string') return data.trim() || '—';
   if (typeof data === 'number' || typeof data === 'boolean') return String(data);
+  // Wrapped scalar: {value: "X", source_text: "..."}
   if (typeof data === 'object' && !Array.isArray(data) && 'value' in data) {
     const v = data.value;
     if (v === null || v === undefined || String(v).trim() === '') return '—';
+    // If the value itself is an array or object, recurse
+    if (Array.isArray(v)) return extractScalarValue(v);
     const s = String(v);
     return s.length > 120 ? s.slice(0, 120) + '…' : s;
   }
-  if (Array.isArray(data)) return data.length === 0 ? '—' : `[${data.length} items]`;
+  if (Array.isArray(data)) {
+    if (data.length === 0) return '—';
+    // Array of primitives
+    if (data.every((d: any) => typeof d === 'string' || typeof d === 'number')) return data.join(', ');
+    // Array of objects — summarize each item
+    const items = data.map((item: any) => {
+      if (item == null) return '';
+      if (typeof item === 'string' || typeof item === 'number') return String(item);
+      if (typeof item !== 'object') return String(item);
+      // Unwrap all fields in this object
+      const flat: Record<string, any> = {};
+      for (const [k, v] of Object.entries(item)) {
+        const u = unwrapValue(v);
+        if (u != null && u !== '' && typeof u !== 'object') flat[k] = u;
+      }
+      // Try to find a name/label field for a short summary
+      const nameKey = Object.keys(flat).find(k => /name|title|label|intervention|drug|treatment/i.test(k));
+      if (nameKey) return String(flat[nameKey]);
+      // Fallback: join the scalar values
+      const vals = Object.values(flat).filter(v => v != null && String(v).trim() !== '');
+      return vals.slice(0, 4).join(', ');
+    });
+    const summary = items.filter((s: string) => s && s.trim()).join(' · ');
+    return summary.length > 200 ? summary.slice(0, 200) + '…' : summary || `${data.length} items`;
+  }
   const j = JSON.stringify(data);
   return j.length > 120 ? j.slice(0, 120) + '…' : j;
 }
@@ -51,6 +84,11 @@ function hasSourceText(data: any): boolean {
     data.source_text.trim() !== '' &&
     data.source_text !== 'NR'
   );
+}
+
+function hasAnyEvidence(data: any): boolean {
+  if (typeof data !== 'object' || data === null || Array.isArray(data)) return false;
+  return hasSourceText(data) || !!data.source_location;
 }
 
 const formatFieldName = (f: string) =>
@@ -367,14 +405,17 @@ function EvidenceTableView({
                                 : undefined
                               }
                             />
-                            {hasSourceText(val) && !val.source_location && (
-                              <blockquote className="mt-1.5 pl-2 border-l-2 border-green-300 dark:border-green-700 text-[11px] text-gray-500 dark:text-zinc-400 italic leading-relaxed">
-                                {val.source_text}
-                              </blockquote>
-                            )}
                           </div>
                         ) : (
-                          <p className="text-gray-700 dark:text-zinc-300 line-clamp-2">{extractScalarValue(val)}</p>
+                          <p className="text-gray-700 dark:text-zinc-300 line-clamp-2">
+                            {extractScalarValue(val)}
+                            {hasSourceText(val) && (
+                              <span
+                                className="inline-block ml-1 w-1.5 h-1.5 rounded-full bg-green-500 dark:bg-green-400 align-middle"
+                                title="Source evidence available — click to expand"
+                              />
+                            )}
+                          </p>
                         )}
                       </td>
                     );
@@ -460,9 +501,9 @@ function PageSizePicker({ value, onChange }: { value: PageSize; onChange: (v: Pa
   );
 }
 
-const COL_PX = 200;
+const COL_PX = 280;
 const ROW_PADDING = 'py-3';
-const ROW_CLAMP = 'line-clamp-2';
+const ROW_CLAMP = 'line-clamp-3';
 
 function FieldComparisonView({
   results,
@@ -482,9 +523,27 @@ function FieldComparisonView({
   const [pageIndex, setPageIndex] = useState(0);
   const [showDocSelector, setShowDocSelector] = useState(false);
   const [expandedCells, setExpandedCells] = useState<Set<string>>(new Set());
+  const [colWidths, setColWidths] = useState<Record<number, number>>({});
 
   const toggleCell = (key: string) =>
     setExpandedCells(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+
+  const handleColResize = (colIdx: number, startX: number, startWidth: number) => {
+    const onMove = (e: MouseEvent) => {
+      const newWidth = Math.max(120, startWidth + e.clientX - startX);
+      setColWidths(prev => ({ ...prev, [colIdx]: newWidth }));
+    };
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  };
 
   const expandAllCells = () => {
     const keys = new Set<string>();
@@ -548,6 +607,13 @@ function FieldComparisonView({
 
   const startDoc = clampedPage * effectivePageSize + 1;
   const endDoc = Math.min((clampedPage + 1) * effectivePageSize, selectedResults.length);
+
+  // Dynamic grid columns based on resize state
+  const getGridCols = () => {
+    const cols = pageResults.map((_, i) => `${colWidths[i] || COL_PX}px`).join(' ');
+    return `240px ${cols}`;
+  };
+  const getMinWidth = () => 240 + pageResults.reduce((s, _, i) => s + (colWidths[i] || COL_PX), 0);
 
   const toggleDoc = (id: string) => {
     setSelectedDocIds(prev => {
@@ -632,6 +698,10 @@ function FieldComparisonView({
           <ChevronsUpDown className="w-3.5 h-3.5" />
           {expandedCells.size > 0 ? 'Collapse All' : 'Expand All'}
         </button>
+        <span className="flex items-center gap-1 text-[10px] font-medium text-gray-400 dark:text-zinc-600">
+          <span className="w-1.5 h-1.5 rounded-full bg-green-500 dark:bg-green-400 inline-block" />
+          Has source evidence — click to expand
+        </span>
 
         <div className="flex-1" />
 
@@ -684,14 +754,14 @@ function FieldComparisonView({
           <div
             className="grid bg-gray-50 dark:bg-[#0a0a0a] border-b border-gray-200 dark:border-[#1f1f1f]"
             style={{
-              minWidth: `${240 + colCount * COL_PX}px`,
-              gridTemplateColumns: `240px repeat(${colCount}, minmax(${COL_PX}px, 1fr))`,
+              minWidth: `${getMinWidth()}px`,
+              gridTemplateColumns: getGridCols(),
             }}
           >
             <div className="sticky left-0 z-10 bg-gray-50 dark:bg-[#0a0a0a] px-4 py-3 text-[10px] font-semibold text-gray-400 dark:text-zinc-600 uppercase tracking-widest border-r border-gray-200 dark:border-[#1f1f1f]">
               Field
             </div>
-            {pageResults.map(r => {
+            {pageResults.map((r, colIdx) => {
               const doc = documentsMap[r.document_id];
               const { pct } = getCompleteness(r);
               const barColor =
@@ -699,11 +769,16 @@ function FieldComparisonView({
                 pct >= 50 ? 'bg-amber-500 dark:bg-amber-400' :
                 'bg-red-500 dark:bg-red-400';
               return (
-                <div key={r.id} className="px-3 py-2 border-r border-gray-200 dark:border-[#1f1f1f] last:border-r-0 bg-gray-50 dark:bg-[#0a0a0a]">
+                <div key={r.id} className="relative px-3 py-2 border-r border-gray-200 dark:border-[#1f1f1f] last:border-r-0 bg-gray-50 dark:bg-[#0a0a0a]">
                   <div className="text-[11px] font-medium text-gray-700 dark:text-zinc-300 truncate mb-1.5" title={doc?.filename}>
                     {doc?.filename || '—'}
                   </div>
                   <Progress value={pct} indicatorClassName={barColor} className="h-1" />
+                  {/* Resize handle */}
+                  <div
+                    className="absolute right-0 top-0 bottom-0 w-1.5 cursor-col-resize hover:bg-blue-400/30 transition-colors z-20"
+                    onMouseDown={e => { e.preventDefault(); handleColResize(colIdx, e.clientX, colWidths[colIdx] || COL_PX); }}
+                  />
                 </div>
               );
             })}
@@ -712,7 +787,7 @@ function FieldComparisonView({
 
         {/* ── Scrollable body (drives horizontal scroll, synced to header) ── */}
         <div ref={bodyScrollRef} className="overflow-x-auto rounded-b-xl border border-t-0 border-gray-200 dark:border-[#1f1f1f] relative z-0">
-          <div style={{ minWidth: `${240 + colCount * COL_PX}px` }}>
+          <div style={{ minWidth: `${getMinWidth()}px` }}>
             {visibleFields.length === 0 && (
               <div className="py-12 text-center text-sm text-gray-400 dark:text-zinc-600 bg-white dark:bg-[#111111]">
                 No fields match your search.
@@ -741,7 +816,7 @@ function FieldComparisonView({
                 <div
                   key={fieldName}
                   className={cn('grid border-b border-gray-100 dark:border-[#1f1f1f] last:border-b-0', rowBg)}
-                  style={{ gridTemplateColumns: `240px repeat(${colCount}, minmax(${COL_PX}px, 1fr))` }}
+                  style={{ gridTemplateColumns: getGridCols() }}
                 >
                   <div className={cn('sticky left-0 z-10 px-4 border-r border-gray-100 dark:border-[#1f1f1f]', stickyBg, ROW_PADDING)}>
                     <div className="text-[11px] font-semibold text-gray-700 dark:text-zinc-300 leading-tight">
@@ -757,32 +832,43 @@ function FieldComparisonView({
                     const isEmpty = !scalar || scalar === '—' || scalar === 'N/A';
                     const cellKey = `${fieldName}:${r.id}`;
                     const isExpanded = expandedCells.has(cellKey);
+                    // Detect array data at any wrapping depth
+                    const unwrappedRaw = raw && typeof raw === 'object' && !Array.isArray(raw) && 'value' in raw ? raw.value : raw;
+                    const isArrayData = Array.isArray(raw) || Array.isArray(unwrappedRaw);
                     return (
                       <div
                         key={r.id}
-                        onClick={() => !isEmpty && toggleCell(cellKey)}
+                        onClick={() => !isEmpty && !isArrayData && toggleCell(cellKey)}
                         className={cn(
                           'px-3 text-xs leading-relaxed border-r border-gray-100 dark:border-[#1f1f1f] last:border-r-0 transition-colors',
                           ROW_PADDING,
                           isEmpty
                             ? 'text-gray-300 dark:text-zinc-700 italic'
-                            : cn('text-gray-700 dark:text-zinc-300 cursor-pointer hover:bg-gray-50 dark:hover:bg-white/[0.03]'),
-                          isExpanded && 'bg-slate-50 dark:bg-white/[0.04] ring-1 ring-inset ring-slate-300 dark:ring-slate-600'
+                            : isArrayData
+                              ? 'text-gray-700 dark:text-zinc-300'
+                              : cn('text-gray-700 dark:text-zinc-300 cursor-pointer hover:bg-gray-50 dark:hover:bg-white/[0.03]'),
+                          isExpanded && !isArrayData && 'bg-slate-50 dark:bg-white/[0.04] ring-1 ring-inset ring-slate-300 dark:ring-slate-600'
                         )}
                       >
-                        {isEmpty ? '—' : isExpanded ? (
+                        {isEmpty ? '—' : isArrayData ? (
+                          <div className="overflow-x-auto max-h-[400px] overflow-y-auto">
+                            <DynamicDataRenderer data={raw} fieldName={fieldName} />
+                          </div>
+                        ) : isExpanded ? (
                           <div>
                             <DynamicDataRenderer data={raw} fieldName={fieldName} />
-                            {hasSourceText(raw) && (
-                              <blockquote className="mt-1.5 pl-2 border-l-2 border-slate-300 dark:border-slate-600 text-[11px] text-gray-500 dark:text-zinc-400 italic leading-relaxed">
-                                {raw.source_text}
-                              </blockquote>
-                            )}
                           </div>
                         ) : (
-                          <span className={ROW_CLAMP}>{scalar}</span>
+                          <span className={ROW_CLAMP}>
+                            {scalar}
+                            {hasAnyEvidence(raw) && (
+                              <span
+                                className="inline-block ml-1 w-1.5 h-1.5 rounded-full bg-green-500 dark:bg-green-400 align-middle flex-shrink-0"
+                                title="Source evidence available — click to expand"
+                              />
+                            )}
+                          </span>
                         )}
-
                       </div>
                     );
                   })}
@@ -806,13 +892,18 @@ function ResultsContent() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const extractionIdParam = searchParams.get('extraction_id');
+  const formIdParam = searchParams.get('form_id');
   const sourceTabParam = searchParams.get('tab');
+
+  // Form-level merged view: when form_id is in URL, show all results for that form
+  const isFormView = !!formIdParam && !extractionIdParam;
 
   const [selectedExtractionId, setSelectedExtractionId] = useState<string>(extractionIdParam || '');
   const [activeView, setActiveView] = useState<'table' | 'compare'>('table');
   const [searchQuery, setSearchQuery] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('date_newest');
   const [sourceTab, setSourceTab] = useState<'ai' | 'manual' | 'final'>((sourceTabParam as any) || 'ai');
+  const [expandedFormId, setExpandedFormId] = useState<string | null>(null);
 
   // Update URL when extraction or tab changes (enables browser back/forward)
   const selectExtraction = (id: string) => {
@@ -847,11 +938,18 @@ function ResultsContent() {
       const withResults = data.filter((e: Extraction) => e.status === 'completed' || e.status === 'manual' || e.status === 'consensus');
       const formMap: Record<string, any> = {};
       formData.forEach((f: any) => { formMap[f.id] = f; });
-      return { extractions: withResults, forms: formMap };
+      return { extractions: withResults, allExtractions: data, forms: formMap };
     },
     enabled: !!selectedProject,
+    refetchInterval: (query) => {
+      const all = query.state.data?.allExtractions ?? [];
+      return all.some((e: any) => e.status === 'running' || e.status === 'pending') ? 3000 : false;
+    },
   });
-  const allExtractions = useMemo(() => extractionsData?.extractions ?? [], [extractionsData]);
+  // extractionsData.extractions = only completed/manual/consensus (for picker/tabs)
+  // extractionsData.allExtractions = ALL extractions regardless of status (for lookups)
+  const extractionsWithResults = useMemo(() => extractionsData?.extractions ?? [], [extractionsData]);
+  const allExtractions = useMemo(() => extractionsData?.allExtractions ?? [], [extractionsData]);
   const forms = useMemo(() => extractionsData?.forms ?? {}, [extractionsData]);
 
   // Filter by source tab
@@ -869,14 +967,24 @@ function ResultsContent() {
   const manualCount = useMemo(() => allExtractions.filter((e: Extraction) => e.status === 'manual').length, [allExtractions]);
   const consensusCount = useMemo(() => allExtractions.filter((e: Extraction) => e.status === 'consensus').length, [allExtractions]);
 
-  const selectedExtraction = extractions.find((e: Extraction) => e.id === selectedExtractionId);
-  const currentForm = selectedExtraction ? forms[selectedExtraction.form_id] : null;
+  // BUG FIX: Look up selectedExtraction from ALL extractions (not tab-filtered)
+  // Use effectiveId to handle first render where state hasn't synced from URL yet
+  const effectiveSelectedId = selectedExtractionId || extractionIdParam || '';
+  const selectedExtraction = allExtractions.find((e: Extraction) => e.id === effectiveSelectedId);
+  // In form view, resolve form directly from formIdParam; otherwise from selected extraction
+  const currentForm = isFormView
+    ? (formIdParam ? forms[formIdParam] : null)
+    : (selectedExtraction ? forms[selectedExtraction.form_id] : null);
   const formFields = currentForm?.fields ?? [];
 
   const { data: selectedJob } = useQuery({
     queryKey: ['job', selectedExtraction?.job_id],
     queryFn: () => jobsService.getById(selectedExtraction!.job_id!),
     enabled: !!selectedExtraction?.job_id,
+    refetchInterval: (query) => {
+      const s = query.state.data?.status;
+      return s === 'processing' || s === 'pending' ? 3000 : false;
+    },
   });
   const failedDocIds: string[] = selectedJob?.result_data?.failed_document_ids ?? [];
 
@@ -892,36 +1000,71 @@ function ResultsContent() {
     }
   };
 
-  // Sync state from URL on browser back/forward
+  // BUG FIX: Single consolidated useEffect for URL sync + auto-select
+  // URL param is source of truth when present. Only auto-select when no URL param.
   useEffect(() => {
-    const urlExtId = searchParams.get('extraction_id');
+    if (isFormView) return;
+
+    // Sync tab from URL
     const urlTab = searchParams.get('tab') as 'ai' | 'manual' | 'final' | null;
-    if (urlExtId && urlExtId !== selectedExtractionId) setSelectedExtractionId(urlExtId);
     if (urlTab && urlTab !== sourceTab) setSourceTab(urlTab);
     if (!urlTab && sourceTab !== 'ai') setSourceTab('ai');
-  }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Auto-select first extraction when tab changes or on load
-  useEffect(() => {
+    // Sync extraction_id from URL — URL is source of truth
+    const urlExtId = searchParams.get('extraction_id');
+    if (urlExtId) {
+      // URL has an extraction_id — use it if it exists in allExtractions
+      const exists = allExtractions.some((e: Extraction) => e.id === urlExtId);
+      if (exists && urlExtId !== selectedExtractionId) {
+        setSelectedExtractionId(urlExtId);
+      }
+      return; // Don't auto-select when URL param is explicitly set
+    }
+
+    // No URL extraction_id — auto-select first from tab-filtered list
     if (extractions.length > 0) {
       const currentStillValid = extractions.some((e: Extraction) => e.id === selectedExtractionId);
       if (!currentStillValid) {
-        if (extractionIdParam && extractions.some((e: Extraction) => e.id === extractionIdParam)) {
-          setSelectedExtractionId(extractionIdParam);
-        } else {
-          setSelectedExtractionId(extractions[0].id);
-        }
+        setSelectedExtractionId(extractions[0].id);
       }
     } else {
       setSelectedExtractionId('');
     }
-  }, [extractions, extractionIdParam]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [searchParams, extractions, allExtractions, isFormView]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const { data: results = [], isLoading: resultsLoading, error: resultsError } = useQuery({
-    queryKey: ['results', selectedExtractionId],
-    queryFn: () => resultsService.getAll({ extractionId: selectedExtractionId }),
-    enabled: !!selectedExtractionId,
+  // Form-level merged results (when form_id param is set)
+  const { data: formResults = [], isLoading: formResultsLoading, error: formResultsError } = useQuery({
+    queryKey: ['results-by-form', selectedProject?.id, formIdParam],
+    queryFn: () => resultsService.getAll({ projectId: selectedProject!.id, formId: formIdParam! }),
+    enabled: isFormView && !!selectedProject && !!formIdParam,
   });
+
+  // Per-extraction results (existing behavior)
+  // Use extractionIdParam directly as fallback — selectedExtractionId may lag behind URL on first render
+  const effectiveExtractionId = selectedExtractionId || extractionIdParam || '';
+  const { data: extractionResults = [], isLoading: extractionResultsLoading, error: extractionResultsError } = useQuery({
+    queryKey: ['results', effectiveExtractionId],
+    queryFn: () => resultsService.getAll({ extractionId: effectiveExtractionId }),
+    enabled: !isFormView && !!effectiveExtractionId,
+  });
+
+  // Deduplicate form results: keep newest result per document_id
+  const deduplicatedFormResults = useMemo(() => {
+    if (!isFormView) return [];
+    const byDoc = new Map<string, typeof formResults[0]>();
+    for (const r of formResults) {
+      const existing = byDoc.get(r.document_id);
+      if (!existing || new Date(r.created_at) > new Date(existing.created_at)) {
+        byDoc.set(r.document_id, r);
+      }
+    }
+    return Array.from(byDoc.values());
+  }, [formResults, isFormView]);
+
+  // Unified results: form view uses deduplicated, extraction view uses per-extraction
+  const results = isFormView ? deduplicatedFormResults : extractionResults;
+  const resultsLoading = isFormView ? formResultsLoading : extractionResultsLoading;
+  const resultsError = isFormView ? formResultsError : extractionResultsError;
 
   const documentIds = useMemo(() => Array.from(new Set(results.map(r => r.document_id))), [results]);
   const { data: documentsList = [] } = useQuery({
@@ -954,11 +1097,11 @@ function ResultsContent() {
     sourceLink.scrollToField(fieldName);
   }, [pdfViewerDocId, documentsMap, sourceLink, toast]);
 
-  const loading = !extractionsData || resultsLoading;
+  const loading = isFormView ? formResultsLoading : (!extractionsData || resultsLoading);
   const error = resultsError ? getErrorMessage(resultsError as any, 'Failed to load results') : null;
 
   const handleExport = (format: 'json' | 'csv') => {
-    if (!selectedExtractionId || filteredResults.length === 0) return;
+    if ((!isFormView && !selectedExtractionId) || filteredResults.length === 0) return;
     try {
       const longFormat = transformToLongFormat(filteredResults, formFields, documentsMap);
       const content = format === 'csv' ? toCSV(longFormat) : toJSON(longFormat);
@@ -967,7 +1110,10 @@ function ResultsContent() {
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `extraction_${selectedExtractionId}_long.${format}`;
+      const filePrefix = isFormView
+        ? `form_${(currentForm?.form_name || formIdParam || 'results').replace(/\s+/g, '_')}`
+        : `extraction_${selectedExtractionId}`;
+      a.download = `${filePrefix}_long.${format}`;
       document.body.appendChild(a);
       a.click();
       document.body.removeChild(a);
@@ -1033,6 +1179,63 @@ function ResultsContent() {
     return allFieldNames.filter(f => f.toLowerCase().includes(searchQuery.toLowerCase()));
   }, [allFieldNames, searchQuery, activeView]);
 
+  // Build form picker: group extractions by form_id
+  // Form picker shows forms that have results for the active tab
+  // But "View by run" dropdown inside results shows ALL runs (including failed)
+  const formsWithResults = useMemo(() => {
+    const statusMap: Record<string, string[]> = {
+      ai: ['completed'],
+      manual: ['manual'],
+      final: [],
+    };
+    const pickerStatuses = statusMap[sourceTab] || [];
+
+    // First pass: collect ALL extraction IDs per form (for the run switcher dropdown)
+    const allRunsMap = new Map<string, { id: string; date: string; status: string }[]>();
+    for (const ext of (extractionsData?.allExtractions ?? [])) {
+      const runs = allRunsMap.get(ext.form_id) || [];
+      runs.push({ id: ext.id, date: ext.created_at, status: ext.status });
+      allRunsMap.set(ext.form_id, runs);
+    }
+
+    // Second pass: build form entries for the picker (only forms with results matching tab)
+    const formMap = new Map<string, {
+      formId: string;
+      formName: string;
+      extractionCount: number;
+      latestDate: string;
+      extractionIds: { id: string; date: string }[];
+    }>();
+    for (const ext of allExtractions) {
+      if (!pickerStatuses.includes(ext.status)) continue;
+      const existing = formMap.get(ext.form_id);
+      const form = forms[ext.form_id];
+      // Use ALL runs for this form in the dropdown (not just completed ones)
+      const allRuns = (allRunsMap.get(ext.form_id) || [])
+        .sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      if (!existing) {
+        formMap.set(ext.form_id, {
+          formId: ext.form_id,
+          formName: form?.form_name || 'Unknown Form',
+          extractionCount: allRuns.length,
+          latestDate: ext.created_at,
+          extractionIds: allRuns.map(r => ({ id: r.id, date: r.date })),
+        });
+      } else {
+        // Already in the map — just update latestDate if newer
+        if (new Date(ext.created_at) > new Date(existing.latestDate)) {
+          existing.latestDate = ext.created_at;
+        }
+      }
+    }
+    return Array.from(formMap.values()).sort((a, b) =>
+      new Date(b.latestDate).getTime() - new Date(a.latestDate).getTime()
+    );
+  }, [allExtractions, extractionsData, forms, sourceTab]);
+
+  // Show form picker when no form_id or extraction_id in URL
+  const showFormPicker = !isFormView && !extractionIdParam;
+
   if (!selectedProject) {
     return (
       <DashboardLayout title="Results" description="View and export extraction results">
@@ -1067,9 +1270,42 @@ function ResultsContent() {
 
       {sourceTab === 'final' ? (
         <FinalDatasetView />
-      ) : loading && extractions.length === 0 ? (
+      ) : showFormPicker ? (
+        /* Form picker — shown when no form_id or extraction_id in URL */
+        !extractionsData ? (
+          <div className="flex justify-center items-center py-12"><Spinner size="lg" /></div>
+        ) : formsWithResults.length === 0 ? (
+          <EmptyState
+            icon={TableIcon}
+            title="No extraction results"
+            description="Run an extraction first to see results here"
+          />
+        ) : (
+          <div className="flex flex-col gap-3">
+            <p className="text-xs text-gray-400 dark:text-zinc-400">Select a form to view its results</p>
+            {formsWithResults.map(f => (
+              <button
+                key={f.formId}
+                onClick={() => router.push(`/results?form_id=${f.formId}`)}
+                className="w-full text-left px-[22px] py-4 rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] hover:shadow-card-hover hover:-translate-y-px transition-all duration-150 cursor-pointer"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-sm font-semibold text-gray-900 dark:text-white">{f.formName}</span>
+                  <div className="flex items-center gap-3 text-xs text-gray-500 dark:text-zinc-400">
+                    {f.extractionCount > 1 && (
+                      <span>{f.extractionCount} runs</span>
+                    )}
+                    <span>{new Date(f.latestDate).toLocaleDateString()}</span>
+                    <ChevronDown className="w-3.5 h-3.5 -rotate-90 text-gray-300 dark:text-zinc-600" />
+                  </div>
+                </div>
+              </button>
+            ))}
+          </div>
+        )
+      ) : loading && extractions.length === 0 && !isFormView ? (
         <div className="flex justify-center items-center py-12"><Spinner size="lg" /></div>
-      ) : extractions.length === 0 ? (
+      ) : !isFormView && extractions.length === 0 ? (
         <EmptyState
           icon={TableIcon}
           title={sourceTab === 'ai' ? 'No AI extractions' : 'No manual extractions'}
@@ -1095,22 +1331,89 @@ function ResultsContent() {
 
           {/* Toolbar */}
           <div className="flex items-center gap-3 flex-wrap">
-            {/* Extraction picker */}
+            {/* Extraction picker / Form label */}
             <div className="flex items-center gap-2 min-w-0">
-              <div className="relative">
-                <select
-                  value={selectedExtractionId}
-                  onChange={e => selectExtraction(e.target.value)}
-                  className="text-sm font-medium text-gray-900 dark:text-white bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#1f1f1f] rounded-lg py-1.5 pl-3 pr-8 outline-none cursor-pointer hover:border-gray-300 dark:hover:border-[#2a2a2a] focus:border-gray-400 dark:focus:border-[#3f3f3f] transition-colors dark:[color-scheme:dark] appearance-none min-w-[260px]"
-                >
-                  {extractions.map(ext => (
-                    <option key={ext.id} value={ext.id}>
-                      {forms[ext.form_id]?.form_name || 'Unknown form'} — {new Date(ext.created_at).toLocaleDateString()}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
-              </div>
+              {isFormView ? (
+                <div className="flex items-center gap-3">
+                  <span className="text-sm font-semibold text-gray-900 dark:text-white">
+                    {currentForm?.form_name || 'All runs combined'}
+                  </span>
+                  <span className="text-xs text-gray-500 dark:text-zinc-400">
+                    {results.length} {results.length === 1 ? 'document' : 'documents'}
+                  </span>
+                  {/* View by run — subtle dropdown */}
+                  {(() => {
+                    const formEntry = formsWithResults.find(f => f.formId === formIdParam);
+                    if (!formEntry || formEntry.extractionCount <= 1) return null;
+                    return (
+                      <div className="relative">
+                        <select
+                          value=""
+                          onChange={e => { if (e.target.value) router.push(`/results?extraction_id=${e.target.value}`); }}
+                          className="text-[11px] text-gray-400 dark:text-zinc-500 bg-transparent border border-gray-200 dark:border-[#1f1f1f] rounded-md py-1 pl-2 pr-6 outline-none cursor-pointer hover:border-gray-300 dark:hover:border-[#2a2a2a] transition-colors dark:[color-scheme:dark] appearance-none"
+                        >
+                          <option value="">View by run</option>
+                          {formEntry.extractionIds.map((ext) => (
+                            <option key={ext.id} value={ext.id}>
+                              {new Date(ext.date).toLocaleDateString()} {new Date(ext.date).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                      </div>
+                    );
+                  })()}
+                </div>
+              ) : (
+                <div className="flex items-center gap-3">
+                  <span className="text-sm font-medium text-gray-900 dark:text-white">
+                    {currentForm?.form_name || 'Unknown form'}
+                  </span>
+                  <span className="text-xs text-gray-400 dark:text-zinc-500">
+                    {results.length} {results.length === 1 ? 'document' : 'documents'}
+                  </span>
+                  {/* Run switcher — shows all runs for this form, can switch or go to "All runs" */}
+                  {(() => {
+                    const formId = selectedExtraction?.form_id;
+                    if (!formId) return null;
+                    // Build run list from ALL extractions for this form (not just completed)
+                    const formRuns = (extractionsData?.allExtractions ?? [])
+                      .filter((e: Extraction) => e.form_id === formId)
+                      .sort((a: Extraction, b: Extraction) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+                    if (formRuns.length <= 1) return null;
+                    return (
+                      <div className="relative">
+                        <select
+                          value={selectedExtractionId}
+                          onChange={e => {
+                            const val = e.target.value;
+                            if (val === '__all__') router.push(`/results?form_id=${formId}`);
+                            else router.push(`/results?extraction_id=${val}`);
+                          }}
+                          className="text-[11px] text-gray-500 dark:text-zinc-400 bg-transparent border border-gray-200 dark:border-[#222222] rounded-md py-1 pl-2 pr-6 outline-none cursor-pointer hover:border-gray-300 dark:hover:border-[#2a2a2a] transition-colors dark:[color-scheme:dark] appearance-none"
+                        >
+                          <option value="__all__">All runs</option>
+                          {formRuns.map((ext: Extraction) => (
+                            <option key={ext.id} value={ext.id}>
+                              {new Date(ext.created_at).toLocaleDateString()} {new Date(ext.created_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                      </div>
+                    );
+                  })()}
+                  {/* View details — link to debug/detail page for this specific run */}
+                  {selectedExtractionId && (
+                    <button
+                      onClick={() => router.push(`/extractions/${selectedExtractionId}`)}
+                      className="text-[11px] text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 transition-colors cursor-pointer"
+                    >
+                      View details
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
 
             <div className="flex-1" />

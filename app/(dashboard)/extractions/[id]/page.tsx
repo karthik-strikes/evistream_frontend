@@ -15,8 +15,9 @@ import {
   Download,
   AlertCircle,
   RotateCcw,
+  ChevronDown,
 } from 'lucide-react';
-import { extractionsService, jobsService, resultsService, formsService } from '@/services';
+import { extractionsService, jobsService, resultsService, formsService, documentsService } from '@/services';
 import { useQueryClient } from '@tanstack/react-query';
 import { useProject } from '@/contexts/ProjectContext';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
@@ -55,6 +56,7 @@ export default function ExtractionDetailPage() {
   const [isExportingCSV, setIsExportingCSV] = useState(false);
   const [isExportingJSON, setIsExportingJSON] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [expandedResults, setExpandedResults] = useState<Set<string>>(new Set());
   const logsEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<JobLogsWebSocket | null>(null);
 
@@ -94,6 +96,16 @@ export default function ExtractionDetailPage() {
     enabled: !!selectedProject,
   });
 
+  // Fetch documents for name lookup
+  const { data: allDocuments = [] } = useQuery({
+    queryKey: ['documents', selectedProject?.id],
+    queryFn: () => documentsService.getAll(selectedProject!.id),
+    enabled: !!selectedProject,
+  });
+
+  const docNamesMap = new Map<string, string>();
+  allDocuments.forEach((d: any) => docNamesMap.set(d.id, d.filename));
+
   const formName = extraction
     ? forms.find((f: any) => f.id === extraction.form_id)?.form_name ?? 'Unknown Form'
     : '—';
@@ -108,6 +120,10 @@ export default function ExtractionDetailPage() {
       onLog: (msg) => setLogs((prev) => [...prev, msg]),
       onStage: (msg) => setLogs((prev) => [...prev, msg]),
       onProgress: (msg) => setLogs((prev) => [...prev, msg]),
+      onComplete: () => {
+        queryClient.invalidateQueries({ queryKey: ['extraction', extractionId] });
+        queryClient.invalidateQueries({ queryKey: ['extractions', extraction.project_id] });
+      },
     });
     ws.connect(token);
     wsRef.current = ws;
@@ -181,6 +197,14 @@ export default function ExtractionDetailPage() {
   const duration = isLoadingJob && extraction?.job_id
     ? '...'
     : formatDuration(job?.started_at ?? null, job?.completed_at);
+
+  const toggleResultExpanded = (id: string) => {
+    setExpandedResults((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
 
   // Group results by document
   const resultsByDoc = new Map<string, ExtractionResult>();
@@ -349,22 +373,50 @@ export default function ExtractionDetailPage() {
                         <p className="text-[10px] uppercase tracking-wider text-gray-400 dark:text-zinc-600 font-medium mb-2">
                           Extracted — {results.length}
                         </p>
-                        {results.map((result) => (
-                          <div
-                            key={result.id}
-                            className="flex items-center gap-3 px-3.5 py-2.5 rounded-lg bg-gray-50 dark:bg-[#1a1a1a] border border-gray-100 dark:border-[#2a2a2a]"
-                          >
-                            <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />
-                            <div className="flex-1 min-w-0">
-                              <p className="text-sm font-mono text-gray-900 dark:text-white truncate">
-                                {result.document_id}
-                              </p>
+                        {results.map((result) => {
+                          const isExpanded = expandedResults.has(result.id);
+                          const fields = Object.entries(result.extracted_data);
+                          return (
+                            <div key={result.id}>
+                              <button
+                                onClick={() => toggleResultExpanded(result.id)}
+                                className="w-full flex items-center gap-3 px-3.5 py-2.5 rounded-lg bg-gray-50 dark:bg-[#1a1a1a] border border-gray-100 dark:border-[#2a2a2a] cursor-pointer hover:bg-gray-100 dark:hover:bg-[#222222] transition-colors text-left"
+                              >
+                                <CheckCircle2 className="w-4 h-4 text-green-500 flex-shrink-0" />
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-sm text-gray-900 dark:text-white truncate">
+                                    {docNamesMap.get(result.document_id) ?? result.document_id}
+                                  </p>
+                                </div>
+                                <span className="text-xs text-gray-400 flex-shrink-0">
+                                  {fields.length} fields
+                                </span>
+                                <ChevronDown
+                                  className={cn(
+                                    'w-3.5 h-3.5 text-gray-300 dark:text-zinc-600 transition-transform duration-150 flex-shrink-0',
+                                    isExpanded && 'rotate-180',
+                                  )}
+                                />
+                              </button>
+                              {isExpanded && fields.length > 0 && (
+                                <div className="ml-7 mt-1 mb-2 px-3.5 py-3 rounded-lg bg-gray-100/60 dark:bg-[#0d0d0d] border border-gray-100 dark:border-[#1f1f1f]">
+                                  <div className="grid grid-cols-1 gap-2">
+                                    {fields.map(([key, value]) => (
+                                      <div key={key} className="flex items-start gap-3">
+                                        <span className="text-[11px] font-medium text-gray-400 dark:text-zinc-500 min-w-[120px] flex-shrink-0 pt-0.5 truncate">
+                                          {key}
+                                        </span>
+                                        <span className="text-xs text-gray-700 dark:text-zinc-300 break-words leading-relaxed">
+                                          {typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value ?? '—')}
+                                        </span>
+                                      </div>
+                                    ))}
+                                  </div>
+                                </div>
+                              )}
                             </div>
-                            <span className="text-xs text-gray-400 flex-shrink-0">
-                              {Object.keys(result.extracted_data).length} fields
-                            </span>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
 
@@ -397,7 +449,9 @@ export default function ExtractionDetailPage() {
                           >
                             <XCircle className="w-4 h-4 text-amber-500 dark:text-amber-400 flex-shrink-0" />
                             <div className="flex-1 min-w-0">
-                              <p className="text-sm font-mono text-amber-700 dark:text-amber-400 truncate">{docId}</p>
+                              <p className="text-sm text-amber-700 dark:text-amber-400 truncate">
+                                {docNamesMap.get(docId) ?? docId}
+                              </p>
                             </div>
                             <span className="text-xs text-amber-500 dark:text-amber-500 flex-shrink-0 font-medium">Failed</span>
                           </div>

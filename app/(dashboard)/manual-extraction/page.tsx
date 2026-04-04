@@ -13,12 +13,15 @@ import type { ExtractionMode } from './_components/ExtractionToolbar';
 import { useDraftAutoSave } from './_hooks/useDraftAutoSave';
 import { useExtractionKeyboard } from './_hooks/useExtractionKeyboard';
 
-/** Flatten fields, expanding subform_fields */
+/** Flatten fields, expanding subform_fields with composite keys to avoid collisions */
 function flattenFields(fields: FormField[]): FormField[] {
   const result: FormField[] = [];
   for (const f of fields) {
     if (f.subform_fields && f.subform_fields.length > 0) {
-      result.push(...f.subform_fields);
+      result.push(...f.subform_fields.map(sub => ({
+        ...sub,
+        field_name: `${f.field_name}_${sub.field_name}`,
+      })));
     } else {
       result.push(f);
     }

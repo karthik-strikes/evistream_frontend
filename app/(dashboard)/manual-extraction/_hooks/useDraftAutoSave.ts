@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
 
-const DRAFT_PREFIX = 'evistream:draft:';
+const DRAFT_PREFIX = 'evistream:draft:v2:';
 const DEBOUNCE_MS = 1000;
 const MAX_AGE_DAYS = 7;
 
@@ -66,7 +66,19 @@ export function useDraftAutoSave(
       const parsed: DraftData = JSON.parse(raw);
       const ago = new Date(parsed.updatedAt);
       const timeStr = ago.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit', month: 'short', day: 'numeric' });
-      setFormData(parsed.formData);
+      // Merge into current formData so only keys matching the current form are restored.
+      // This prevents stale drafts with old flat keys from overwriting composite keys.
+      setFormData((prev: Record<string, any>) => {
+        const merged = { ...prev };
+        let anyRestored = false;
+        for (const [key, val] of Object.entries(parsed.formData)) {
+          if (key in merged) {
+            merged[key] = val;
+            anyRestored = true;
+          }
+        }
+        return anyRestored ? merged : prev;
+      });
       restoredRef.current = true;
       toast({
         title: 'Draft restored',

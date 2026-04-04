@@ -1,14 +1,15 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { Play, X, FileText, Check, Loader2 } from 'lucide-react';
+import { Play, X, FileText, Check, Loader2, AlertTriangle } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { extractionsService, documentsService } from '@/services';
+import type { FormCoverage } from '@/services/extractions.service';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate, cn, getErrorMessage } from '@/lib/utils';
 import type { Form, Document } from '@/types/api';
 
-const MAX_DOCS_PER_JOB = 50;
+const MAX_DOCS_PER_JOB = 100;
 
 interface RunExtractionDialogProps {
   isOpen: boolean;
@@ -17,6 +18,11 @@ interface RunExtractionDialogProps {
   projectId: string;
   activeExtractionCount: number;
   queryKey: unknown[];
+  coverageData?: FormCoverage[];
+  /** Pre-select a form when opening (e.g. from "Run Remaining" button) */
+  initialFormId?: string;
+  /** Pre-select specific documents when opening */
+  initialDocIds?: string[];
 }
 
 export function RunExtractionDialog({
@@ -26,6 +32,9 @@ export function RunExtractionDialog({
   projectId,
   activeExtractionCount,
   queryKey,
+  coverageData = [],
+  initialFormId,
+  initialDocIds,
 }: RunExtractionDialogProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -34,16 +43,14 @@ export function RunExtractionDialog({
   const [runningExtraction, setRunningExtraction] = useState(false);
   const [documents, setDocuments] = useState<Document[]>([]);
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
-  const [allDocs, setAllDocs] = useState(true);
   const [formSearch, setFormSearch] = useState('');
   const [docSearch, setDocSearch] = useState('');
 
-  // Load docs and reset state when dialog opens
+  // Load docs and reset state when dialog opens or initial values change
   useEffect(() => {
     if (!isOpen) return;
-    setSelectedFormId('');
-    setSelectedDocIds(new Set());
-    setAllDocs(true);
+    setSelectedFormId(initialFormId || '');
+    setSelectedDocIds(initialDocIds ? new Set(initialDocIds) : new Set());
     setFormSearch('');
     setDocSearch('');
 
@@ -51,7 +58,7 @@ export function RunExtractionDialog({
       .getAll(projectId)
       .then((docs) => setDocuments(docs.filter((d) => d.processing_status === 'completed')))
       .catch(() => setDocuments([]));
-  }, [isOpen, projectId]);
+  }, [isOpen, projectId, initialFormId, initialDocIds]);
 
   const handleRunExtraction = async () => {
     if (!projectId || !selectedFormId) {
@@ -63,7 +70,7 @@ export function RunExtractionDialog({
       await extractionsService.create({
         project_id: projectId,
         form_id: selectedFormId,
-        document_ids: allDocs ? undefined : Array.from(selectedDocIds),
+        document_ids: Array.from(selectedDocIds),
       });
       toast({ title: 'Success', description: 'Extraction started successfully', variant: 'success' });
       onClose();
@@ -95,18 +102,25 @@ export function RunExtractionDialog({
     ? documents.filter((d) => d.filename.toLowerCase().includes(docSearch.toLowerCase()))
     : documents;
   const selectedForm = forms.find((f) => f.id === selectedFormId);
-  const docSummary = allDocs
-    ? `${documents.length} document${documents.length !== 1 ? 's' : ''}`
-    : `${selectedDocIds.size} document${selectedDocIds.size !== 1 ? 's' : ''}`;
-  const effectiveDocCount = allDocs ? documents.length : selectedDocIds.size;
+  const docSummary = `${selectedDocIds.size} document${selectedDocIds.size !== 1 ? 's' : ''}`;
+  const effectiveDocCount = selectedDocIds.size;
   const overLimit = effectiveDocCount > MAX_DOCS_PER_JOB;
-  const tooManyActive = activeExtractionCount >= 2;
+  const tooManyActive = activeExtractionCount >= 10;
+  const hasQueuedJobs = activeExtractionCount >= 2 && !tooManyActive;
   const canStart =
     !!selectedFormId &&
     !runningExtraction &&
     !overLimit &&
     !tooManyActive &&
-    (allDocs || selectedDocIds.size > 0);
+    selectedDocIds.size > 0;
+
+  // Check for already-extracted documents with the selected form
+  const selectedFormCoverage = coverageData.find((c) => c.form_id === selectedFormId);
+  const alreadyExtractedIds = new Set(selectedFormCoverage?.extracted_document_ids ?? []);
+  const overlapCount = selectedFormId
+    ? Array.from(selectedDocIds).filter((id) => alreadyExtractedIds.has(id)).length
+    : 0;
+  const allOverlap = overlapCount > 0 && overlapCount === selectedDocIds.size;
 
   return (
     <div
@@ -138,8 +152,27 @@ export function RunExtractionDialog({
         {/* Active extractions warning */}
         {tooManyActive && (
           <div className="mx-6 mt-4 px-4 py-3 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/40 text-xs text-amber-700 dark:text-amber-400">
-            ⚠ You already have {activeExtractionCount} active extractions running. Wait for one to
-            finish before starting another.
+            <AlertTriangle className="h-3.5 w-3.5 inline-block mr-1.5 -mt-0.5" />
+            You have {activeExtractionCount} extractions queued. Wait for some to finish before submitting more.
+          </div>
+        )}
+
+        {/* Queued jobs info — not blocking, just informational */}
+        {hasQueuedJobs && (
+          <div className="mx-6 mt-4 px-4 py-3 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-200 dark:border-blue-800/40 text-xs text-blue-700 dark:text-blue-400">
+            You have {activeExtractionCount} extractions in progress. This one will be queued and start automatically when a slot opens.
+          </div>
+        )}
+
+        {/* Already-extracted documents warning */}
+        {overlapCount > 0 && !tooManyActive && (
+          <div className="mx-6 mt-4 px-4 py-3 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/40 text-xs text-amber-700 dark:text-amber-400">
+            <AlertTriangle className="h-3.5 w-3.5 inline-block mr-1.5 -mt-0.5" />
+            {allOverlap ? (
+              <>All {overlapCount} selected documents have already been extracted with this form. Running again will use LLM credits for duplicate results.</>
+            ) : (
+              <>{overlapCount} of {selectedDocIds.size} selected documents have already been extracted with this form. These will be re-extracted, using additional LLM credits.</>
+            )}
           </div>
         )}
 
@@ -251,159 +284,116 @@ export function RunExtractionDialog({
                 <span className="text-[11px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider">
                   Documents
                 </span>
-                <div className="flex items-center bg-gray-100 dark:bg-[#0a0a0a] border border-gray-200 dark:border-[#1f1f1f] rounded-lg p-0.5 gap-0.5">
-                  <button
-                    onClick={() => {
-                      setAllDocs(true);
-                      setSelectedDocIds(new Set());
-                      setDocSearch('');
-                    }}
-                    className={cn(
-                      'text-[11px] font-semibold px-2.5 py-1 rounded-md transition-all duration-150 cursor-pointer border-none',
-                      allDocs
-                        ? 'bg-white dark:bg-[#1f1f1f] text-gray-900 dark:text-white shadow-sm'
-                        : 'bg-transparent text-gray-500 dark:text-zinc-500 hover:text-gray-700 dark:hover:text-zinc-300',
-                    )}
-                  >
-                    All
-                  </button>
-                  <button
-                    onClick={() => setAllDocs(false)}
-                    className={cn(
-                      'text-[11px] font-semibold px-2.5 py-1 rounded-md transition-all duration-150 cursor-pointer border-none',
-                      !allDocs
-                        ? 'bg-white dark:bg-[#1f1f1f] text-gray-900 dark:text-white shadow-sm'
-                        : 'bg-transparent text-gray-500 dark:text-zinc-500 hover:text-gray-700 dark:hover:text-zinc-300',
-                    )}
-                  >
-                    Specific
-                  </button>
-                </div>
               </div>
 
-              {allDocs ? (
-                <div className="flex items-center gap-2 px-3.5 py-2.5 rounded-xl bg-gray-50 dark:bg-[#1a1a1a] border border-gray-100 dark:border-[#2a2a2a]">
-                  <div className="w-7 h-7 rounded-lg bg-gray-200 dark:bg-[#2a2a2a] flex items-center justify-center flex-shrink-0">
-                    <FileText className="w-3.5 h-3.5 text-gray-500 dark:text-zinc-400" />
-                  </div>
-                  <div>
-                    <p className="text-sm font-semibold text-gray-900 dark:text-white">
-                      {documents.length} document{documents.length !== 1 ? 's' : ''}
-                    </p>
-                    <p className="text-xs text-gray-400 dark:text-zinc-500">
-                      All processed documents will be included
-                    </p>
-                  </div>
-                  {overLimit && (
-                    <span className="ml-auto text-xs text-red-600 dark:text-red-400 font-semibold">
-                      {documents.length}/{MAX_DOCS_PER_JOB} max
-                    </span>
-                  )}
+              <div className="space-y-2">
+                <div className="relative">
+                  <svg
+                    width="13"
+                    height="13"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="#9ca3af"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    className="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                  >
+                    <circle cx="11" cy="11" r="8" />
+                    <path d="M21 21l-4.35-4.35" />
+                  </svg>
+                  <input
+                    type="text"
+                    value={docSearch}
+                    onChange={(e) => setDocSearch(e.target.value)}
+                    placeholder="Search documents..."
+                    className="w-full text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-1.5 pl-8 pr-3 outline-none focus:border-gray-400 dark:focus:border-[#3f3f3f] placeholder:text-gray-400 dark:placeholder:text-zinc-600"
+                  />
                 </div>
-              ) : (
-                <div className="space-y-2">
-                  <div className="relative">
-                    <svg
-                      width="13"
-                      height="13"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="#9ca3af"
-                      strokeWidth="2"
-                      strokeLinecap="round"
-                      className="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none"
+                <div className="flex items-center justify-between">
+                  <span
+                    className={cn(
+                      'text-xs',
+                      overLimit
+                        ? 'text-red-600 dark:text-red-400 font-semibold'
+                        : 'text-gray-400 dark:text-zinc-500',
+                    )}
+                  >
+                    {selectedDocIds.size} selected / {MAX_DOCS_PER_JOB} max
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setSelectedDocIds(new Set(filteredDocs.map((d) => d.id)))}
+                      className="text-xs text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-white bg-transparent border-none cursor-pointer transition-colors underline-offset-2 hover:underline"
                     >
-                      <circle cx="11" cy="11" r="8" />
-                      <path d="M21 21l-4.35-4.35" />
-                    </svg>
-                    <input
-                      type="text"
-                      value={docSearch}
-                      onChange={(e) => setDocSearch(e.target.value)}
-                      placeholder="Search documents..."
-                      className="w-full text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-1.5 pl-8 pr-3 outline-none focus:border-gray-400 dark:focus:border-[#3f3f3f] placeholder:text-gray-400 dark:placeholder:text-zinc-600"
-                    />
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span
-                      className={cn(
-                        'text-xs',
-                        overLimit
-                          ? 'text-red-600 dark:text-red-400 font-semibold'
-                          : 'text-gray-400 dark:text-zinc-500',
-                      )}
+                      Select all
+                    </button>
+                    <span className="text-gray-300 dark:text-zinc-700">·</span>
+                    <button
+                      onClick={() => setSelectedDocIds(new Set())}
+                      className="text-xs text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-white bg-transparent border-none cursor-pointer transition-colors underline-offset-2 hover:underline"
                     >
-                      {selectedDocIds.size} selected / {MAX_DOCS_PER_JOB} max
-                    </span>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => setSelectedDocIds(new Set(documents.map((d) => d.id)))}
-                        className="text-xs text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-white bg-transparent border-none cursor-pointer transition-colors underline-offset-2 hover:underline"
-                      >
-                        Select all
-                      </button>
-                      <span className="text-gray-300 dark:text-zinc-700">·</span>
-                      <button
-                        onClick={() => setSelectedDocIds(new Set())}
-                        className="text-xs text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-white bg-transparent border-none cursor-pointer transition-colors underline-offset-2 hover:underline"
-                      >
-                        Clear
-                      </button>
-                    </div>
+                      Clear
+                    </button>
                   </div>
                 </div>
-              )}
+              </div>
             </div>
 
-            {!allDocs && (
-              <div className="flex-1 overflow-y-auto px-5 pb-4 space-y-1">
-                {filteredDocs.length === 0 ? (
-                  <p className="text-xs text-gray-400 dark:text-zinc-500 text-center py-4">
-                    {documents.length === 0
-                      ? 'No processed documents available'
-                      : `No documents matching "${docSearch}"`}
-                  </p>
-                ) : (
-                  filteredDocs.map((doc) => {
-                    const checked = selectedDocIds.has(doc.id);
-                    return (
-                      <button
-                        key={doc.id}
-                        onClick={() => toggleDoc(doc.id)}
+            <div className="flex-1 overflow-y-auto px-5 pb-4 space-y-1">
+              {filteredDocs.length === 0 ? (
+                <p className="text-xs text-gray-400 dark:text-zinc-500 text-center py-4">
+                  {documents.length === 0
+                    ? 'No processed documents available'
+                    : `No documents matching "${docSearch}"`}
+                </p>
+              ) : (
+                filteredDocs.map((doc) => {
+                  const checked = selectedDocIds.has(doc.id);
+                  const alreadyDone = selectedFormId ? alreadyExtractedIds.has(doc.id) : false;
+                  return (
+                    <button
+                      key={doc.id}
+                      onClick={() => toggleDoc(doc.id)}
+                      className={cn(
+                        'w-full min-w-0 text-left flex items-center gap-3 px-3.5 py-2.5 rounded-xl border transition-all duration-100 cursor-pointer overflow-hidden',
+                        checked
+                          ? 'border-gray-200 dark:border-[#2a2a2a] bg-gray-50 dark:bg-[#1a1a1a]'
+                          : 'border-transparent bg-transparent hover:border-gray-200 dark:hover:border-[#1f1f1f] hover:bg-gray-50 dark:hover:bg-[#1a1a1a]',
+                      )}
+                    >
+                      <div
                         className={cn(
-                          'w-full min-w-0 text-left flex items-center gap-3 px-3.5 py-2.5 rounded-xl border transition-all duration-100 cursor-pointer overflow-hidden',
+                          'w-4 h-4 rounded-[4px] flex items-center justify-center flex-shrink-0 border transition-colors',
                           checked
-                            ? 'border-gray-200 dark:border-[#2a2a2a] bg-gray-50 dark:bg-[#1a1a1a]'
-                            : 'border-transparent bg-transparent hover:border-gray-200 dark:hover:border-[#1f1f1f] hover:bg-gray-50 dark:hover:bg-[#1a1a1a]',
+                            ? 'bg-gray-900 dark:bg-white border-gray-900 dark:border-white'
+                            : 'border-gray-300 dark:border-[#3a3a3a] bg-white dark:bg-[#0a0a0a]',
                         )}
                       >
-                        <div
-                          className={cn(
-                            'w-4 h-4 rounded-[4px] flex items-center justify-center flex-shrink-0 border transition-colors',
-                            checked
-                              ? 'bg-gray-900 dark:bg-white border-gray-900 dark:border-white'
-                              : 'border-gray-300 dark:border-[#3a3a3a] bg-white dark:bg-[#0a0a0a]',
-                          )}
-                        >
-                          {checked && <Check className="w-2.5 h-2.5 text-white dark:text-gray-900" />}
-                        </div>
-                        <div className="w-7 h-7 rounded-lg bg-gray-100 dark:bg-[#1a1a1a] flex items-center justify-center flex-shrink-0">
-                          <FileText className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
-                        </div>
-                        <div className="flex-1 min-w-0">
+                        {checked && <Check className="w-2.5 h-2.5 text-white dark:text-gray-900" />}
+                      </div>
+                      <div className="w-7 h-7 rounded-lg bg-gray-100 dark:bg-[#1a1a1a] flex items-center justify-center flex-shrink-0">
+                        <FileText className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
                           <p className="text-sm text-gray-900 dark:text-white truncate leading-snug">
                             {doc.filename}
                           </p>
-                          <p className="text-xs text-gray-400 dark:text-zinc-500">
-                            {formatDate(doc.created_at)}
-                          </p>
+                          {alreadyDone && (
+                            <span className="text-[10px] font-medium text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50 px-1.5 py-0.5 rounded-[4px] flex-shrink-0">
+                              Extracted
+                            </span>
+                          )}
                         </div>
-                      </button>
-                    );
-                  })
-                )}
-              </div>
-            )}
+                        <p className="text-xs text-gray-400 dark:text-zinc-500">
+                          {formatDate(doc.created_at)}
+                        </p>
+                      </div>
+                    </button>
+                  );
+                })
+              )}
+            </div>
           </div>
         </div>
 

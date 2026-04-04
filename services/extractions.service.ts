@@ -1,9 +1,38 @@
 import { apiClient } from '@/lib/api';
 import type { Extraction, CreateExtractionRequest } from '@/types/api';
 
+export interface FormCoverageActiveJob {
+  job_id: string;
+  extraction_id: string;
+  status: 'pending' | 'processing';
+  progress: number;
+  papers_total: number;
+  papers_done: number;
+}
+
+export interface FormCoverage {
+  form_id: string;
+  form_name: string;
+  total_project_documents: number;
+  extracted_count: number;
+  failed_count: number;
+  not_run_count: number;
+  total_runs: number;
+  last_run_at: string;
+  latest_extraction_id: string;
+  latest_failed_extraction_id: string | null;
+  active_jobs: FormCoverageActiveJob[];
+  extracted_document_ids: string[];
+  failed_document_ids: string[];
+}
+
 export const extractionsService = {
   async getAll(projectId: string): Promise<Extraction[]> {
     return apiClient.get<Extraction[]>(`/api/v1/extractions/?project_id=${encodeURIComponent(projectId)}`);
+  },
+
+  async getCoverage(projectId: string): Promise<FormCoverage[]> {
+    return apiClient.get<FormCoverage[]>(`/api/v1/extractions/coverage?project_id=${encodeURIComponent(projectId)}`);
   },
 
   async getById(id: string): Promise<Extraction> {

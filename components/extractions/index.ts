@@ -4,3 +4,5 @@ export { ExtractionFilterBar, type ExtractionFilterType } from './ExtractionFilt
 export { PaperProgressList, type PaperProgressState } from './PaperProgressList';
 export { RunExtractionDialog } from './RunExtractionDialog';
 export { ExtractionCard } from './ExtractionCard';
+export { ActiveStatusLine } from './ActiveStatusLine';
+export { FormCoverageRow } from './FormCoverageRow';

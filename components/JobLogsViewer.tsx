@@ -20,13 +20,15 @@ interface JobLogsViewerProps {
   autoScroll?: boolean;
   showTimestamps?: boolean;
   maxLogs?: number;
+  onComplete?: (status: string) => void;
 }
 
 export function JobLogsViewer({
   jobId,
   autoScroll = true,
   showTimestamps = true,
-  maxLogs = 500
+  maxLogs = 500,
+  onComplete,
 }: JobLogsViewerProps) {
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [progress, setProgress] = useState(0);
@@ -74,6 +76,7 @@ export function JobLogsViewer({
       onComplete: (complete) => {
         setProgress(100);
         setLogs((prev) => [...prev, { ...complete, level: 'success' }]);
+        onComplete?.((complete as any).status ?? 'completed');
       },
 
       onError: (error) => {

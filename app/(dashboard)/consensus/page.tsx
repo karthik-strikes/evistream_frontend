@@ -42,7 +42,16 @@ function agreementBadge(pct: number | null) {
 
 function normalizeValue(raw: any): string {
   if (raw == null) return '';
-  if (typeof raw === 'object') return String(raw?.final_value ?? raw?.value ?? JSON.stringify(raw));
+  if (Array.isArray(raw)) {
+    // Rob-domain style: [{rating, source_text, justification}]
+    const item = raw[0];
+    if (item && typeof item === 'object') {
+      if (item.rating != null) return String(item.rating);
+      return String(item.final_value ?? item.value ?? JSON.stringify(item));
+    }
+    return raw.map((v: any) => normalizeValue(v)).join(', ');
+  }
+  if (typeof raw === 'object') return String(raw?.final_value ?? raw?.value ?? raw?.rating ?? JSON.stringify(raw));
   return String(raw);
 }
 
@@ -306,7 +315,7 @@ export default function ConsensusPro() {
         const vals = [aiVal, r1Val, r2Val].filter((v): v is string => v != null && v !== '');
         const allAgree = vals.length > 1 && vals.every(v => valuesMatch(v, vals[0]));
         const singleSource = vals.length <= 1;
-        const agreed = allAgree;
+        const agreed = allAgree || singleSource;
 
         // Compute suggestion for multi-source disagreements
         const suggestion = (!agreed && !singleSource) ? computeSuggestion(sources) : undefined;
@@ -776,7 +785,7 @@ export default function ConsensusPro() {
               <div className="px-4 py-2.5 border-b border-gray-100 dark:border-[#1f1f1f] shrink-0">
                 <div className="flex items-center justify-between mb-1.5">
                   <span className="text-xs font-semibold text-gray-700 dark:text-zinc-300">
-                    {isAiOnly ? 'Review fields' : `Resolve ${totalDisputed} conflicts`}
+                    {isAiOnly ? 'Review fields' : reviewedCount === totalDisputed && totalDisputed > 0 ? 'All conflicts resolved' : `Resolve ${totalDisputed - reviewedCount} conflict${totalDisputed - reviewedCount !== 1 ? 's' : ''}`}
                   </span>
                   <span className="text-xs text-gray-400">{reviewedCount}/{progressDenominator}</span>
                 </div>

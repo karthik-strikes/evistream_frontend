@@ -2,7 +2,7 @@
 
 import { cn } from '@/lib/utils';
 
-type ExtractionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+type ExtractionStatus = 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'manual' | 'consensus';
 
 interface ExtractionStatusBadgeProps {
   status: ExtractionStatus;

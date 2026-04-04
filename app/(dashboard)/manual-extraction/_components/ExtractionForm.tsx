@@ -128,7 +128,10 @@ export function ExtractionForm({
                   </button>
                   {!isCollapsed && (
                     <div className="px-4 py-4 space-y-5 pl-6">
-                      {field.subform_fields.map(sub => renderFieldWithCounter(sub))}
+                      {field.subform_fields.map(sub => renderFieldWithCounter({
+                        ...sub,
+                        field_name: `${field.field_name}_${sub.field_name}`,
+                      }))}
                     </div>
                   )}
                 </div>
@@ -176,12 +179,15 @@ export function ExtractionForm({
   );
 }
 
-/** Flatten form fields, expanding subform_fields */
+/** Flatten form fields, expanding subform_fields with composite keys to avoid collisions */
 function flattenFields(fields: FormField[]): FormField[] {
   const result: FormField[] = [];
   for (const f of fields) {
     if (f.subform_fields && f.subform_fields.length > 0) {
-      result.push(...f.subform_fields);
+      result.push(...f.subform_fields.map(sub => ({
+        ...sub,
+        field_name: `${f.field_name}_${sub.field_name}`,
+      })));
     } else {
       result.push(f);
     }

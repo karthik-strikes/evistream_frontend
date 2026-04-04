@@ -6,6 +6,8 @@ import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
 import { useTheme } from '@/contexts/ThemeContext';
 import { dashboardService } from '@/services/dashboard.service';
+import { extractionsService } from '@/services/extractions.service';
+import { useToast } from '@/hooks/use-toast';
 import Link from 'next/link';
 import { statusColor } from '@/lib/colors';
 import { cn } from '@/lib/utils';
@@ -120,8 +122,18 @@ export default function DashboardPage() {
 
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
+  const { toast } = useToast();
 
   const T = makeTokens(isDark);
+
+  const handleRetry = useCallback(async (extractionId: string) => {
+    try {
+      await extractionsService.retryFailed(extractionId);
+      toast({ title: 'Retry started', description: 'Extraction is queued for retry.' });
+    } catch {
+      toast({ title: 'Error', description: 'Failed to start retry.', variant: 'error' });
+    }
+  }, [toast]);
 
   // Command palette
   const [cmdOpen, setCmdOpen] = useState(false);
@@ -525,7 +537,10 @@ export default function DashboardPage() {
                         </Link>
                       )}
                       {(doc.status === 'failed' || isPartial) && (
-                        <span style={{ fontSize: 11, fontWeight: 600, color: '#fff', background: isPartial ? T.accentAmber : T.accent, borderRadius: 6, padding: '3px 10px', cursor: 'pointer' }}>
+                        <span
+                          onClick={() => !isPartial && handleRetry(doc.id)}
+                          style={{ fontSize: 11, fontWeight: 600, color: '#fff', background: isPartial ? T.accentAmber : T.accent, borderRadius: 6, padding: '3px 10px', cursor: 'pointer' }}
+                        >
                           {isPartial ? 'Review' : 'Retry'}
                         </span>
                       )}

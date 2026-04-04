@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 // Routes that do not require authentication
-const PUBLIC_PATHS = ['/', '/login', '/register'];
+const PUBLIC_PATHS = ['/', '/login', '/register', '/about', '/changelog', '/security', '/contact', '/privacy', '/terms', '/how-it-works'];
 
 // Routes that require admin role
 const ADMIN_PATHS = ['/admin'];

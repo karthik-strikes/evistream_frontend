@@ -1,5 +1,6 @@
 import axios, { AxiosInstance, AxiosRequestConfig, AxiosError, InternalAxiosRequestConfig } from 'axios';
 import { toast } from '@/hooks/use-toast';
+import { clientLogger } from '@/lib/client-logger';
 
 // Use relative URL so requests go through Next.js rewrite proxy (next.config.js)
 const API_BASE_URL = '';
@@ -159,6 +160,13 @@ class APIClient {
           const httpStatus = error.response?.status;
           const data = error.response?.data as Record<string, any> | undefined;
           const message = data?.detail || error.message || 'An error occurred';
+
+          if (httpStatus && httpStatus >= 500) {
+            clientLogger.error(`API ${httpStatus}: ${error.config?.method?.toUpperCase()} ${error.config?.url}`, {
+              status: httpStatus,
+              message: typeof message === 'string' ? message : 'server error',
+            });
+          }
 
           if (httpStatus && httpStatus >= 400) {
             toast({

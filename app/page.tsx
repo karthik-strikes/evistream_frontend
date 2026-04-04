@@ -692,10 +692,10 @@ footer { border-top: 1px solid var(--zinc-200); padding: 48px 24px 20px; backgro
       {/* STATS BAND */}
       <section className="stats-band reveal">
         <div className="stats-inner">
-          <div className="stat-item"><div className="stat-num" style={{ color: 'var(--red)' }}>4</div><div className="stat-lbl">Processing stages</div></div>
-          <div className="stat-item"><div className="stat-num" style={{ color: 'var(--blue)' }}>12</div><div className="stat-lbl">Fields extracted</div></div>
-          <div className="stat-item"><div className="stat-num">&lt;1<span className="stat-unit">s</span></div><div className="stat-lbl">Avg. per paper</div></div>
-          <div className="stat-item"><div className="stat-num" style={{ color: 'var(--blue)' }}>94<span className="stat-unit">%</span></div><div className="stat-lbl">Extraction accuracy</div></div>
+          <div className="stat-item"><div className="stat-num" style={{ color: 'var(--red)' }}>3</div><div className="stat-lbl">Steps</div></div>
+          <div className="stat-item"><div className="stat-num" style={{ color: 'var(--blue)' }}>100<span className="stat-unit">+</span></div><div className="stat-lbl">Hrs saved per review</div></div>
+          <div className="stat-item"><div className="stat-num">Multi</div><div className="stat-lbl">Reviewer</div></div>
+          <div className="stat-item"><div className="stat-num" style={{ color: 'var(--blue)' }}>Full</div><div className="stat-lbl">Audit trail</div></div>
         </div>
       </section>
 
@@ -952,7 +952,7 @@ footer { border-top: 1px solid var(--zinc-200); padding: 48px 24px 20px; backgro
             <p className="feature-body">Every extracted field is compared against human annotation at the field level. Semantic matching catches paraphrasing. Exact matching flags discrepancies.</p>
             <ul className="feature-list">
               <li>Semantic field-level comparison</li>
-              <li>94% average match rate</li>
+              <li>AI + human field-level review</li>
               <li>Side-by-side diff viewer</li>
             </ul>
           </div>
@@ -1196,24 +1196,24 @@ footer { border-top: 1px solid var(--zinc-200); padding: 48px 24px 20px; backgro
           <div className="footer-col">
             <h4>Platform</h4>
             <ul>
-              <li><a href="#">How it works</a></li>
-              <li><a href="#">Security</a></li>
-              <li><a href="#">Changelog</a></li>
+              <li><Link href="/how-it-works">How it works</Link></li>
+              <li><a href="/security">Security</a></li>
+              <li><a href="/changelog">Changelog</a></li>
             </ul>
           </div>
           <div className="footer-col">
             <h4>Company</h4>
             <ul>
-              <li><a href="#">About</a></li>
-              <li><a href="#">Penn Dental Medicine</a></li>
-              <li><a href="#">Contact</a></li>
+              <li><a href="/about">About</a></li>
+              <li><a href="https://www.dental.upenn.edu/research/center-for-integrative-global-oral-health/" target="_blank" rel="noopener noreferrer">Penn Dental Medicine</a></li>
+              <li><a href="/contact">Contact</a></li>
             </ul>
           </div>
         </div>
         <div className="footer-bottom">
           <p>&copy; 2026 eviStreams</p>
           <div className="footer-legal">
-            <a href="#">Privacy</a> &nbsp;&middot;&nbsp; <a href="#">Terms</a> &nbsp;&middot;&nbsp; <a href="#">Security</a>
+            <a href="/privacy">Privacy</a> &nbsp;&middot;&nbsp; <a href="/terms">Terms</a> &nbsp;&middot;&nbsp; <a href="/security">Security</a>
           </div>
         </div>
       </footer>

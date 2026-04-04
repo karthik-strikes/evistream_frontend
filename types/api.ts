@@ -128,7 +128,7 @@ export interface Extraction {
   id: string;
   project_id: string;
   form_id: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'manual' | 'consensus';
   job_id: string | null;
   created_at: string;
 }
