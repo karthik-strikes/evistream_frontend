@@ -671,42 +671,46 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                             })}
                           </tr>
 
-                          {/* Correction form — appears directly below this field's row */}
-                          {isExpanded && isIncorrect && (
+                          {/* Correction form — ALWAYS visible when thumbs down is active */}
+                          {isIncorrect && (
                             <tr>
-                              <td colSpan={2 + docIds.length} className="px-4 py-3 border-b border-gray-200 dark:border-zinc-800/60 bg-amber-50/50 dark:bg-amber-900/5 border-l-2 border-l-amber-400">
-                                <p className="text-[10px] font-medium text-amber-700 dark:text-amber-400 uppercase tracking-wider mb-2">
-                                  Correction for: {formatFieldName(fieldName)}
-                                </p>
+                              <td colSpan={2 + docIds.length} className="px-4 py-3 border-b border-gray-200 dark:border-zinc-800/60 bg-red-50 dark:bg-red-900/10 border-l-4 border-l-red-400">
+                                <div className="flex items-center gap-2 mb-2">
+                                  <ThumbsDown className="w-3 h-3 text-red-500" />
+                                  <p className="text-[11px] font-semibold text-red-700 dark:text-red-400">
+                                    {formatFieldName(fieldName)} -- provide the correct answer:
+                                  </p>
+                                </div>
                                 <div className="grid grid-cols-3 gap-3">
                                   <div>
-                                    <label className="text-[10px] text-gray-500 dark:text-zinc-400">Correct value</label>
+                                    <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400">Correct value</label>
                                     <input
                                       type="text"
                                       value={fb?.correct_value || ''}
                                       onChange={e => setCorrectionField(fieldName, 'correct_value', e.target.value)}
                                       placeholder="What should the value be?"
-                                      className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-amber-300"
+                                      autoFocus={expandedCell === fieldName}
+                                      className="mt-0.5 w-full text-xs px-2.5 py-2 rounded-md border border-red-200 dark:border-red-800/30 bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-300 dark:focus:ring-red-700"
                                     />
                                   </div>
                                   <div>
-                                    <label className="text-[10px] text-gray-500 dark:text-zinc-400">Source text</label>
+                                    <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400">Source text from paper</label>
                                     <input
                                       type="text"
                                       value={fb?.correct_source_text || ''}
                                       onChange={e => setCorrectionField(fieldName, 'correct_source_text', e.target.value)}
-                                      placeholder="Where in the paper?"
-                                      className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-amber-300"
+                                      placeholder="Copy the relevant sentence from the paper"
+                                      className="mt-0.5 w-full text-xs px-2.5 py-2 rounded-md border border-red-200 dark:border-red-800/30 bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-300 dark:focus:ring-red-700"
                                     />
                                   </div>
                                   <div>
-                                    <label className="text-[10px] text-gray-500 dark:text-zinc-400">Instruction (optional)</label>
+                                    <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400">Instruction for AI (optional)</label>
                                     <input
                                       type="text"
                                       value={fb?.note || ''}
                                       onChange={e => setCorrectionField(fieldName, 'note', e.target.value)}
-                                      placeholder="e.g., Format dosages as mg/kg"
-                                      className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-amber-300"
+                                      placeholder="e.g., Look in the acknowledgements section"
+                                      className="mt-0.5 w-full text-xs px-2.5 py-2 rounded-md border border-red-200 dark:border-red-800/30 bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-300 dark:focus:ring-red-700"
                                     />
                                   </div>
                                 </div>
