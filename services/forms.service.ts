@@ -1,5 +1,9 @@
 import { apiClient } from '@/lib/api';
-import type { Form, CreateFormRequest } from '@/types/api';
+import type {
+  Form, CreateFormRequest,
+  PilotState, PilotStartResponse, PilotFeedbackResponse, PilotCompleteResponse,
+  PilotFieldFeedback,
+} from '@/types/api';
 
 export const formsService = {
   async getAll(projectId: string, search?: string): Promise<Form[]> {
@@ -33,5 +37,37 @@ export const formsService = {
 
   async rejectDecomposition(id: string, feedback: string): Promise<{ message: string; form_id: string; feedback: string; status: string }> {
     return apiClient.post<{ message: string; form_id: string; feedback: string; status: string }>(`/api/v1/forms/${id}/reject-decomposition`, { feedback });
+  },
+
+  // ── Pilot Study ─────────────────────────────────────────────────────────
+
+  async startPilot(formId: string, documentIds?: string[], count?: number): Promise<PilotStartResponse> {
+    return apiClient.post<PilotStartResponse>(`/api/v1/forms/${formId}/pilot/start`, {
+      document_ids: documentIds || null,
+      count: count || 3,
+    });
+  },
+
+  async getPilot(formId: string): Promise<PilotState> {
+    return apiClient.get<PilotState>(`/api/v1/forms/${formId}/pilot`);
+  },
+
+  async submitPilotFeedback(
+    formId: string,
+    iteration: number,
+    feedback: Record<string, PilotFieldFeedback>,
+  ): Promise<PilotFeedbackResponse> {
+    return apiClient.post<PilotFeedbackResponse>(`/api/v1/forms/${formId}/pilot/feedback`, {
+      iteration,
+      feedback,
+    });
+  },
+
+  async completePilot(formId: string): Promise<PilotCompleteResponse> {
+    return apiClient.post<PilotCompleteResponse>(`/api/v1/forms/${formId}/pilot/complete`, {});
+  },
+
+  async resetPilot(formId: string): Promise<void> {
+    return apiClient.delete<void>(`/api/v1/forms/${formId}/pilot`);
   },
 };

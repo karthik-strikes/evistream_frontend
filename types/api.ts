@@ -115,6 +115,65 @@ export interface Form {
   job_id?: string; // Optional: returned when generating code
 }
 
+// ── Pilot Study Types ────────────────────────────────────────────────────────
+
+export interface PilotFieldFeedback {
+  rating: 'correct' | 'incorrect';
+  correct_value?: string;
+  correct_source_text?: string;
+  note?: string;
+  document_id: string;
+}
+
+export interface PilotIteration {
+  iteration: number;
+  job_id: string;
+  extraction_id: string;
+  results: Record<string, Record<string, any>>; // doc_id -> field_name -> extracted data
+  feedback: Record<string, PilotFieldFeedback>;
+}
+
+export interface PilotExample {
+  value: any;
+  source_text: string;
+  note?: string;
+  iteration: number;
+  document_id: string;
+}
+
+export interface PilotState {
+  status: 'none' | 'running' | 'reviewing' | 'failed' | 'completed';
+  sample_document_ids?: string[];
+  current_iteration?: number;
+  iterations?: PilotIteration[];
+  field_examples?: Record<string, PilotExample[]>;
+  field_instructions?: Record<string, string>;
+}
+
+export interface PilotStartResponse {
+  status: string;
+  iteration: number;
+  job_id: string;
+  extraction_id: string;
+  document_ids: string[];
+}
+
+export interface PilotFeedbackResponse {
+  status: string;
+  iteration: number;
+  job_id: string;
+  extraction_id: string;
+  accumulated_examples: number;
+  accumulated_instructions: number;
+}
+
+export interface PilotCompleteResponse {
+  status: string;
+  total_examples: number;
+  fields_with_examples: number;
+  fields_with_instructions: number;
+}
+
 export interface CreateFormRequest {
   project_id: string;
   form_name: string;

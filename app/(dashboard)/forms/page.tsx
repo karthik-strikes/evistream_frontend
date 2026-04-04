@@ -19,6 +19,7 @@ import {
 } from '@/components/ui';
 import { Plus, Trash2, FileText, Code, AlertCircle, Check, Edit3, ThumbsUp, ThumbsDown, MessageSquare, ChevronDown, ChevronUp, ChevronRight, X } from 'lucide-react';
 import { JobLogsViewer } from '@/components/JobLogsViewer';
+import PilotStudyDialog from '@/components/pilot/PilotStudyDialog';
 import { cn, formatDate, getErrorMessage } from '@/lib/utils';
 import { typography } from '@/lib/typography';
 import { statusColors, statusBgs } from '@/lib/colors';
@@ -33,6 +34,7 @@ export default function FormsPage() {
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [activeJobFormId, setActiveJobFormId] = useState<string | null>(null);
   const [reviewForm, setReviewForm] = useState<Form | null>(null);
+  const [pilotForm, setPilotForm] = useState<Form | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
 
@@ -288,6 +290,7 @@ export default function FormsPage() {
                           onClick={() => setOpenForm(form)}
                           onReview={(form) => setReviewForm(form)}
                           onEdit={(form) => setOpenForm(form)}
+                          onPilot={(form) => setPilotForm(form)}
                         />
                       ))}
                   </div>
@@ -318,6 +321,7 @@ export default function FormsPage() {
                           onClick={() => setOpenForm(form)}
                           onReview={(form) => setReviewForm(form)}
                           onEdit={(form) => setOpenForm(form)}
+                          onPilot={(form) => setPilotForm(form)}
                         />
                       ))}
                   </div>
@@ -348,6 +352,7 @@ export default function FormsPage() {
                           onClick={() => setOpenForm(form)}
                           onReview={(form) => setReviewForm(form)}
                           onEdit={(form) => setOpenForm(form)}
+                          onPilot={(form) => setPilotForm(form)}
                         />
                       ))}
                   </div>
@@ -378,6 +383,7 @@ export default function FormsPage() {
                           onClick={() => setOpenForm(form)}
                           onReview={(form) => setReviewForm(form)}
                           onEdit={(form) => setOpenForm(form)}
+                          onPilot={(form) => setPilotForm(form)}
                         />
                       ))}
                   </div>
@@ -423,6 +429,16 @@ export default function FormsPage() {
           onReject={handleRejectDecomposition}
         />
       )}
+
+      {pilotForm && (
+        <PilotStudyDialog
+          form={pilotForm}
+          onClose={() => {
+            setPilotForm(null);
+            queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id], exact: false });
+          }}
+        />
+      )}
     </DashboardLayout>
   );
 }
@@ -435,6 +451,7 @@ function FormCard({
   onClick,
   onReview,
   onEdit,
+  onPilot,
 }: {
   form: Form;
   onGenerateCode: (id: string, enableReview?: boolean) => void;
@@ -442,6 +459,7 @@ function FormCard({
   onClick: () => void;
   onReview?: (form: Form) => void;
   onEdit?: (form: Form) => void;
+  onPilot?: (form: Form) => void;
 }) {
   const [showError, setShowError] = useState(false);
 
@@ -588,6 +606,65 @@ function FormCard({
           </div>
         </div>
       )}
+
+      {/* Pilot CTA for active forms */}
+      {form.status === 'active' && onPilot && (() => {
+        const meta = typeof form.metadata === 'string' ? JSON.parse(form.metadata || '{}') : (form.metadata || {});
+        const pilot = meta.pilot;
+        const pilotStatus = pilot?.status;
+        const totalExamples = pilot?.field_examples ? Object.values(pilot.field_examples as Record<string, any[]>).reduce((s: number, arr: any[]) => s + arr.length, 0) : 0;
+        const fieldsCalibrated = pilot?.field_examples ? Object.keys(pilot.field_examples).length : 0;
+
+        if (pilotStatus === 'completed') {
+          return (
+            <div className="px-[22px] pb-3.5">
+              <button
+                onClick={e => { e.stopPropagation(); onPilot(form); }}
+                className="w-full flex items-center gap-2 p-2.5 px-3.5 rounded-lg bg-green-50 border border-green-200 dark:bg-green-900/10 dark:border-green-800/30 cursor-pointer transition-colors hover:bg-green-100 dark:hover:bg-green-900/20"
+              >
+                <div className="w-[5px] h-[5px] rounded-full bg-green-500 shrink-0" />
+                <span className="text-xs text-green-700 dark:text-green-400 font-medium flex-1 text-left">
+                  Calibrated &middot; {totalExamples} examples &middot; {fieldsCalibrated} fields
+                </span>
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="text-green-400 shrink-0">
+                  <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </div>
+          );
+        } else if (pilotStatus === 'running' || pilotStatus === 'reviewing') {
+          return (
+            <div className="px-[22px] pb-3.5">
+              <button
+                onClick={e => { e.stopPropagation(); onPilot(form); }}
+                className="w-full flex items-center gap-2 p-2.5 px-3.5 rounded-lg bg-amber-50 border border-amber-200 dark:bg-amber-900/10 dark:border-amber-800/30 cursor-pointer transition-colors hover:bg-amber-100 dark:hover:bg-amber-900/20"
+              >
+                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+                <span className="text-xs text-amber-700 dark:text-amber-400 font-medium flex-1 text-left">
+                  Pilot in progress &middot; Iteration {pilot?.current_iteration || 1}
+                </span>
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="text-amber-400 shrink-0">
+                  <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            </div>
+          );
+        } else {
+          return (
+            <div className="px-[22px] pb-3.5">
+              <button
+                onClick={e => { e.stopPropagation(); onPilot(form); }}
+                className="w-full text-xs font-medium rounded-lg py-2.5 cursor-pointer flex items-center justify-center gap-2 transition-all duration-200 hover:-translate-y-px text-gray-600 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#0a0a0a] hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
+              >
+                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                  <polygon points="5 3 14 8 5 13" />
+                </svg>
+                Run Pilot
+              </button>
+            </div>
+          );
+        }
+      })()}
 
       {/* Footer */}
       <div className="flex items-center justify-end gap-0.5 py-2.5 px-[18px] border-t border-gray-100 mt-auto dark:border-[#1f1f1f]">
