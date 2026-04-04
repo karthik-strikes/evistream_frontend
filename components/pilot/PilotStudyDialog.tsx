@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { X, Search, Loader2, ChevronDown, ChevronRight, ThumbsUp, ThumbsDown, Check, RotateCcw } from 'lucide-react';
+import { X, Search, Loader2, ThumbsUp, ThumbsDown, Check, RotateCcw } from 'lucide-react';
 import { Button, Badge } from '@/components/ui';
 import { useToast } from '@/hooks/use-toast';
 import { useProject } from '@/contexts/ProjectContext';
@@ -12,6 +12,48 @@ import { cn } from '@/lib/utils';
 import type { Form, Document, PilotState, PilotFieldFeedback } from '@/types/api';
 
 type Step = 'select' | 'running' | 'review';
+
+// Metadata keys that wrap every extracted field — must be filtered out
+const METADATA_KEYS = new Set(['source_text', 'source_location', 'confidence', 'reasoning']);
+
+function unwrapValue(v: any): any {
+  if (v && typeof v === 'object' && !Array.isArray(v) && 'value' in v) return v.value;
+  return v;
+}
+
+function extractDisplayValue(fieldData: any): string {
+  const value = unwrapValue(fieldData);
+  if (value === null || value === undefined) return '---';
+  if (typeof value === 'string') return value.trim() || '---';
+  if (typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '---';
+    if (value.every((v: any) => typeof v === 'string' || typeof v === 'number')) return value.join(', ');
+    return `${value.length} items`;
+  }
+  const j = JSON.stringify(value);
+  return j.length > 80 ? j.slice(0, 80) + '...' : j;
+}
+
+function getSourceText(fieldData: any): string | null {
+  if (fieldData && typeof fieldData === 'object' && !Array.isArray(fieldData)) {
+    return fieldData.source_text || null;
+  }
+  return null;
+}
+
+function getSourceLocation(fieldData: any): any {
+  if (fieldData && typeof fieldData === 'object' && !Array.isArray(fieldData)) {
+    return fieldData.source_location || null;
+  }
+  return null;
+}
+
+const formatFieldName = (f: string) =>
+  f.replace(/_/g, ' ').replace(/\./g, ' ')
+    .split(' ')
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join(' ');
 
 interface Props {
   form: Form;
@@ -39,10 +81,9 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
   const wsRef = useRef<WebSocket | null>(null);
   const [paperProgress, setPaperProgress] = useState<{ done: number; total: number }>({ done: 0, total: 0 });
 
-  // Step 3: Review
-  const [activeDocTab, setActiveDocTab] = useState<string>('');
+  // Step 3: Review (table)
   const [fieldFeedback, setFieldFeedback] = useState<Record<string, PilotFieldFeedback>>({});
-  const [expandedFields, setExpandedFields] = useState<Set<string>>(new Set());
+  const [expandedCell, setExpandedCell] = useState<string | null>(null); // "fieldName:docId"
 
   // Fetch documents for manual selection
   const { data: documents = [] } = useQuery({
@@ -69,6 +110,12 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     return map;
   }, [documents]);
 
+  // Short doc name (e.g., "569_Seymour.pdf" → "569_Seymour")
+  const shortDocName = (docId: string) => {
+    const name = docNames[docId] || docId.slice(0, 8);
+    return name.replace(/\.(pdf|md)$/i, '');
+  };
+
   // Load pilot state on mount
   useEffect(() => {
     let cancelled = false;
@@ -82,10 +129,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
           setStep('running');
           const latestIter = state.iterations?.[state.iterations.length - 1];
           if (latestIter?.job_id) setActiveJobId(latestIter.job_id);
-        } else if (state.status === 'reviewing') {
-          setStep('review');
-          _initReviewState(state);
-        } else if (state.status === 'completed') {
+        } else if (state.status === 'reviewing' || state.status === 'completed') {
           setStep('review');
           _initReviewState(state);
         }
@@ -101,14 +145,12 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
   const _initReviewState = (state: PilotState) => {
     const latestIter = state.iterations?.[state.iterations.length - 1];
     if (!latestIter?.results) return;
-    const docIds = Object.keys(latestIter.results);
-    if (docIds.length > 0) setActiveDocTab(docIds[0]);
-    // Pre-populate feedback from previous iteration if exists
     if (latestIter.feedback && Object.keys(latestIter.feedback).length > 0) {
       setFieldFeedback(latestIter.feedback);
     } else {
       setFieldFeedback({});
     }
+    setExpandedCell(null);
   };
 
   // WebSocket for job progress
@@ -131,7 +173,6 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
         if (msg.type === 'paper_done') {
           setPaperProgress({ done: msg.papers_done || 0, total: msg.papers_total || 0 });
         } else if (msg.type === 'complete') {
-          // Extraction finished — fetch updated pilot state
           _refreshPilotState();
         }
       } catch { /* ignore */ }
@@ -143,7 +184,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     };
   }, [activeJobId, step]);
 
-  // Poll for completion when running (fallback if WS misses it)
+  // Poll for completion when running (fallback)
   useEffect(() => {
     if (step !== 'running') return;
     const interval = setInterval(() => { _refreshPilotState(); }, 5000);
@@ -172,11 +213,12 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     setSubmitting(true);
     try {
       const docIds = selectionMode === 'manual' ? Array.from(selectedDocIds) : undefined;
+      const effectiveCount = docIds?.length || count;
       const resp = await formsService.startPilot(form.id, docIds, count);
       setActiveJobId(resp.job_id);
-      setPaperProgress({ done: 0, total: docIds?.length || count });
+      setPaperProgress({ done: 0, total: effectiveCount });
       setStep('running');
-      toast({ title: 'Pilot started', description: `Extracting ${docIds?.length || count} papers`, variant: 'success' });
+      toast({ title: 'Pilot started', description: `Extracting ${effectiveCount} papers`, variant: 'success' });
     } catch (err: any) {
       toast({ title: 'Error', description: err?.message || 'Failed to start pilot', variant: 'error' });
     } finally {
@@ -193,6 +235,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
       );
       setActiveJobId(resp.job_id);
       setFieldFeedback({});
+      setExpandedCell(null);
       setPaperProgress({ done: 0, total: pilotState?.sample_document_ids?.length || 0 });
       setStep('running');
       toast({ title: 'Feedback submitted', description: `Starting iteration ${resp.iteration}`, variant: 'success' });
@@ -228,6 +271,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
       setPilotState(null);
       setStep('select');
       setFieldFeedback({});
+      setExpandedCell(null);
       queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id], exact: false });
       toast({ title: 'Pilot reset', variant: 'success' });
     } catch (err: any) {
@@ -242,7 +286,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
   const setRating = (fieldName: string, docId: string, rating: 'correct' | 'incorrect') => {
     setFieldFeedback(prev => ({
       ...prev,
-      [`${fieldName}`]: {
+      [fieldName]: {
         ...prev[fieldName],
         rating,
         document_id: docId,
@@ -258,14 +302,6 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     }));
   };
 
-  const toggleField = (fieldName: string) => {
-    setExpandedFields(prev => {
-      const next = new Set(prev);
-      next.has(fieldName) ? next.delete(fieldName) : next.add(fieldName);
-      return next;
-    });
-  };
-
   // ── Computed ──────────────────────────────────────────────────────────────
 
   const latestResults = useMemo(() => {
@@ -273,11 +309,14 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     return pilotState.iterations[pilotState.iterations.length - 1].results || {};
   }, [pilotState]);
 
+  const docIds = useMemo(() => Object.keys(latestResults), [latestResults]);
+
+  // Filter out metadata keys — only real form fields
   const fieldNames = useMemo(() => {
     const names = new Set<string>();
     for (const docResults of Object.values(latestResults)) {
       for (const key of Object.keys(docResults as Record<string, any>)) {
-        names.add(key);
+        if (!METADATA_KEYS.has(key)) names.add(key);
       }
     }
     return Array.from(names);
@@ -285,6 +324,15 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
 
   const reviewedCount = Object.keys(fieldFeedback).length;
   const totalFieldCount = fieldNames.length;
+
+  // Cell status helper
+  const cellStatus = (fieldData: any): 'reported' | 'missing' => {
+    const display = extractDisplayValue(fieldData);
+    return (!display || display === '---' || display === 'NR') ? 'missing' : 'reported';
+  };
+
+  const cellBg = (status: 'reported' | 'missing') =>
+    status === 'reported' ? 'bg-green-50 dark:bg-[#0d1a10]' : 'bg-rose-50 dark:bg-[#1a0d0d]';
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -301,7 +349,10 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
   return (
     <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
       <div
-        className="bg-white dark:bg-[#111111] rounded-2xl border border-gray-200 dark:border-[#1f1f1f] w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl"
+        className={cn(
+          "bg-white dark:bg-[#111111] rounded-2xl border border-gray-200 dark:border-[#1f1f1f] flex flex-col shadow-2xl",
+          step === 'review' ? "w-full max-w-[95vw] max-h-[90vh]" : "w-full max-w-4xl max-h-[90vh]"
+        )}
         onClick={e => e.stopPropagation()}
       >
         {/* Header */}
@@ -333,7 +384,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
         </div>
 
         {/* Body */}
-        <div className="flex-1 overflow-y-auto px-6 py-5">
+        <div className="flex-1 overflow-auto px-6 py-5">
 
           {/* ── STEP 1: Document Selection ──────────────────────────────── */}
           {step === 'select' && (
@@ -345,21 +396,8 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                 </p>
               </div>
 
-              {/* Count + Mode */}
+              {/* Mode + Count */}
               <div className="flex items-center gap-6">
-                <div className="flex items-center gap-2">
-                  <label className="text-xs text-gray-500 dark:text-zinc-400">Papers:</label>
-                  <select
-                    value={count}
-                    onChange={e => setCount(Number(e.target.value))}
-                    className="text-xs border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2 py-1.5 bg-white dark:bg-[#0a0a0a] text-gray-900 dark:text-white"
-                  >
-                    {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
-                      <option key={n} value={n}>{n}</option>
-                    ))}
-                  </select>
-                </div>
-
                 <div className="flex items-center gap-3">
                   <label className="flex items-center gap-1.5 cursor-pointer">
                     <input
@@ -382,6 +420,22 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                     <span className="text-xs text-gray-600 dark:text-zinc-300">Let me choose</span>
                   </label>
                 </div>
+
+                {/* Only show count picker for random mode */}
+                {selectionMode === 'random' && (
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs text-gray-500 dark:text-zinc-400">Papers:</label>
+                    <select
+                      value={count}
+                      onChange={e => setCount(Number(e.target.value))}
+                      className="text-xs border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2 py-1.5 bg-white dark:bg-[#0a0a0a] text-gray-900 dark:text-white"
+                    >
+                      {Array.from({ length: 10 }, (_, i) => i + 1).map(n => (
+                        <option key={n} value={n}>{n}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
               </div>
 
               {/* Manual selection list */}
@@ -424,7 +478,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                     )}
                   </div>
                   {selectedDocIds.size > 0 && (
-                    <p className="text-xs text-gray-400">{selectedDocIds.size} selected</p>
+                    <p className="text-xs text-gray-400">{selectedDocIds.size} selected (max 10)</p>
                   )}
                 </div>
               )}
@@ -443,8 +497,6 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                   {paperProgress.done} of {paperProgress.total || '?'} papers complete
                 </p>
               </div>
-
-              {/* Progress bar */}
               {paperProgress.total > 0 && (
                 <div className="max-w-sm mx-auto">
                   <div className="h-1.5 w-full rounded-full bg-gray-100 dark:bg-[#1a1a1a] overflow-hidden">
@@ -458,188 +510,206 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
             </div>
           )}
 
-          {/* ── STEP 3: Review ──────────────────────────────────────────── */}
-          {step === 'review' && Object.keys(latestResults).length > 0 && (
-            <div className="space-y-4">
-              {/* Progress bar */}
-              <div className="flex items-center justify-between mb-2">
-                <p className="text-xs text-gray-400">
-                  {reviewedCount} of {totalFieldCount} fields reviewed
-                </p>
-                <div className="flex items-center gap-2 text-xs text-gray-400">
+          {/* ── STEP 3: Review — Table Grid ─────────────────────────────── */}
+          {step === 'review' && docIds.length > 0 && (
+            <div className="space-y-3">
+              {/* Stats bar */}
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-4 text-xs text-gray-400">
+                  <span><span className="font-medium text-gray-700 dark:text-zinc-300">{totalFieldCount}</span> fields</span>
+                  <span className="text-gray-200 dark:text-zinc-700">&middot;</span>
+                  <span><span className="font-medium text-gray-700 dark:text-zinc-300">{docIds.length}</span> papers</span>
+                  {reviewedCount > 0 && (
+                    <>
+                      <span className="text-gray-200 dark:text-zinc-700">&middot;</span>
+                      <span><span className="font-medium text-gray-700 dark:text-zinc-300">{reviewedCount}</span> rated</span>
+                    </>
+                  )}
                   {pilotState?.field_examples && Object.keys(pilotState.field_examples).length > 0 && (
-                    <span className="text-green-600 dark:text-green-400">
-                      {Object.values(pilotState.field_examples).reduce((s, arr) => s + arr.length, 0)} examples accumulated
-                    </span>
+                    <>
+                      <span className="text-gray-200 dark:text-zinc-700">&middot;</span>
+                      <span className="text-green-600 dark:text-green-400">
+                        {Object.values(pilotState.field_examples).reduce((s, arr) => s + arr.length, 0)} examples
+                      </span>
+                    </>
                   )}
                 </div>
-              </div>
-              <div className="h-1 w-full rounded-full bg-gray-100 dark:bg-[#1a1a1a] overflow-hidden">
-                <div
-                  className="h-full rounded-full bg-gray-900 dark:bg-white transition-all duration-300"
-                  style={{ width: totalFieldCount > 0 ? `${Math.round((reviewedCount / totalFieldCount) * 100)}%` : '0%' }}
-                />
-              </div>
-
-              {/* Document tabs */}
-              <div className="flex gap-1 border-b border-gray-100 dark:border-[#1f1f1f]">
-                {Object.keys(latestResults).map(docId => (
-                  <button
-                    key={docId}
-                    onClick={() => setActiveDocTab(docId)}
-                    className={cn(
-                      "px-3 py-2 text-xs font-medium rounded-t-lg transition-colors truncate max-w-[200px]",
-                      activeDocTab === docId
-                        ? "text-gray-900 dark:text-white bg-gray-50 dark:bg-[#1a1a1a] border border-b-0 border-gray-200 dark:border-[#2a2a2a]"
-                        : "text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300"
-                    )}
-                  >
-                    {docNames[docId] || docId.slice(0, 8)}
-                  </button>
-                ))}
+                {/* Legend */}
+                <div className="flex items-center gap-3 text-[10px] font-medium text-gray-500 dark:text-zinc-500 uppercase tracking-wider">
+                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-sm bg-green-200 dark:bg-green-700 inline-block" />Reported</span>
+                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-sm bg-rose-200 dark:bg-rose-700 inline-block" />Not reported</span>
+                </div>
               </div>
 
-              {/* Field list for active doc */}
-              {activeDocTab && latestResults[activeDocTab] && (
-                <div className="divide-y divide-gray-100 dark:divide-[#1f1f1f]">
-                  {fieldNames.map(fieldName => {
-                    const fieldData = (latestResults[activeDocTab] as Record<string, any>)?.[fieldName];
-                    if (fieldData === undefined) return null;
+              {/* Table */}
+              <div className="overflow-auto rounded-xl border border-gray-200 dark:border-zinc-800/50 max-h-[calc(90vh-220px)]">
+                <table className="w-full text-xs border-separate border-spacing-0">
+                  <thead>
+                    <tr>
+                      {/* Sticky field name header */}
+                      <th className="sticky top-0 left-0 z-30 bg-gray-50 dark:bg-[#0d0d0d] px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-zinc-500 border-b-2 border-r border-gray-200 dark:border-zinc-800/60 min-w-[180px]">
+                        Field
+                      </th>
+                      {/* Rating header */}
+                      <th className="sticky top-0 z-20 bg-gray-50 dark:bg-[#0d0d0d] px-2 py-3 text-center text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-zinc-500 border-b-2 border-r border-gray-200 dark:border-zinc-800/60 w-[70px]">
+                        Rate
+                      </th>
+                      {/* Document columns */}
+                      {docIds.map(docId => (
+                        <th key={docId} className="sticky top-0 z-20 bg-gray-50 dark:bg-[#0d0d0d] px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500 border-b-2 border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 min-w-[180px] max-w-[240px]">
+                          <span className="truncate block">{shortDocName(docId)}</span>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {fieldNames.map(fieldName => {
+                      const fb = fieldFeedback[fieldName];
+                      const isCorrect = fb?.rating === 'correct';
+                      const isIncorrect = fb?.rating === 'incorrect';
+                      const isExpanded = expandedCell === fieldName;
 
-                    const isExpanded = expandedFields.has(fieldName);
-                    const fb = fieldFeedback[fieldName];
-                    const value = typeof fieldData === 'object' && fieldData !== null && 'value' in fieldData
-                      ? fieldData.value
-                      : fieldData;
-                    const sourceText = typeof fieldData === 'object' && fieldData !== null
-                      ? fieldData.source_text
-                      : null;
-                    const sourceLoc = typeof fieldData === 'object' && fieldData !== null
-                      ? fieldData.source_location
-                      : null;
-                    const displayValue = value === null || value === undefined ? '---' : String(value);
-                    const isCorrect = fb?.rating === 'correct';
-                    const isIncorrect = fb?.rating === 'incorrect';
-
-                    return (
-                      <div key={fieldName} className="py-3">
-                        <div className="flex items-start gap-3">
-                          {/* Expand toggle */}
-                          <button
-                            onClick={() => toggleField(fieldName)}
-                            className="mt-0.5 text-gray-300 hover:text-gray-500 dark:text-zinc-600 dark:hover:text-zinc-400 shrink-0"
+                      return (
+                        <tr key={fieldName} className="group">
+                          {/* Field name — sticky left */}
+                          <td
+                            className="sticky left-0 z-10 px-4 py-2.5 border-b border-r border-gray-200 dark:border-zinc-800/60 bg-white dark:bg-[#111111] align-top cursor-pointer"
+                            onClick={() => setExpandedCell(isExpanded ? null : fieldName)}
                           >
-                            {isExpanded ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-                          </button>
-
-                          {/* Field info */}
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-0.5">
-                              <span className="text-xs font-medium text-gray-700 dark:text-zinc-300">
-                                {fieldName.replace(/_/g, ' ')}
-                              </span>
-                              {sourceLoc?.page && (
-                                <span className="text-[10px] text-gray-400">p.{sourceLoc.page}</span>
-                              )}
-                              {sourceLoc?.section && (
-                                <span className="text-[10px] text-gray-400">{sourceLoc.section}</span>
-                              )}
-                            </div>
-                            <p className={cn(
-                              "text-xs leading-relaxed",
-                              displayValue === '---' || displayValue === 'NR'
-                                ? "text-gray-300 dark:text-zinc-600 italic"
-                                : "text-gray-900 dark:text-white"
-                            )}>
-                              {typeof value === 'object' && value !== null ? JSON.stringify(value) : displayValue}
-                            </p>
-                          </div>
+                            <span className="text-xs font-medium text-gray-700 dark:text-zinc-300">
+                              {formatFieldName(fieldName)}
+                            </span>
+                          </td>
 
                           {/* Rating buttons */}
-                          <div className="flex items-center gap-1 shrink-0">
-                            <button
-                              onClick={() => setRating(fieldName, activeDocTab, 'correct')}
-                              className={cn(
-                                "p-1.5 rounded-md transition-all",
-                                isCorrect
-                                  ? "bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400"
-                                  : "text-gray-300 hover:text-green-500 hover:bg-green-50 dark:text-zinc-600 dark:hover:text-green-400 dark:hover:bg-green-900/20"
-                              )}
-                            >
-                              <ThumbsUp className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              onClick={() => { setRating(fieldName, activeDocTab, 'incorrect'); setExpandedFields(prev => new Set(prev).add(fieldName)); }}
-                              className={cn(
-                                "p-1.5 rounded-md transition-all",
-                                isIncorrect
-                                  ? "bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
-                                  : "text-gray-300 hover:text-red-500 hover:bg-red-50 dark:text-zinc-600 dark:hover:text-red-400 dark:hover:bg-red-900/20"
-                              )}
-                            >
-                              <ThumbsDown className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
+                          <td className="px-1 py-2.5 border-b border-r border-gray-200 dark:border-zinc-800/60 bg-white dark:bg-[#111111] align-top">
+                            <div className="flex items-center justify-center gap-0.5">
+                              <button
+                                onClick={() => setRating(fieldName, docIds[0], 'correct')}
+                                className={cn(
+                                  "p-1 rounded transition-all",
+                                  isCorrect
+                                    ? "bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400"
+                                    : "text-gray-300 hover:text-green-500 hover:bg-green-50 dark:text-zinc-600 dark:hover:text-green-400"
+                                )}
+                                title="Correct"
+                              >
+                                <ThumbsUp className="w-3 h-3" />
+                              </button>
+                              <button
+                                onClick={() => { setRating(fieldName, docIds[0], 'incorrect'); setExpandedCell(fieldName); }}
+                                className={cn(
+                                  "p-1 rounded transition-all",
+                                  isIncorrect
+                                    ? "bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
+                                    : "text-gray-300 hover:text-red-500 hover:bg-red-50 dark:text-zinc-600 dark:hover:text-red-400"
+                                )}
+                                title="Incorrect"
+                              >
+                                <ThumbsDown className="w-3 h-3" />
+                              </button>
+                            </div>
+                          </td>
 
-                        {/* Expanded: source text + correction form */}
-                        {isExpanded && (
-                          <div className="mt-2 ml-6 space-y-2">
-                            {sourceText && sourceText !== 'NR' && (
-                              <div className="pl-2 border-l-2 border-gray-200 dark:border-[#2a2a2a]">
-                                <p className="text-[11px] text-gray-400 dark:text-zinc-500 italic leading-relaxed line-clamp-4">
-                                  {sourceText}
-                                </p>
-                              </div>
-                            )}
+                          {/* Document cells */}
+                          {docIds.map(docId => {
+                            const docData = latestResults[docId] as Record<string, any> | undefined;
+                            const fieldData = docData?.[fieldName];
+                            const status = cellStatus(fieldData);
+                            const display = extractDisplayValue(fieldData);
+                            const srcText = getSourceText(fieldData);
+                            const srcLoc = getSourceLocation(fieldData);
 
-                            {isIncorrect && (
-                              <div className="space-y-2 bg-gray-50 dark:bg-[#0a0a0a] rounded-lg p-3 border border-gray-200 dark:border-[#1f1f1f]">
+                            return (
+                              <td
+                                key={docId}
+                                className={cn(
+                                  "px-3 py-2.5 border-b border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 align-top min-w-[180px] max-w-[240px] transition-colors",
+                                  cellBg(status),
+                                  "cursor-pointer hover:brightness-95 dark:hover:brightness-110"
+                                )}
+                                onClick={() => setExpandedCell(isExpanded ? null : fieldName)}
+                              >
+                                <div className="flex items-start gap-1">
+                                  <span className={cn(
+                                    "leading-relaxed line-clamp-2",
+                                    status === 'missing' ? "text-gray-400 dark:text-zinc-600 italic" : "text-gray-900 dark:text-white"
+                                  )}>
+                                    {display}
+                                  </span>
+                                  {srcLoc?.page && (
+                                    <span className="text-[9px] text-gray-400 dark:text-zinc-600 shrink-0 mt-0.5">
+                                      p.{srcLoc.page}
+                                    </span>
+                                  )}
+                                </div>
+                                {srcLoc?.section && (
+                                  <span className="text-[9px] text-gray-400 dark:text-zinc-600 block mt-0.5">
+                                    {srcLoc.section}
+                                  </span>
+                                )}
+                                {/* Source text preview on expand */}
+                                {isExpanded && srcText && srcText !== 'NR' && (
+                                  <p className="mt-1.5 pl-2 border-l-2 border-green-300 dark:border-green-700 text-[10px] text-gray-400 dark:text-zinc-500 italic leading-relaxed line-clamp-3">
+                                    {srcText}
+                                  </p>
+                                )}
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+
+                    {/* Expanded correction form row — rendered below the active field row */}
+                    {expandedCell && fieldFeedback[expandedCell]?.rating === 'incorrect' && (
+                      <tr>
+                        <td colSpan={2 + docIds.length} className="px-4 py-3 border-b border-gray-200 dark:border-zinc-800/60 bg-gray-50 dark:bg-[#0a0a0a]">
+                          <div className="flex items-start gap-4 max-w-2xl">
+                            <div className="flex-1 space-y-2">
+                              <p className="text-[10px] font-medium text-gray-500 dark:text-zinc-400 uppercase tracking-wider mb-1">
+                                Correction for: {formatFieldName(expandedCell)}
+                              </p>
+                              <div className="grid grid-cols-3 gap-2">
                                 <div>
-                                  <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400 uppercase tracking-wider">
-                                    Correct value
-                                  </label>
+                                  <label className="text-[10px] text-gray-400">Correct value</label>
                                   <input
                                     type="text"
-                                    value={fb?.correct_value || ''}
-                                    onChange={e => setCorrectionField(fieldName, 'correct_value', e.target.value)}
-                                    placeholder="What should the value be?"
+                                    value={fieldFeedback[expandedCell]?.correct_value || ''}
+                                    onChange={e => setCorrectionField(expandedCell, 'correct_value', e.target.value)}
+                                    placeholder="What should it be?"
                                     className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-300"
                                   />
                                 </div>
                                 <div>
-                                  <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400 uppercase tracking-wider">
-                                    Source text
-                                  </label>
+                                  <label className="text-[10px] text-gray-400">Source text</label>
                                   <input
                                     type="text"
-                                    value={fb?.correct_source_text || ''}
-                                    onChange={e => setCorrectionField(fieldName, 'correct_source_text', e.target.value)}
-                                    placeholder="Where in the paper should this come from?"
+                                    value={fieldFeedback[expandedCell]?.correct_source_text || ''}
+                                    onChange={e => setCorrectionField(expandedCell, 'correct_source_text', e.target.value)}
+                                    placeholder="Where in the paper?"
                                     className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-300"
                                   />
                                 </div>
                                 <div>
-                                  <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400 uppercase tracking-wider">
-                                    Instruction (optional)
-                                  </label>
+                                  <label className="text-[10px] text-gray-400">Instruction (optional)</label>
                                   <input
                                     type="text"
-                                    value={fb?.note || ''}
-                                    onChange={e => setCorrectionField(fieldName, 'note', e.target.value)}
-                                    placeholder="e.g., Always format dosages as mg/kg"
+                                    value={fieldFeedback[expandedCell]?.note || ''}
+                                    onChange={e => setCorrectionField(expandedCell, 'note', e.target.value)}
+                                    placeholder="e.g., Format as mg/kg"
                                     className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-300"
                                   />
                                 </div>
                               </div>
-                            )}
+                            </div>
                           </div>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
         </div>
@@ -673,7 +743,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
           {step === 'review' && (
             <>
               <p className="text-xs text-gray-400">
-                {reviewedCount > 0 ? `${reviewedCount} fields marked` : 'Review fields above'}
+                {reviewedCount > 0 ? `${reviewedCount} fields rated` : 'Click thumbs up/down to rate fields'}
               </p>
               <div className="flex items-center gap-2">
                 {reviewedCount > 0 && (
