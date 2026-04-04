@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { X, Search, Loader2, ThumbsUp, ThumbsDown, Check, RotateCcw } from 'lucide-react';
 import { Button, Badge } from '@/components/ui';
@@ -570,143 +570,152 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                       const isExpanded = expandedCell === fieldName;
 
                       return (
-                        <tr key={fieldName} className="group">
-                          {/* Field name — sticky left */}
-                          <td
-                            className="sticky left-0 z-10 px-4 py-2.5 border-b border-r border-gray-200 dark:border-zinc-800/60 bg-white dark:bg-[#111111] align-top cursor-pointer"
-                            onClick={() => setExpandedCell(isExpanded ? null : fieldName)}
-                          >
-                            <span className="text-xs font-medium text-gray-700 dark:text-zinc-300">
-                              {formatFieldName(fieldName)}
-                            </span>
-                          </td>
+                        <React.Fragment key={fieldName}>
+                          <tr className={cn("group", isExpanded && "bg-gray-50/50 dark:bg-[#0d0d0d]/50")}>
+                            {/* Field name — sticky left */}
+                            <td
+                              className={cn(
+                                "sticky left-0 z-10 px-4 py-2.5 border-r border-gray-200 dark:border-zinc-800/60 align-top cursor-pointer",
+                                isExpanded ? "border-b-0 bg-gray-50 dark:bg-[#0d0d0d]" : "border-b bg-white dark:bg-[#111111]",
+                                isCorrect && "bg-green-50/50 dark:bg-green-900/10",
+                                isIncorrect && "bg-red-50/50 dark:bg-red-900/10",
+                              )}
+                              onClick={() => setExpandedCell(isExpanded ? null : fieldName)}
+                            >
+                              <span className="text-xs font-medium text-gray-700 dark:text-zinc-300">
+                                {formatFieldName(fieldName)}
+                              </span>
+                              {isCorrect && <span className="ml-1.5 text-[9px] text-green-500">OK</span>}
+                              {isIncorrect && <span className="ml-1.5 text-[9px] text-red-500">FIX</span>}
+                            </td>
 
-                          {/* Rating buttons */}
-                          <td className="px-1 py-2.5 border-b border-r border-gray-200 dark:border-zinc-800/60 bg-white dark:bg-[#111111] align-top">
-                            <div className="flex items-center justify-center gap-0.5">
-                              <button
-                                onClick={() => setRating(fieldName, docIds[0], 'correct')}
-                                className={cn(
-                                  "p-1 rounded transition-all",
-                                  isCorrect
-                                    ? "bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400"
-                                    : "text-gray-300 hover:text-green-500 hover:bg-green-50 dark:text-zinc-600 dark:hover:text-green-400"
-                                )}
-                                title="Correct"
-                              >
-                                <ThumbsUp className="w-3 h-3" />
-                              </button>
-                              <button
-                                onClick={() => { setRating(fieldName, docIds[0], 'incorrect'); setExpandedCell(fieldName); }}
-                                className={cn(
-                                  "p-1 rounded transition-all",
-                                  isIncorrect
-                                    ? "bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
-                                    : "text-gray-300 hover:text-red-500 hover:bg-red-50 dark:text-zinc-600 dark:hover:text-red-400"
-                                )}
-                                title="Incorrect"
-                              >
-                                <ThumbsDown className="w-3 h-3" />
-                              </button>
-                            </div>
-                          </td>
+                            {/* Rating buttons */}
+                            <td className={cn(
+                              "px-1 py-2.5 border-r border-gray-200 dark:border-zinc-800/60 align-top",
+                              isExpanded ? "border-b-0 bg-gray-50 dark:bg-[#0d0d0d]" : "border-b bg-white dark:bg-[#111111]",
+                            )}>
+                              <div className="flex items-center justify-center gap-0.5">
+                                <button
+                                  onClick={() => setRating(fieldName, docIds[0], 'correct')}
+                                  className={cn(
+                                    "p-1.5 rounded transition-all",
+                                    isCorrect
+                                      ? "bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400"
+                                      : "text-gray-300 hover:text-green-500 hover:bg-green-50 dark:text-zinc-600 dark:hover:text-green-400"
+                                  )}
+                                  title="Looks correct"
+                                >
+                                  <ThumbsUp className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  onClick={() => { setRating(fieldName, docIds[0], 'incorrect'); setExpandedCell(fieldName); }}
+                                  className={cn(
+                                    "p-1.5 rounded transition-all",
+                                    isIncorrect
+                                      ? "bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
+                                      : "text-gray-300 hover:text-red-500 hover:bg-red-50 dark:text-zinc-600 dark:hover:text-red-400"
+                                  )}
+                                  title="Needs correction"
+                                >
+                                  <ThumbsDown className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            </td>
 
-                          {/* Document cells */}
-                          {docIds.map(docId => {
-                            const docData = latestResults[docId] as Record<string, any> | undefined;
-                            const fieldData = docData?.[fieldName];
-                            const status = cellStatus(fieldData);
-                            const display = extractDisplayValue(fieldData);
-                            const srcText = getSourceText(fieldData);
-                            const srcLoc = getSourceLocation(fieldData);
+                            {/* Document cells */}
+                            {docIds.map(docId => {
+                              const docData = latestResults[docId] as Record<string, any> | undefined;
+                              const fieldData = docData?.[fieldName];
+                              const status = cellStatus(fieldData);
+                              const display = extractDisplayValue(fieldData);
+                              const srcText = getSourceText(fieldData);
+                              const srcLoc = getSourceLocation(fieldData);
 
-                            return (
-                              <td
-                                key={docId}
-                                className={cn(
-                                  "px-3 py-2.5 border-b border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 align-top min-w-[180px] max-w-[240px] transition-colors",
-                                  cellBg(status),
-                                  "cursor-pointer hover:brightness-95 dark:hover:brightness-110"
-                                )}
-                                onClick={() => setExpandedCell(isExpanded ? null : fieldName)}
-                              >
-                                <div className="flex items-start gap-1">
-                                  <span className={cn(
-                                    "leading-relaxed line-clamp-2",
-                                    status === 'missing' ? "text-gray-400 dark:text-zinc-600 italic" : "text-gray-900 dark:text-white"
-                                  )}>
-                                    {display}
-                                  </span>
-                                  {srcLoc?.page && (
-                                    <span className="text-[9px] text-gray-400 dark:text-zinc-600 shrink-0 mt-0.5">
-                                      p.{srcLoc.page}
+                              return (
+                                <td
+                                  key={docId}
+                                  className={cn(
+                                    "px-3 py-2.5 border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 align-top min-w-[180px] max-w-[240px] transition-colors",
+                                    isExpanded ? "border-b-0" : "border-b",
+                                    cellBg(status),
+                                    "cursor-pointer hover:brightness-95 dark:hover:brightness-110"
+                                  )}
+                                  onClick={() => setExpandedCell(isExpanded ? null : fieldName)}
+                                >
+                                  <div className="flex items-start gap-1">
+                                    <span className={cn(
+                                      "leading-relaxed line-clamp-2",
+                                      status === 'missing' ? "text-gray-400 dark:text-zinc-600 italic" : "text-gray-900 dark:text-white"
+                                    )}>
+                                      {display}
+                                    </span>
+                                    {srcLoc?.page && (
+                                      <span className="text-[9px] text-gray-400 dark:text-zinc-600 shrink-0 mt-0.5">
+                                        p.{srcLoc.page}
+                                      </span>
+                                    )}
+                                  </div>
+                                  {srcLoc?.section && (
+                                    <span className="text-[9px] text-gray-400 dark:text-zinc-600 block mt-0.5">
+                                      {srcLoc.section}
                                     </span>
                                   )}
+                                  {/* Source text preview on expand */}
+                                  {isExpanded && srcText && srcText !== 'NR' && (
+                                    <p className="mt-1.5 pl-2 border-l-2 border-green-300 dark:border-green-700 text-[10px] text-gray-400 dark:text-zinc-500 italic leading-relaxed line-clamp-3">
+                                      {srcText}
+                                    </p>
+                                  )}
+                                </td>
+                              );
+                            })}
+                          </tr>
+
+                          {/* Correction form — appears directly below this field's row */}
+                          {isExpanded && isIncorrect && (
+                            <tr>
+                              <td colSpan={2 + docIds.length} className="px-4 py-3 border-b border-gray-200 dark:border-zinc-800/60 bg-amber-50/50 dark:bg-amber-900/5 border-l-2 border-l-amber-400">
+                                <p className="text-[10px] font-medium text-amber-700 dark:text-amber-400 uppercase tracking-wider mb-2">
+                                  Correction for: {formatFieldName(fieldName)}
+                                </p>
+                                <div className="grid grid-cols-3 gap-3">
+                                  <div>
+                                    <label className="text-[10px] text-gray-500 dark:text-zinc-400">Correct value</label>
+                                    <input
+                                      type="text"
+                                      value={fb?.correct_value || ''}
+                                      onChange={e => setCorrectionField(fieldName, 'correct_value', e.target.value)}
+                                      placeholder="What should the value be?"
+                                      className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-amber-300"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] text-gray-500 dark:text-zinc-400">Source text</label>
+                                    <input
+                                      type="text"
+                                      value={fb?.correct_source_text || ''}
+                                      onChange={e => setCorrectionField(fieldName, 'correct_source_text', e.target.value)}
+                                      placeholder="Where in the paper?"
+                                      className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-amber-300"
+                                    />
+                                  </div>
+                                  <div>
+                                    <label className="text-[10px] text-gray-500 dark:text-zinc-400">Instruction (optional)</label>
+                                    <input
+                                      type="text"
+                                      value={fb?.note || ''}
+                                      onChange={e => setCorrectionField(fieldName, 'note', e.target.value)}
+                                      placeholder="e.g., Format dosages as mg/kg"
+                                      className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-amber-300"
+                                    />
+                                  </div>
                                 </div>
-                                {srcLoc?.section && (
-                                  <span className="text-[9px] text-gray-400 dark:text-zinc-600 block mt-0.5">
-                                    {srcLoc.section}
-                                  </span>
-                                )}
-                                {/* Source text preview on expand */}
-                                {isExpanded && srcText && srcText !== 'NR' && (
-                                  <p className="mt-1.5 pl-2 border-l-2 border-green-300 dark:border-green-700 text-[10px] text-gray-400 dark:text-zinc-500 italic leading-relaxed line-clamp-3">
-                                    {srcText}
-                                  </p>
-                                )}
                               </td>
-                            );
-                          })}
-                        </tr>
+                            </tr>
+                          )}
+                        </React.Fragment>
                       );
                     })}
-
-                    {/* Expanded correction form row — rendered below the active field row */}
-                    {expandedCell && fieldFeedback[expandedCell]?.rating === 'incorrect' && (
-                      <tr>
-                        <td colSpan={2 + docIds.length} className="px-4 py-3 border-b border-gray-200 dark:border-zinc-800/60 bg-gray-50 dark:bg-[#0a0a0a]">
-                          <div className="flex items-start gap-4 max-w-2xl">
-                            <div className="flex-1 space-y-2">
-                              <p className="text-[10px] font-medium text-gray-500 dark:text-zinc-400 uppercase tracking-wider mb-1">
-                                Correction for: {formatFieldName(expandedCell)}
-                              </p>
-                              <div className="grid grid-cols-3 gap-2">
-                                <div>
-                                  <label className="text-[10px] text-gray-400">Correct value</label>
-                                  <input
-                                    type="text"
-                                    value={fieldFeedback[expandedCell]?.correct_value || ''}
-                                    onChange={e => setCorrectionField(expandedCell, 'correct_value', e.target.value)}
-                                    placeholder="What should it be?"
-                                    className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-300"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="text-[10px] text-gray-400">Source text</label>
-                                  <input
-                                    type="text"
-                                    value={fieldFeedback[expandedCell]?.correct_source_text || ''}
-                                    onChange={e => setCorrectionField(expandedCell, 'correct_source_text', e.target.value)}
-                                    placeholder="Where in the paper?"
-                                    className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-300"
-                                  />
-                                </div>
-                                <div>
-                                  <label className="text-[10px] text-gray-400">Instruction (optional)</label>
-                                  <input
-                                    type="text"
-                                    value={fieldFeedback[expandedCell]?.note || ''}
-                                    onChange={e => setCorrectionField(expandedCell, 'note', e.target.value)}
-                                    placeholder="e.g., Format as mg/kg"
-                                    className="mt-0.5 w-full text-xs px-2.5 py-1.5 rounded-md border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-1 focus:ring-gray-300"
-                                  />
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </td>
-                      </tr>
-                    )}
                   </tbody>
                 </table>
               </div>
