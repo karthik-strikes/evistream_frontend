@@ -728,6 +728,11 @@ function FormCard({
               >
                 Review schema
               </button>
+              {onEdit && (
+                <button onClick={() => onEdit(form)} className="flex-1 text-xs font-semibold rounded-lg py-2.5 cursor-pointer text-center transition-all duration-200 text-gray-700 dark:text-zinc-300 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:bg-gray-50 dark:hover:bg-white/[0.03]">
+                  Edit fields
+                </button>
+              )}
               {onApprove && (
                 <button
                   onClick={() => onApprove(form.id)}
@@ -861,6 +866,11 @@ function FormCard({
                     )}
                   >
                     {isReviewing ? 'Review results' : 'View pilot'}
+                  </button>
+                )}
+                {onEdit && (
+                  <button onClick={() => onEdit(form)} className="flex-1 text-xs font-semibold rounded-lg py-2 cursor-pointer text-center transition-all duration-200 text-gray-700 dark:text-zinc-300 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:bg-gray-50 dark:hover:bg-white/[0.03]">
+                    Edit fields
                   </button>
                 )}
                 <button
