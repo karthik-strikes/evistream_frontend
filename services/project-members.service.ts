@@ -21,4 +21,8 @@ export const projectMembersService = {
   async getMyPermissions(projectId: string): Promise<MyPermissionsResponse> {
     return apiClient.get<MyPermissionsResponse>(`/api/v1/projects/${projectId}/my-permissions`);
   },
+
+  async transferOwnership(projectId: string, newOwnerId: string): Promise<{ message: string }> {
+    return apiClient.post<{ message: string }>(`/api/v1/projects/${projectId}/transfer-ownership`, { new_owner_id: newOwnerId });
+  },
 };

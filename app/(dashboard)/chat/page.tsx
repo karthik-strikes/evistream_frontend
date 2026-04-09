@@ -172,24 +172,7 @@ export default function ChatPage() {
     </div>
   );
 
-  if (!selectedProject) {
-    return (
-      <DashboardLayout
-        title="Paper Chat"
-        description="Ask questions about your research papers"
-      >
-        <EmptyState
-          icon={AlertCircle}
-          title="No Project Selected"
-          description="Please create or select a project to start chatting with your papers"
-          action={{
-            label: 'Go to Projects',
-            onClick: () => router.push('/projects'),
-          }}
-        />
-      </DashboardLayout>
-    );
-  }
+  if (!selectedProject) return null;
 
   if (loading) {
     return (

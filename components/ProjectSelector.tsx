@@ -1,9 +1,10 @@
 'use client';
 
 import { useProject } from '@/contexts/ProjectContext';
-import { FolderKanban, ChevronDown, Plus } from 'lucide-react';
+import { ChevronDown, Plus } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
+import { cn } from '@/lib/utils';
 
 export function ProjectSelector() {
   const { projects, selectedProject, setSelectedProject } = useProject();
@@ -26,10 +27,10 @@ export function ProjectSelector() {
     return (
       <button
         onClick={() => router.push('/projects')}
-        className="flex items-center gap-2 px-4 py-2 bg-white border border-border rounded-lg hover:border-gray-400 transition-colors text-sm"
+        className="flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-medium text-gray-500 dark:text-zinc-400 hover:bg-gray-100/80 dark:hover:bg-white/5 transition-colors"
       >
-        <Plus className="h-4 w-4" />
-        <span>Create Project</span>
+        <Plus className="h-3.5 w-3.5" />
+        <span>New Project</span>
       </button>
     );
   }
@@ -38,53 +39,44 @@ export function ProjectSelector() {
     <div className="relative" ref={dropdownRef}>
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center gap-3 px-4 py-2 bg-white border border-border rounded-lg hover:border-gray-400 transition-colors min-w-[200px]"
+        className="flex items-center gap-1.5 px-2 py-1.5 rounded-md hover:bg-gray-100/80 dark:hover:bg-white/5 transition-colors max-w-[180px]"
       >
-        <FolderKanban className="h-4 w-4 text-gray-600" />
-        <span className="text-sm font-medium flex-1 text-left truncate">
+        <span className="text-xs font-medium text-gray-600 dark:text-zinc-300 truncate">
           {selectedProject?.name || 'Select Project'}
         </span>
-        <ChevronDown className={`h-4 w-4 text-gray-600 transition-transform ${isOpen ? 'rotate-180' : ''}`} />
+        <ChevronDown className={cn("h-3 w-3 text-gray-400 dark:text-zinc-500 transition-transform shrink-0", isOpen && "rotate-180")} />
       </button>
 
       {isOpen && (
-        <div className="absolute top-full left-0 mt-2 w-full min-w-[250px] bg-white border border-border rounded-lg shadow-lg z-50 max-h-[300px] overflow-y-auto">
-          {projects.map((project) => (
-            <button
-              key={project.id}
-              onClick={() => {
-                setSelectedProject(project);
-                setIsOpen(false);
-              }}
-              className={`w-full px-4 py-3 text-left hover:bg-gray-50 transition-colors border-b border-border last:border-b-0 ${
-                selectedProject?.id === project.id ? 'bg-gray-50' : ''
-              }`}
-            >
-              <div className="flex items-center gap-3">
-                <FolderKanban className="h-4 w-4 text-gray-400 flex-shrink-0" />
-                <div className="flex-1 min-w-0">
-                  <p className="text-sm font-medium truncate">{project.name}</p>
-                  {project.description && (
-                    <p className="text-xs text-muted truncate">{project.description}</p>
-                  )}
-                </div>
-                {selectedProject?.id === project.id && (
-                  <div className="w-2 h-2 rounded-full bg-black flex-shrink-0" />
+        <div className="absolute right-0 top-full mt-1.5 w-[200px] bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#2a2a2a] rounded-lg shadow-lg z-50 max-h-[240px] overflow-y-auto py-1">
+          {projects.map((project) => {
+            const isActive = selectedProject?.id === project.id;
+            return (
+              <button
+                key={project.id}
+                onClick={() => {
+                  setSelectedProject(project);
+                  setIsOpen(false);
+                }}
+                className={cn(
+                  "w-full px-3 py-1.5 text-left transition-colors flex items-center gap-2",
+                  isActive
+                    ? "bg-gray-50 dark:bg-white/[0.04]"
+                    : "hover:bg-gray-50 dark:hover:bg-white/[0.03]"
                 )}
-              </div>
-            </button>
-          ))}
+              >
+                <span className={cn("text-xs truncate flex-1", isActive ? "font-semibold text-gray-900 dark:text-white" : "font-medium text-gray-600 dark:text-zinc-300")}>{project.name}</span>
+                {isActive && <div className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />}
+              </button>
+            );
+          })}
+          <div className="h-px bg-gray-100 dark:bg-[#1f1f1f] my-1" />
           <button
-            onClick={() => {
-              router.push('/projects');
-              setIsOpen(false);
-            }}
-            className="w-full px-4 py-3 text-left hover:bg-gray-50 transition-colors border-t border-border text-sm font-medium text-gray-600"
+            onClick={() => { router.push('/projects'); setIsOpen(false); }}
+            className="w-full px-3 py-1.5 text-left hover:bg-gray-50 dark:hover:bg-white/[0.03] transition-colors flex items-center gap-2"
           >
-            <div className="flex items-center gap-3">
-              <Plus className="h-4 w-4" />
-              <span>Manage Projects</span>
-            </div>
+            <Plus className="h-3 w-3 text-gray-400 dark:text-zinc-500" />
+            <span className="text-xs font-medium text-gray-400 dark:text-zinc-500">Manage Projects</span>
           </button>
         </div>
       )}

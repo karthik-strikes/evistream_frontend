@@ -4,17 +4,12 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
-import { formsService, documentsService } from '@/services'; // used for enriching card stats
+import { dashboardService } from '@/services';
 import { useToast } from '@/hooks/use-toast';
 import { C } from '@/lib/colors';
 import { cn } from '@/lib/utils';
 import { useRouter } from 'next/navigation';
 import { ProjectMembersModal } from '@/components/project/ProjectMembersModal';
-
-const fmtStatus = (s: string) => {
-  const map: Record<string, string> = { active: 'Active', generating: 'Generating', awaiting_review: 'Review', regenerating: 'Generating', draft: 'Draft', failed: 'Failed' };
-  return map[s] || s;
-};
 
 const relativeTime = (date: string) => {
   const now = Date.now();
@@ -58,31 +53,22 @@ export default function ProjectsPage() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  const { data: projectsData = [], isLoading: dataLoading } = useQuery({
-    queryKey: ['projects-enriched', contextProjects?.map((p: any) => p.id).join(',')],
+  // Fetch lightweight stats (counts only) for each project instead of all forms+documents
+  const { data: projectStats = {}, isLoading: dataLoading } = useQuery({
+    queryKey: ['projects-stats', contextProjects?.map((p: any) => p.id).join(',')],
     queryFn: async () => {
-      if (!contextProjects?.length) return [];
-      const enriched = await Promise.all(
+      if (!contextProjects?.length) return {};
+      const results = await Promise.all(
         contextProjects.map(async (proj: any) => {
           try {
-            const [projForms, projDocs] = await Promise.all([
-              formsService.getAll(proj.id),
-              documentsService.getAll(proj.id),
-            ]);
-            return {
-              ...proj,
-              forms: projForms.map((f: any) => ({ name: f.form_name, status: fmtStatus(f.status || 'active') })),
-              documents: projDocs.map((d: any) => ({
-                name: d.filename,
-                status: d.processing_status === 'completed' ? 'Completed' : d.processing_status === 'processing' ? 'Generating' : 'Failed',
-              })),
-            };
+            const stats = await dashboardService.getStats(proj.id);
+            return { id: proj.id, forms: stats.stats.forms, documents: stats.stats.documents };
           } catch {
-            return { ...proj, forms: [], documents: [] };
+            return { id: proj.id, forms: 0, documents: 0 };
           }
         })
       );
-      return enriched;
+      return Object.fromEntries(results.map((r) => [r.id, r]));
     },
     enabled: !!contextProjects?.length,
   });
@@ -124,7 +110,7 @@ export default function ProjectsPage() {
     } finally { setSubmitting(false); }
   };
 
-  const projects = useMemo(() => projectsData.length ? projectsData : (contextProjects || []), [projectsData, contextProjects]);
+  const projects = contextProjects || [];
 
   const filteredProjects = useMemo(() => {
     let list = projects;
@@ -243,8 +229,9 @@ export default function ProjectsPage() {
           {filteredProjects.map((proj: any, i: number) => {
             const isActive = proj.id === contextProject?.id;
             const isEditing = editingId === proj.id;
-            const totalForms = (proj.forms || []).length;
-            const totalDocs = (proj.documents || []).length;
+            const stats = projectStats[proj.id];
+            const totalForms = stats?.forms ?? 0;
+            const totalDocs = stats?.documents ?? 0;
 
             return (
               <div

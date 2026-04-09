@@ -26,12 +26,15 @@ import { cn } from '@/lib/utils';
 import { typography } from '@/lib/typography';
 import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 
 interface NavigationItem {
   name: string;
   href: string;
   icon: LucideIcon;
   badge?: string;
+  /** Permission required to show this item. Admin/owner always see it. */
+  permission?: string;
 }
 
 interface NavigationSection {
@@ -43,23 +46,23 @@ const navigationSections: NavigationSection[] = [
   {
     title: 'Data Management',
     items: [
-      { name: 'Documents', href: '/documents', icon: FileText },
-      { name: 'Forms', href: '/forms', icon: FileCheck },
+      { name: 'Documents', href: '/documents', icon: FileText, permission: 'can_view_docs' },
+      { name: 'Forms', href: '/forms', icon: FileCheck, permission: 'can_view_docs' },
     ],
   },
   {
     title: 'Extraction',
     items: [
-      { name: 'Run Extraction', href: '/extractions', icon: PlayCircle },
-      { name: 'Manual Extract', href: '/manual-extraction', icon: Edit },
-      { name: 'Consensus', href: '/consensus', icon: CheckSquare2 },
-      { name: 'Results', href: '/results', icon: BarChart3 },
+      { name: 'Run Extraction', href: '/extractions', icon: PlayCircle, permission: 'can_view_results' },
+      { name: 'Manual Extract', href: '/manual-extraction', icon: Edit, permission: 'can_view_results' },
+      { name: 'Consensus', href: '/consensus', icon: CheckSquare2, permission: 'can_adjudicate' },
+      { name: 'Results', href: '/results', icon: BarChart3, permission: 'can_view_results' },
     ],
   },
   {
     title: 'Monitoring',
     items: [
-      { name: 'Jobs', href: '/jobs', icon: Loader2 },
+      { name: 'Jobs', href: '/jobs', icon: Loader2, permission: 'can_view_results' },
     ],
   },
   {
@@ -70,10 +73,46 @@ const navigationSections: NavigationSection[] = [
   },
 ];
 
+const ROLE_BADGE_STYLES: Record<string, { bg: string; text: string }> = {
+  admin:   { bg: 'bg-purple-100 dark:bg-purple-400/15', text: 'text-purple-600 dark:text-purple-400' },
+  owner:   { bg: 'bg-amber-100 dark:bg-amber-400/15', text: 'text-amber-600 dark:text-amber-400' },
+  manager: { bg: 'bg-blue-100 dark:bg-blue-400/15', text: 'text-blue-600 dark:text-blue-400' },
+  member:  { bg: 'bg-gray-100 dark:bg-gray-400/15', text: 'text-gray-600 dark:text-gray-400' },
+  viewer:  { bg: 'bg-green-100 dark:bg-green-400/15', text: 'text-green-600 dark:text-green-400' },
+};
+
+const ROLE_LABELS: Record<string, string> = {
+  admin: 'Admin', owner: 'Owner', manager: 'Manager', member: 'Member', viewer: 'Viewer',
+};
+
 export function Sidebar() {
   const pathname = usePathname();
   const [collapsed, setCollapsed] = useState(true);
   const { isAdmin } = useAuth();
+  const perms = useProjectPermissions();
+
+  // Determine effective role for display
+  const effectiveRole = isAdmin ? 'admin' : perms.role || 'member';
+  const roleStyle = ROLE_BADGE_STYLES[effectiveRole] || ROLE_BADGE_STYLES.member;
+
+  // Filter nav items based on permissions
+  const filteredSections = navigationSections.map(section => ({
+    ...section,
+    items: section.items.filter(item => {
+      if (!item.permission) return true; // No permission required
+      if (isAdmin || perms.isOwner) return true; // Admin/owner see everything
+      return !!(perms as Record<string, unknown>)[item.permission];
+    }),
+  })).filter(section => section.items.length > 0);
+
+  // Add admin section
+  const allSections = [
+    ...filteredSections,
+    ...(isAdmin ? [{
+      title: 'Administration',
+      items: [{ name: 'Admin Panel', href: '/admin', icon: Shield }],
+    }] : []),
+  ];
 
   return (
     <div
@@ -116,11 +155,17 @@ export function Sidebar() {
         </div>
       )}
 
+      {/* Role badge */}
+      {!collapsed && (
+        <div className="px-3 mb-2">
+          <span className={cn('text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase tracking-wider', roleStyle.bg, roleStyle.text)}>
+            {ROLE_LABELS[effectiveRole] || effectiveRole}
+          </span>
+        </div>
+      )}
+
       <nav className="flex-1 overflow-y-auto p-2">
-        {[...navigationSections, ...(isAdmin ? [{
-          title: 'Administration',
-          items: [{ name: 'Admin Panel', href: '/admin', icon: Shield }],
-        }] : [])].map((section, sectionIndex) => (
+        {allSections.map((section, sectionIndex) => (
           <div key={section.title} className={sectionIndex > 0 ? 'mt-6' : ''}>
             {!collapsed && (
               <h3 className={cn(typography.nav.section, 'px-3 mb-2')}>

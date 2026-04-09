@@ -2,7 +2,7 @@
 
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { useState } from 'react';
-import { Trash2, Users, BarChart3, Loader2 } from 'lucide-react';
+import { Trash2, Users, BarChart3, Loader2, FolderOpen } from 'lucide-react';
 import { DashboardLayout } from '@/components/layout';
 import { useAdminGuard } from '@/hooks/useAdminGuard';
 import { adminService } from '@/services/admin.service';
@@ -10,7 +10,7 @@ import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
 import type { User, AdminUserUpdate } from '@/types/api';
 
-type Section = 'dashboard' | 'users';
+type Section = 'dashboard' | 'users' | 'projects';
 
 const NAV_GROUPS = [
   {
@@ -23,6 +23,7 @@ const NAV_GROUPS = [
     label: 'Management',
     items: [
       { id: 'users' as Section, label: 'Users', icon: Users },
+      { id: 'projects' as Section, label: 'Projects', icon: FolderOpen },
     ],
   },
 ];
@@ -74,6 +75,7 @@ export default function AdminPage() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [page, setPage] = useState(1);
+  const [projectsPage, setProjectsPage] = useState(1);
   const [active, setActive] = useState<Section>('dashboard');
 
   const { data: statsData } = useQuery({
@@ -86,6 +88,12 @@ export default function AdminPage() {
     queryKey: ['admin', 'users', page],
     queryFn: () => adminService.listUsers(page, 20),
     enabled: isAdmin,
+  });
+
+  const { data: projectsData, isLoading: projectsLoading } = useQuery({
+    queryKey: ['admin', 'projects', projectsPage],
+    queryFn: () => adminService.listProjects(projectsPage, 20),
+    enabled: isAdmin && active === 'projects',
   });
 
   const updateMutation = useMutation({
@@ -136,7 +144,10 @@ export default function AdminPage() {
   const sectionTitle: Record<Section, string> = {
     dashboard: 'Dashboard',
     users: 'Users',
+    projects: 'Projects',
   };
+
+  const projectsTotalPages = projectsData ? Math.ceil(projectsData.total / 20) : 1;
 
   return (
     <DashboardLayout>
@@ -305,6 +316,80 @@ export default function AdminPage() {
                     <button
                       onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
                       disabled={page === totalPages}
+                      className="text-xs px-3 py-1.5 border border-gray-200 dark:border-[#2a2a2a] rounded-lg disabled:opacity-40 text-gray-600 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors"
+                    >
+                      Next
+                    </button>
+                  </div>
+                </div>
+              )}
+            </SectionCard>
+          )}
+
+          {/* ── Projects ── */}
+          {active === 'projects' && (
+            <SectionCard title="All Projects" description="View and manage all platform projects">
+              {projectsLoading ? (
+                <div className="flex items-center justify-center p-8">
+                  <Loader2 className="w-5 h-5 animate-spin text-gray-300 dark:text-zinc-600" />
+                </div>
+              ) : (
+                <table className="w-full text-sm">
+                  <thead className="bg-gray-50 dark:bg-[#0d0d0d]">
+                    <tr>
+                      <th className="text-left px-5 py-2.5 text-xs font-medium text-gray-500 dark:text-zinc-500">Project</th>
+                      <th className="text-left px-5 py-2.5 text-xs font-medium text-gray-500 dark:text-zinc-500">Owner</th>
+                      <th className="text-left px-5 py-2.5 text-xs font-medium text-gray-500 dark:text-zinc-500">Members</th>
+                      <th className="text-left px-5 py-2.5 text-xs font-medium text-gray-500 dark:text-zinc-500">Created</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100 dark:divide-[#1f1f1f]">
+                    {(projectsData?.projects || []).map((project: any) => (
+                      <tr key={project.id} className="hover:bg-gray-50 dark:hover:bg-[#0d0d0d]">
+                        <td className="px-5 py-3.5">
+                          <div className="text-sm font-medium text-gray-900 dark:text-zinc-200">{project.name}</div>
+                          {project.description && (
+                            <div className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5 truncate max-w-xs">{project.description}</div>
+                          )}
+                        </td>
+                        <td className="px-5 py-3.5">
+                          <div className="text-sm text-gray-600 dark:text-zinc-400">{project.owner_name || project.owner_email || '—'}</div>
+                          {project.owner_name && (
+                            <div className="text-xs text-gray-400 dark:text-zinc-500">{project.owner_email}</div>
+                          )}
+                        </td>
+                        <td className="px-5 py-3.5">
+                          <span className="text-sm text-gray-500 dark:text-zinc-400 tabular-nums">{project.member_count ?? 0}</span>
+                        </td>
+                        <td className="px-5 py-3.5 text-gray-400 dark:text-zinc-500 text-xs">
+                          {new Date(project.created_at).toLocaleDateString()}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              {/* Pagination */}
+              {projectsTotalPages > 1 && (
+                <div className="flex items-center justify-between px-5 py-3.5 border-t border-gray-100 dark:border-[#1f1f1f]">
+                  <span className="text-xs text-gray-400 dark:text-zinc-500">
+                    {projectsData?.total} projects
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setProjectsPage((p) => Math.max(1, p - 1))}
+                      disabled={projectsPage === 1}
+                      className="text-xs px-3 py-1.5 border border-gray-200 dark:border-[#2a2a2a] rounded-lg disabled:opacity-40 text-gray-600 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors"
+                    >
+                      Previous
+                    </button>
+                    <span className="text-xs text-gray-400 dark:text-zinc-500 px-1 tabular-nums">
+                      {projectsPage} / {projectsTotalPages}
+                    </span>
+                    <button
+                      onClick={() => setProjectsPage((p) => Math.min(projectsTotalPages, p + 1))}
+                      disabled={projectsPage === projectsTotalPages}
                       className="text-xs px-3 py-1.5 border border-gray-200 dark:border-[#2a2a2a] rounded-lg disabled:opacity-40 text-gray-600 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors"
                     >
                       Next

@@ -2,7 +2,7 @@
 
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
-import { formsService } from '@/services';
+import { formsService, documentsService } from '@/services';
 import { Form, CreateFormRequest, FormField } from '@/types/api';
 import { useEffect, useState, useRef, useMemo } from 'react';
 import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
@@ -17,10 +17,12 @@ import {
   Spinner,
   Textarea,
 } from '@/components/ui';
-import { Plus, Trash2, FileText, Code, AlertCircle, Check, Edit3, ThumbsUp, ThumbsDown, MessageSquare, ChevronDown, ChevronUp, ChevronRight, X } from 'lucide-react';
-import { JobLogsViewer } from '@/components/JobLogsViewer';
+import { Plus, Trash2, FileText, Code, AlertCircle, Check, Edit3, ThumbsUp, ThumbsDown, MessageSquare, ChevronDown, ChevronUp, ChevronRight, X, Clipboard, ClipboardCheck } from 'lucide-react';
 import PilotStudyDialog from '@/components/pilot/PilotStudyDialog';
-import { cn, formatDate, getErrorMessage } from '@/lib/utils';
+import { connectToJobLogs, type LogMessage } from '@/services/jobLogsWebSocket';
+import { apiClient } from '@/lib/api';
+import { cn, formatDate, formatRelativeTime, getErrorMessage } from '@/lib/utils';
+import { TooltipSimple } from '@/components/ui';
 import { typography } from '@/lib/typography';
 import { statusColors, statusBgs } from '@/lib/colors';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
@@ -31,12 +33,11 @@ export default function FormsPage() {
   const { toast } = useToast();
   const [showCreateDialog, setShowCreateDialog] = useState(false);
   const [openForm, setOpenForm] = useState<Form | null>(null);
-  const [activeJobId, setActiveJobId] = useState<string | null>(null);
-  const [activeJobFormId, setActiveJobFormId] = useState<string | null>(null);
   const [reviewForm, setReviewForm] = useState<Form | null>(null);
   const [pilotForm, setPilotForm] = useState<Form | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [generatingJobs, setGeneratingJobs] = useState<Record<string, string>>({});
 
   // Debounce search query (300ms) so we don't hit the API on every keystroke
   useEffect(() => {
@@ -51,10 +52,26 @@ export default function FormsPage() {
     enabled: !!selectedProject,
     refetchInterval: (query) => {
       const data = query.state.data ?? [];
-      return data.some((f: Form) => f.status === 'generating' || f.status === 'regenerating' || f.status === 'awaiting_review') ? 2000 : false;
+      const hasPilotRunning = data.some((f: Form) => {
+        const m = typeof f.metadata === 'string' ? JSON.parse(f.metadata || '{}') : (f.metadata || {});
+        return m?.pilot?.status === 'running';
+      });
+      return data.some((f: Form) => f.status === 'generating' || f.status === 'regenerating' || f.status === 'awaiting_review') || hasPilotRunning ? 5000 : false;
     },
     placeholderData: keepPreviousData,
   });
+
+  const { data: documents = [] } = useQuery({
+    queryKey: ['documents', selectedProject?.id],
+    queryFn: () => documentsService.getAll(selectedProject!.id),
+    enabled: !!selectedProject,
+  });
+
+  const docNames = useMemo(() => {
+    const map: Record<string, string> = {};
+    documents.forEach((d: any) => { map[d.id] = d.filename; });
+    return map;
+  }, [documents]);
 
   const error = queryError ? getErrorMessage(queryError as any, 'Failed to load forms') : null;
 
@@ -64,15 +81,13 @@ export default function FormsPage() {
     try {
       const response = await formsService.generateCode(formId, enableReview);
 
-      // Set active job ID for live log streaming
       if (response.job_id) {
-        setActiveJobId(response.job_id);
-        setActiveJobFormId(formId);
+        setGeneratingJobs(prev => ({ ...prev, [formId]: response.job_id! }));
       }
 
       toast({
         title: 'Code Generation Started',
-        description: 'AI is generating extraction code. Watch the progress below!',
+        description: 'AI is generating extraction code.',
         variant: 'success',
       });
 
@@ -111,7 +126,10 @@ export default function FormsPage() {
 
   const handleApproveDecomposition = async (formId: string) => {
     try {
-      await formsService.approveDecomposition(formId);
+      const response = await formsService.approveDecomposition(formId);
+      if (response.job_id) {
+        setGeneratingJobs(prev => ({ ...prev, [formId]: response.job_id }));
+      }
       toast({
         title: 'Decomposition Approved',
         description: 'Continuing with code generation...',
@@ -131,7 +149,10 @@ export default function FormsPage() {
 
   const handleRejectDecomposition = async (formId: string, feedback: string) => {
     try {
-      await formsService.rejectDecomposition(formId, feedback);
+      const response = await formsService.rejectDecomposition(formId, feedback);
+      if (response.job_id) {
+        setGeneratingJobs(prev => ({ ...prev, [formId]: response.job_id }));
+      }
       toast({
         title: 'Feedback Submitted',
         description: 'Regenerating decomposition with your feedback...',
@@ -159,17 +180,7 @@ export default function FormsPage() {
   };
 
   if (!selectedProject) {
-    return (
-      <DashboardLayout title="Forms" description="Create and manage extraction forms">
-        <div className="bg-yellow-50 border border-yellow-200 rounded-lg p-6 text-center">
-          <AlertCircle className="h-12 w-12 text-yellow-500 mx-auto mb-3" />
-          <p className="text-yellow-800 font-medium">No project selected</p>
-          <p className="text-yellow-600 text-sm mt-1">
-            Please select a project from the dropdown above to manage forms.
-          </p>
-        </div>
-      </DashboardLayout>
-    );
+    return null;
   }
 
   if (!can_view_docs) {
@@ -229,37 +240,22 @@ export default function FormsPage() {
                 className="w-56 text-sm text-gray-900 dark:text-white bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-2 pl-9 pr-3 outline-none focus:border-gray-400 dark:focus:border-[#3f3f3f] placeholder:text-gray-400"
               />
             </div>
-            {can_create_forms && (
+            <TooltipSimple text={can_create_forms ? '' : 'You need the "Create Forms" permission'}>
             <button
               onClick={() => setShowCreateDialog(true)}
-              className="text-sm font-semibold text-white bg-gray-900 dark:bg-white dark:text-black border-none rounded-lg px-4 py-2 cursor-pointer flex items-center gap-1.5 hover:bg-gray-700 dark:hover:bg-zinc-100 transition-colors"
+              disabled={!can_create_forms}
+              className={cn(
+                "text-sm font-semibold border-none rounded-lg px-4 py-2 flex items-center gap-1.5 transition-colors",
+                can_create_forms
+                  ? "text-white bg-gray-900 dark:bg-white dark:text-black cursor-pointer hover:bg-gray-700 dark:hover:bg-zinc-100"
+                  : "bg-gray-200 dark:bg-[#2a2a2a] text-gray-400 dark:text-zinc-600 cursor-not-allowed"
+              )}
             >
               <Plus className="h-4 w-4" />
               Create Form
             </button>
-            )}
+            </TooltipSimple>
           </div>
-
-          {/* Live Log Streaming */}
-          {activeJobId && (
-            <div className="mb-6">
-              <JobLogsViewer
-                jobId={activeJobId}
-                onComplete={(status) => {
-                  setActiveJobId(null);
-                  setActiveJobFormId(null);
-                  queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id], exact: false });
-                  if (status === 'awaiting_review') {
-                    toast({
-                      title: 'Review Required',
-                      description: 'Code generation is paused. Please review and approve the decomposition plan.',
-                      variant: 'warning',
-                    });
-                  }
-                }}
-              />
-            </div>
-          )}
 
           {/* Forms Sections */}
           {filteredForms.length === 0 ? (
@@ -289,8 +285,11 @@ export default function FormsPage() {
                           onDelete={handleDeleteForm}
                           onClick={() => setOpenForm(form)}
                           onReview={(form) => setReviewForm(form)}
+                          onApprove={handleApproveDecomposition}
                           onEdit={(form) => setOpenForm(form)}
                           onPilot={(form) => setPilotForm(form)}
+                          jobId={generatingJobs[form.id] || (typeof form.metadata === 'string' ? JSON.parse(form.metadata || '{}') : (form.metadata || {}))?.current_job_id}
+                          docNames={docNames}
                         />
                       ))}
                   </div>
@@ -320,8 +319,11 @@ export default function FormsPage() {
                           onDelete={handleDeleteForm}
                           onClick={() => setOpenForm(form)}
                           onReview={(form) => setReviewForm(form)}
+                          onApprove={handleApproveDecomposition}
                           onEdit={(form) => setOpenForm(form)}
                           onPilot={(form) => setPilotForm(form)}
+                          jobId={generatingJobs[form.id] || (typeof form.metadata === 'string' ? JSON.parse(form.metadata || '{}') : (form.metadata || {}))?.current_job_id}
+                          docNames={docNames}
                         />
                       ))}
                   </div>
@@ -351,8 +353,11 @@ export default function FormsPage() {
                           onDelete={handleDeleteForm}
                           onClick={() => setOpenForm(form)}
                           onReview={(form) => setReviewForm(form)}
+                          onApprove={handleApproveDecomposition}
                           onEdit={(form) => setOpenForm(form)}
                           onPilot={(form) => setPilotForm(form)}
+                          jobId={generatingJobs[form.id] || (typeof form.metadata === 'string' ? JSON.parse(form.metadata || '{}') : (form.metadata || {}))?.current_job_id}
+                          docNames={docNames}
                         />
                       ))}
                   </div>
@@ -382,8 +387,11 @@ export default function FormsPage() {
                           onDelete={handleDeleteForm}
                           onClick={() => setOpenForm(form)}
                           onReview={(form) => setReviewForm(form)}
+                          onApprove={handleApproveDecomposition}
                           onEdit={(form) => setOpenForm(form)}
                           onPilot={(form) => setPilotForm(form)}
+                          jobId={generatingJobs[form.id] || (typeof form.metadata === 'string' ? JSON.parse(form.metadata || '{}') : (form.metadata || {}))?.current_job_id}
+                          docNames={docNames}
                         />
                       ))}
                   </div>
@@ -399,7 +407,7 @@ export default function FormsPage() {
           projectId={selectedProject.id}
           existingForms={forms}
           onClose={() => setShowCreateDialog(false)}
-          onSuccess={() => {
+          onSuccess={(form) => {
             setShowCreateDialog(false);
             queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id], exact: false });
           }}
@@ -450,18 +458,26 @@ function FormCard({
   onDelete,
   onClick,
   onReview,
+  onApprove,
   onEdit,
   onPilot,
+  jobId,
+  docNames = {},
 }: {
   form: Form;
   onGenerateCode: (id: string, enableReview?: boolean) => void;
   onDelete: (id: string) => void;
   onClick: () => void;
   onReview?: (form: Form) => void;
+  onApprove?: (formId: string) => void;
   onEdit?: (form: Form) => void;
   onPilot?: (form: Form) => void;
+  jobId?: string;
+  docNames?: Record<string, string>;
 }) {
   const [showError, setShowError] = useState(false);
+  const [activeDocIdx, setActiveDocIdx] = useState(0);
+  const [docFade, setDocFade] = useState(true);
 
   const isGenerating = form.status === 'generating' || form.status === 'regenerating';
 
@@ -478,7 +494,7 @@ function FormCard({
     awaiting_review: { label: 'Review', cls: 'text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50' },
     regenerating: { label: 'Regenerating', cls: 'text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/50' },
     active: { label: 'Active', cls: 'text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50' },
-    failed: { label: 'Failed', cls: 'text-purple-700 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800/50' },
+    failed: { label: 'Failed', cls: 'text-red-700 dark:text-red-400 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/50' },
   };
 
   const s = statusConfig[form.status];
@@ -486,25 +502,36 @@ function FormCard({
   const isDraft = form.status === 'draft';
   const isReview = form.status === 'awaiting_review';
 
-  const timeAgo = (dateStr: string) => {
-    const now = new Date();
-    const d = new Date(dateStr);
-    const mins = Math.floor((now.getTime() - d.getTime()) / 60000);
-    if (mins < 60) return `${mins}m ago`;
-    const hrs = Math.floor(mins / 60);
-    if (hrs < 24) return `${hrs}h ago`;
-    const days = Math.floor(hrs / 24);
-    return `${days}d ago`;
-  };
+  // Hoist pilot data so it's available for card-level styling
+  const meta = typeof form.metadata === 'string' ? JSON.parse(form.metadata || '{}') : (form.metadata || {});
+  const pilot = meta.pilot;
+  const pilotStatus = pilot?.status;
+  const sampleIds: string[] = pilot?.sample_document_ids || [];
 
+  useEffect(() => {
+    if (pilotStatus !== 'running' || sampleIds.length <= 1) return;
+    const interval = setInterval(() => {
+      setDocFade(false);
+      setTimeout(() => {
+        setActiveDocIdx(prev => (prev + 1) % sampleIds.length);
+        setDocFade(true);
+      }, 300);
+    }, 2500);
+    return () => clearInterval(interval);
+  }, [pilotStatus, sampleIds.length]);
+
+  const currentDocName = sampleIds.length > 0
+    ? (docNames[sampleIds[activeDocIdx]] || sampleIds[activeDocIdx]?.slice(0, 8) || '').replace(/\.(pdf|md)$/i, '')
+    : '';
 
   return (
     <div
       className={cn(
-        "bg-white rounded-xl border border-gray-200 flex flex-col transition-all duration-150 relative overflow-hidden dark:bg-[#111111] dark:border-[#1f1f1f]",
-        isFailed && "border-l-[4px] border-l-purple-500 dark:border-l-purple-400 bg-gradient-to-r from-purple-50 to-white dark:from-purple-400/10 dark:to-[#111111]",
+        "bg-white rounded-xl border border-gray-200 flex flex-col transition-all duration-150 relative overflow-hidden dark:bg-[#111111] dark:border-[#1f1f1f] group",
+        isFailed && "border-l-[4px] border-l-red-400 dark:border-l-red-500 bg-gradient-to-r from-red-50/60 to-white dark:from-red-400/10 dark:to-[#111111]",
         isReview && "border-l-[4px] border-l-amber-500 dark:border-l-amber-400 bg-gradient-to-r from-amber-50 to-white dark:from-amber-400/10 dark:to-[#111111]",
-        isDraft && "border-l-[4px] border-l-gray-400 dark:border-l-zinc-500",
+        isDraft && "border-l-[4px] border-l-slate-400 dark:border-l-zinc-400",
+        (form.status === 'active' && (pilot?.status === 'running' || pilot?.status === 'reviewing')) && "border-l-[4px] border-l-blue-400 dark:border-l-blue-500",
       )}
     >
       <div className="pt-5 px-[22px]">
@@ -517,216 +544,703 @@ function FormCard({
         </div>
 
         {/* Description */}
-        <p className="text-sm text-gray-400 mb-3.5 leading-relaxed line-clamp-2">{form.form_description || 'No description'}</p>
+        {form.form_description && (
+          <p className="text-sm text-gray-400 mb-3.5 leading-relaxed line-clamp-2">{form.form_description}</p>
+        )}
 
         {/* Meta */}
         <div className={cn("flex items-center gap-2.5 text-xs text-gray-400", isFailed || isReview ? "mb-3.5" : "mb-[18px]")}>
           <span className="flex items-center gap-1">
-            <span className="text-gray-500 font-medium">{form.fields.length}</span> fields
+            <span className="text-gray-500 font-medium">{form.fields.length}</span> {form.fields.length === 1 ? 'field' : 'fields'}
           </span>
           <span className="text-gray-200">&middot;</span>
-          <span>{formatDate(form.created_at)}</span>
-          {form.updated_at && form.updated_at !== form.created_at && (
-            <>
-              <span className="text-gray-200">&middot;</span>
-              <span className="flex items-center gap-1">
-                <svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="#ccc" strokeWidth="1.8" strokeLinecap="round">
-                  <circle cx="8" cy="8" r="6" /><path d="M8 5v3.5l2.5 1.5" />
-                </svg>
-                {timeAgo(form.updated_at)}
-              </span>
-            </>
-          )}
+          <TooltipSimple text={formatDate(form.updated_at || form.created_at)}>
+            <span className="cursor-default">{formatRelativeTime(form.updated_at || form.created_at)}</span>
+          </TooltipSimple>
         </div>
       </div>
 
-      {/* Error for failed */}
-      {isFailed && form.error && (
-        <div className="px-[22px] pb-3.5">
-          <div
-            onClick={(e) => { e.stopPropagation(); setShowError(!showError); }}
-            className="flex items-center gap-2 p-2.5 px-3.5 rounded-lg bg-purple-50 border border-purple-200 cursor-pointer dark:bg-purple-900/20 dark:border-purple-800/50"
-          >
-            <div className="w-[5px] h-[5px] rounded-full bg-purple-500 shrink-0" />
-            <span className={cn(
-              "text-xs text-purple-700 dark:text-purple-400 flex-1 font-medium leading-[1.4]",
-              !showError && "overflow-hidden text-ellipsis whitespace-nowrap",
-            )}>{form.error}</span>
-            <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 opacity-30 transition-transform duration-200 text-gray-700 dark:text-zinc-400" style={{
-              transform: showError ? "rotate(180deg)" : "rotate(0)",
-            }}>
-              <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+      {/* Error for failed — enhanced with actionable info */}
+      {isFailed && form.error && (() => {
+        const err = form.error || '';
+        // Extract failed signature names from error text
+        const failedNames = [...err.matchAll(/Failed to generate (\w+)/g)].map(m => m[1]);
+        // Convert PascalCase to readable
+        const readableNames = failedNames.map(n => n.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2'));
+        // Determine human-readable cause
+        const isTimeout = /timeout|time.limit|timed.out/i.test(err);
+        const isFieldFailure = failedNames.length > 0;
+
+        const title = isTimeout
+          ? 'Generation timed out'
+          : isFieldFailure
+            ? `${failedNames.length} field group${failedNames.length > 1 ? 's' : ''} failed to generate`
+            : 'Code generation failed';
+
+        const description = isTimeout
+          ? 'The process took too long. Try reducing the number of fields or simplifying descriptions.'
+          : isFieldFailure
+            ? "The extraction schema couldn't be built for some field groups. This usually happens when field descriptions are too vague for structured output."
+            : 'Something went wrong during code generation. You can retry or edit your form and try again.';
+
+        const suggestedFix = isTimeout
+          ? { title: 'Simplify and retry', desc: 'Reduce the number of fields or split into multiple forms, then retry' }
+          : isFieldFailure
+            ? { title: 'Improve field descriptions', desc: `Open the form, add more specific descriptions for vague fields, then retry generation` }
+            : { title: 'Retry generation', desc: 'Sometimes a simple retry resolves transient issues' };
+
+        return (
+          <div className="px-[22px] pb-3.5" onClick={e => e.stopPropagation()}>
+            <div className="h-px bg-gray-100 dark:bg-[#1a1a1a] mb-3" />
+
+            {/* Error summary */}
+            <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200/60 dark:border-red-800/30 mb-3">
+              <X className="w-3.5 h-3.5 text-red-500 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-semibold text-red-800 dark:text-red-300">{title}</p>
+                <p className="text-[11px] text-red-600/70 dark:text-red-400/60 mt-0.5 leading-relaxed">{description}</p>
+              </div>
+            </div>
+
+            {/* Failed groups as tags */}
+            {readableNames.length > 0 && (
+              <div className="mb-3">
+                <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-1.5">Failed groups</div>
+                <div className="flex flex-wrap gap-1.5">
+                  {readableNames.map((name, i) => (
+                    <span key={i} className="text-[11px] text-red-600 dark:text-red-400 bg-red-50 dark:bg-red-900/15 border border-red-200/50 dark:border-red-800/30 px-2 py-0.5 rounded-md">{name}</span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Suggested fix */}
+            <div className="mb-3">
+              <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-1.5">Suggested fix</div>
+              <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-200/60 dark:border-blue-800/30">
+                <Check className="w-3.5 h-3.5 text-blue-500 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs font-semibold text-blue-800 dark:text-blue-300">{suggestedFix.title}</p>
+                  <p className="text-[11px] text-blue-600/70 dark:text-blue-400/60 mt-0.5 leading-relaxed">{suggestedFix.desc}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Collapsible raw log */}
+            <button
+              onClick={() => setShowError(!showError)}
+              className="flex items-center gap-1.5 text-[11px] text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 bg-transparent border-none cursor-pointer p-0 mb-3 transition-colors"
+            >
+              <ChevronRight className={cn("w-3 h-3 transition-transform", showError && "rotate-90")} />
+              {showError ? 'Hide' : 'Show'} raw error log
+            </button>
+            {showError && (
+              <div className="text-[11px] text-gray-500 dark:text-zinc-400 bg-gray-50 dark:bg-[#141414] rounded-lg p-3 mb-3 font-mono leading-relaxed break-all max-h-32 overflow-y-auto">
+                {err}
+              </div>
+            )}
+
+            {/* Action buttons */}
+            <div className="flex gap-2">
+              {onEdit && (
+                <button
+                  onClick={() => onEdit(form)}
+                  className="flex-1 text-xs font-semibold rounded-lg py-2 cursor-pointer text-center transition-all duration-200 hover:-translate-y-px text-white border-none bg-gray-900 dark:bg-white dark:text-gray-900"
+                >
+                  Edit form
+                </button>
+              )}
+              <button
+                onClick={() => onGenerateCode(form.id)}
+                className="flex-1 text-xs font-semibold rounded-lg py-2 cursor-pointer text-center transition-all duration-200 text-gray-700 dark:text-zinc-300 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:bg-gray-50 dark:hover:bg-white/[0.03]"
+              >
+                Retry
+              </button>
+              <button
+                onClick={() => onDelete(form.id)}
+                className="text-xs font-semibold rounded-lg py-2 px-3 cursor-pointer text-center transition-all duration-200 text-gray-400 dark:text-zinc-500 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:text-red-500 hover:border-red-200 dark:hover:text-red-400 dark:hover:border-red-800/50"
+              >
+                Delete
+              </button>
+            </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Draft CTA */}
       {isDraft && (
         <div className="px-[22px] pb-3.5">
-          <button
-            onClick={e => { e.stopPropagation(); onGenerateCode(form.id); }}
-            className="w-full text-sm font-semibold rounded-lg py-2.5 cursor-pointer flex items-center justify-center gap-2 transition-all duration-200 hover:-translate-y-px text-white border-none bg-gradient-to-br from-gray-700 to-gray-900 shadow-[0_4px_14px_rgba(0,0,0,0.18)] dark:from-zinc-600 dark:to-zinc-800"
-          >
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <polyline points="4 7 8 3 12 7"/><polyline points="4 13 8 9 12 13"/>
-            </svg>
-            Generate Code
-          </button>
-        </div>
-      )}
-
-      {/* Review CTA */}
-      {isReview && onReview && (
-        <div className="px-[22px] pb-3.5">
-          <button
-            onClick={e => { e.stopPropagation(); onReview(form); }}
-            className="w-full text-sm font-semibold rounded-lg py-2.5 cursor-pointer flex items-center justify-center gap-2 transition-all duration-200 hover:-translate-y-px text-white border-none bg-gradient-to-br from-amber-500 to-orange-500 shadow-[0_4px_14px_rgba(245,158,11,0.35)] dark:from-amber-600 dark:to-orange-600 dark:shadow-[0_4px_14px_rgba(217,119,6,0.25)]"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
-            </svg>
-            Review Schema
-          </button>
-        </div>
-      )}
-
-      {/* Generating progress indicator */}
-      {isGenerating && (
-        <div className="px-[22px] pb-3.5">
-          <div className="flex items-center gap-2 mb-1.5">
-            <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse shrink-0" />
-            <span className="text-xs text-blue-600 dark:text-blue-400 font-medium">
-              {form.status === 'regenerating' ? 'Regenerating code…' : 'Generating code…'} (~5–10 min)
-            </span>
-            <span className="text-xs text-gray-400 dark:text-zinc-500 ml-auto shrink-0">{elapsedLabel(form.updated_at)}</span>
-          </div>
-          <div className="h-[3px] w-full rounded-full bg-blue-100 dark:bg-blue-900/30 overflow-hidden">
-            <div className="h-full w-full rounded-full bg-gradient-to-r from-blue-400 via-indigo-400 to-blue-400 animate-[shimmer_2s_linear_infinite]" style={{ backgroundSize: '200% 100%' }} />
+          <div className="flex items-center gap-2">
+            <button
+              onClick={e => { e.stopPropagation(); onDelete(form.id); }}
+              className="text-xs font-semibold rounded-lg py-2 px-3 cursor-pointer text-center transition-all duration-200 text-gray-400 dark:text-zinc-500 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:text-red-500 hover:border-red-200 dark:hover:text-red-400 dark:hover:border-red-800/50"
+            >
+              Delete
+            </button>
+            <button
+              onClick={e => { e.stopPropagation(); onEdit?.(form); }}
+              className="flex-1 text-sm font-semibold rounded-lg py-2 cursor-pointer flex items-center justify-center gap-2 transition-all duration-200 hover:-translate-y-px text-white border-none bg-gradient-to-br from-gray-700 to-gray-900 shadow-[0_4px_14px_rgba(0,0,0,0.18)] dark:from-zinc-600 dark:to-zinc-800"
+            >
+              <Edit3 className="w-3.5 h-3.5" />
+              Continue editing
+            </button>
           </div>
         </div>
       )}
 
-      {/* Pilot CTA for active forms */}
-      {form.status === 'active' && onPilot && (() => {
+      {/* Review CTA — enhanced with context */}
+      {isReview && onReview && (() => {
         const meta = typeof form.metadata === 'string' ? JSON.parse(form.metadata || '{}') : (form.metadata || {});
-        const pilot = meta.pilot;
-        const pilotStatus = pilot?.status;
+        const decomp = meta.decomposition || {};
+        const sigs = decomp.signatures || [];
+        const totalFields = sigs.reduce((s: number, sig: any) => s + Object.keys(sig.fields || {}).length, 0);
+
+        return (
+          <div className="px-[22px] pb-3.5" onClick={e => e.stopPropagation()}>
+            <div className="h-px bg-gray-100 dark:bg-[#1a1a1a] mb-3" />
+            <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-2.5">What to review</div>
+
+            <div className="space-y-2 mb-3.5">
+              {/* Info item */}
+              <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-amber-50 dark:bg-amber-900/10 border border-amber-200/60 dark:border-amber-800/30">
+                <AlertCircle className="w-3.5 h-3.5 text-amber-500 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs font-semibold text-amber-800 dark:text-amber-300">{sigs.length} field groups created from {totalFields} fields</p>
+                  <p className="text-[11px] text-amber-600/80 dark:text-amber-400/60 mt-0.5 leading-relaxed">AI grouped your fields into {sigs.length} extraction tasks — verify the grouping makes sense</p>
+                </div>
+              </div>
+
+              {/* Pipeline info */}
+              <div className="flex items-start gap-2.5 p-2.5 rounded-lg">
+                <div className="w-3.5 h-3.5 rounded-full border border-gray-300 dark:border-zinc-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-xs font-semibold text-gray-700 dark:text-zinc-300">{decomp.pipeline?.length || 1} execution {(decomp.pipeline?.length || 1) === 1 ? 'stage' : 'stages'} planned</p>
+                  <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-0.5 leading-relaxed">Groups will run {decomp.pipeline?.length === 1 ? 'in parallel' : 'across stages'} — check the order makes sense for your data</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Action buttons */}
+            <div className="flex gap-2">
+              <button
+                onClick={() => onReview(form)}
+                className="flex-1 text-xs font-semibold rounded-lg py-2.5 cursor-pointer text-center transition-all duration-200 hover:-translate-y-px text-white border-none bg-gray-900 dark:bg-white dark:text-gray-900"
+              >
+                Review schema
+              </button>
+              {onApprove && (
+                <button
+                  onClick={() => onApprove(form.id)}
+                  className="flex-1 text-xs font-semibold rounded-lg py-2.5 cursor-pointer text-center transition-all duration-200 hover:-translate-y-px text-gray-700 dark:text-zinc-300 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:bg-gray-50 dark:hover:bg-white/[0.03]"
+                >
+                  Looks good, activate
+                </button>
+              )}
+              <button
+                onClick={e => { e.stopPropagation(); onDelete(form.id); }}
+                className="text-xs font-semibold rounded-lg py-2.5 px-3 cursor-pointer text-center transition-all duration-200 text-gray-400 dark:text-zinc-500 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:text-red-500 hover:border-red-200 dark:hover:text-red-400 dark:hover:border-red-800/50"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* Generating progress — live activity card or shimmer fallback */}
+      {isGenerating && (
+        <>
+          <GeneratingProgress jobId={jobId} form={form} elapsedLabel={elapsedLabel} />
+          <div className="flex justify-end px-[18px] pb-3 pt-2.5 border-t border-gray-100 dark:border-[#1f1f1f]" onClick={e => e.stopPropagation()}>
+            <button
+              onClick={e => { e.stopPropagation(); onDelete(form.id); }}
+              className="text-xs font-semibold rounded-lg py-1.5 px-3 cursor-pointer text-center transition-all duration-200 text-gray-400 dark:text-zinc-500 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:text-red-500 hover:border-red-200 dark:hover:text-red-400 dark:hover:border-red-800/50"
+            >
+              Delete
+            </button>
+          </div>
+        </>
+      )}
+
+      {/* Active form — context-aware card */}
+      {form.status === 'active' && (() => {
         const totalExamples = pilot?.field_examples ? Object.values(pilot.field_examples as Record<string, any[]>).reduce((s: number, arr: any[]) => s + arr.length, 0) : 0;
         const fieldsCalibrated = pilot?.field_examples ? Object.keys(pilot.field_examples).length : 0;
+        const fieldNames = form.fields.map((f: FormField) => f.field_name.replace(/_/g, ' ')).filter(Boolean);
 
-        if (pilotStatus === 'completed') {
+        // Pilot in progress
+        if (pilotStatus === 'running' || pilotStatus === 'reviewing') {
+          const pilotTotal = sampleIds.length;
+          const currentIter = pilot?.iterations?.[(pilot?.current_iteration || 1) - 1];
+          const pilotDone = currentIter?.results ? Object.keys(currentIter.results).length : 0;
+          const progressPct = pilotTotal > 0 ? Math.round((pilotDone / pilotTotal) * 100) : 0;
+          const isReviewing = pilotStatus === 'reviewing';
+
           return (
-            <div className="px-[22px] pb-3.5">
-              <button
-                onClick={e => { e.stopPropagation(); onPilot(form); }}
-                className="w-full flex items-center gap-2 p-2.5 px-3.5 rounded-lg bg-green-50 border border-green-200 dark:bg-green-900/10 dark:border-green-800/30 cursor-pointer transition-colors hover:bg-green-100 dark:hover:bg-green-900/20"
-              >
-                <div className="w-[5px] h-[5px] rounded-full bg-green-500 shrink-0" />
-                <span className="text-xs text-green-700 dark:text-green-400 font-medium flex-1 text-left">
-                  Calibrated &middot; {totalExamples} examples &middot; {fieldsCalibrated} fields
-                </span>
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="text-green-400 shrink-0">
-                  <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-            </div>
-          );
-        } else if (pilotStatus === 'running' || pilotStatus === 'reviewing') {
-          return (
-            <div className="px-[22px] pb-3.5">
-              <button
-                onClick={e => { e.stopPropagation(); onPilot(form); }}
-                className="w-full flex items-center gap-2 p-2.5 px-3.5 rounded-lg bg-amber-50 border border-amber-200 dark:bg-amber-900/10 dark:border-amber-800/30 cursor-pointer transition-colors hover:bg-amber-100 dark:hover:bg-amber-900/20"
-              >
-                <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
-                <span className="text-xs text-amber-700 dark:text-amber-400 font-medium flex-1 text-left">
-                  Pilot in progress &middot; Iteration {pilot?.current_iteration || 1}
-                </span>
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="text-amber-400 shrink-0">
-                  <path d="M6 4l4 4-4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </button>
-            </div>
-          );
-        } else {
-          return (
-            <div className="px-[22px] pb-3.5">
-              <button
-                onClick={e => { e.stopPropagation(); onPilot(form); }}
-                className="w-full text-xs font-medium rounded-lg py-2.5 cursor-pointer flex items-center justify-center gap-2 transition-all duration-200 hover:-translate-y-px text-gray-600 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#0a0a0a] hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
-              >
-                <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                  <polygon points="5 3 14 8 5 13" />
-                </svg>
-                Run Pilot
-              </button>
+            <div className="px-[22px] pb-3.5" onClick={e => e.stopPropagation()}>
+              <div className="h-px bg-gray-100 dark:bg-[#1a1a1a] mb-3" />
+
+              {/* Section label */}
+              <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-2">
+                {isReviewing ? 'Ready for review' : 'Pilot running'}
+              </div>
+
+              {/* Running state */}
+              {!isReviewing && (
+                <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-200/60 dark:border-blue-800/30 mb-3">
+                  <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse shrink-0 mt-1" />
+                  <div className="flex-1 min-w-0">
+                    <p
+                      className="text-xs font-semibold text-blue-800 dark:text-blue-300 truncate transition-opacity duration-300"
+                      style={{ opacity: docFade ? 1 : 0 }}
+                    >
+                      {currentDocName || `${pilotTotal} ${pilotTotal === 1 ? 'paper' : 'papers'}`}
+                    </p>
+                    <p className="text-[11px] text-blue-600/70 dark:text-blue-400/60 mt-0.5">
+                      {pilotDone} of {pilotTotal} completed
+                    </p>
+                    <div className="h-1 w-full rounded-full bg-blue-100 dark:bg-blue-900/30 overflow-hidden mt-2">
+                      <div
+                        className="h-full rounded-full bg-blue-400 dark:bg-blue-500 transition-all duration-500"
+                        style={{ width: `${Math.max(progressPct, pilotTotal > 0 ? 3 : 0)}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Reviewing state */}
+              {isReviewing && (
+                <>
+                  <div className="flex gap-2 mb-3">
+                    <div className="flex-1 rounded-lg bg-green-50 dark:bg-green-900/10 border border-green-200/40 dark:border-green-800/20 p-2 text-center">
+                      <div className="text-sm font-bold text-green-700 dark:text-green-400">{pilotDone}</div>
+                      <div className="text-[10px] text-green-600/70 dark:text-green-400/50">{pilotDone === 1 ? 'Paper' : 'Papers'} extracted</div>
+                    </div>
+                    {totalExamples > 0 && (
+                      <div className="flex-1 rounded-lg bg-green-50 dark:bg-green-900/10 border border-green-200/40 dark:border-green-800/20 p-2 text-center">
+                        <div className="text-sm font-bold text-green-700 dark:text-green-400">{totalExamples}</div>
+                        <div className="text-[10px] text-green-600/70 dark:text-green-400/50">Examples</div>
+                      </div>
+                    )}
+                    <div className="flex-1 rounded-lg bg-gray-50 dark:bg-[#141414] border border-gray-200/40 dark:border-[#2a2a2a] p-2 text-center">
+                      <div className="text-sm font-bold text-gray-700 dark:text-zinc-300">{form.fields.length}</div>
+                      <div className="text-[10px] text-gray-400 dark:text-zinc-500">Total fields</div>
+                    </div>
+                  </div>
+                  <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-green-50 dark:bg-green-900/10 border border-green-200/60 dark:border-green-800/30 mb-3">
+                    <Check className="w-3.5 h-3.5 text-green-500 shrink-0 mt-0.5" />
+                    <div>
+                      <p className="text-xs font-semibold text-green-800 dark:text-green-300">Results are ready</p>
+                      <p className="text-[11px] text-green-600/70 dark:text-green-400/60 mt-0.5 leading-relaxed">Review extractions and provide feedback to calibrate your fields</p>
+                    </div>
+                  </div>
+                  {fieldNames.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {fieldNames.slice(0, 5).map((name: string, i: number) => (
+                        <span key={i} className="text-[11px] text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] px-2 py-0.5 rounded-md">{name}</span>
+                      ))}
+                      {fieldNames.length > 5 && (
+                        <span className="text-[11px] text-gray-400 dark:text-zinc-500 px-1 py-0.5">+{fieldNames.length - 5} more</span>
+                      )}
+                    </div>
+                  )}
+                </>
+              )}
+
+              {/* Actions */}
+              <div className="flex gap-2">
+                {onPilot && (
+                  <button
+                    onClick={() => onPilot(form)}
+                    className={cn(
+                      "flex-1 text-xs font-semibold rounded-lg py-2 cursor-pointer text-center transition-all duration-200",
+                      isReviewing
+                        ? "hover:-translate-y-px text-white border-none bg-gray-900 dark:bg-white dark:text-gray-900"
+                        : "text-gray-700 dark:text-zinc-300 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:bg-gray-50 dark:hover:bg-white/[0.03]"
+                    )}
+                  >
+                    {isReviewing ? 'Review results' : 'View pilot'}
+                  </button>
+                )}
+                <button
+                  onClick={e => { e.stopPropagation(); onDelete(form.id); }}
+                  className="text-xs font-semibold rounded-lg py-2 px-3 cursor-pointer text-center transition-all duration-200 text-gray-400 dark:text-zinc-500 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:text-red-500 hover:border-red-200 dark:hover:text-red-400 dark:hover:border-red-800/50"
+                >
+                  Delete
+                </button>
+              </div>
             </div>
           );
         }
+
+        // Pilot completed — calibrated form
+        if (pilotStatus === 'completed') {
+          return (
+            <div className="px-[22px] pb-3.5" onClick={e => e.stopPropagation()}>
+              <div className="h-px bg-gray-100 dark:bg-[#1a1a1a] mb-3" />
+
+              {/* Stats row */}
+              <div className="flex gap-2 mb-3">
+                <div className="flex-1 rounded-lg bg-green-50 dark:bg-green-900/10 border border-green-200/40 dark:border-green-800/20 p-2 text-center">
+                  <div className="text-sm font-bold text-green-700 dark:text-green-400">{totalExamples}</div>
+                  <div className="text-[10px] text-green-600/70 dark:text-green-400/50">Examples</div>
+                </div>
+                <div className="flex-1 rounded-lg bg-green-50 dark:bg-green-900/10 border border-green-200/40 dark:border-green-800/20 p-2 text-center">
+                  <div className="text-sm font-bold text-green-700 dark:text-green-400">{fieldsCalibrated}</div>
+                  <div className="text-[10px] text-green-600/70 dark:text-green-400/50">Fields calibrated</div>
+                </div>
+                <div className="flex-1 rounded-lg bg-gray-50 dark:bg-[#141414] border border-gray-200/40 dark:border-[#2a2a2a] p-2 text-center">
+                  <div className="text-sm font-bold text-gray-700 dark:text-zinc-300">{form.fields.length}</div>
+                  <div className="text-[10px] text-gray-400 dark:text-zinc-500">Total fields</div>
+                </div>
+              </div>
+
+              {/* Nudge if not all fields calibrated */}
+              {fieldsCalibrated < form.fields.length && (
+                <div className="flex items-start gap-2 p-2 rounded-lg bg-amber-50/50 dark:bg-amber-900/5 mb-3">
+                  <AlertCircle className="w-3 h-3 text-amber-500 shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-amber-700/80 dark:text-amber-400/60 leading-relaxed">
+                    {form.fields.length - fieldsCalibrated} fields not yet calibrated — add more examples to improve accuracy
+                  </p>
+                </div>
+              )}
+
+              {/* Actions */}
+              <div className="flex gap-2">
+                {onPilot && (
+                  <button onClick={() => onPilot(form)} className="flex-1 text-xs font-semibold rounded-lg py-2 cursor-pointer text-center transition-all duration-200 text-gray-700 dark:text-zinc-300 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:bg-gray-50 dark:hover:bg-white/[0.03]">
+                    Add examples
+                  </button>
+                )}
+                {onEdit && (
+                  <button onClick={() => onEdit(form)} className="flex-1 text-xs font-semibold rounded-lg py-2 cursor-pointer text-center transition-all duration-200 text-gray-700 dark:text-zinc-300 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:bg-gray-50 dark:hover:bg-white/[0.03]">
+                    Edit fields
+                  </button>
+                )}
+                <button
+                  onClick={e => { e.stopPropagation(); onDelete(form.id); }}
+                  className="text-xs font-semibold rounded-lg py-2 px-3 cursor-pointer text-center transition-all duration-200 text-gray-400 dark:text-zinc-500 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:text-red-500 hover:border-red-200 dark:hover:text-red-400 dark:hover:border-red-800/50"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          );
+        }
+
+        // No pilot yet — guide the researcher
+        return (
+          <div className="px-[22px] pb-3.5" onClick={e => e.stopPropagation()}>
+            <div className="h-px bg-gray-100 dark:bg-[#1a1a1a] mb-3" />
+
+            {/* Next step guidance */}
+            <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-2">Next step</div>
+            <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-blue-50 dark:bg-blue-900/10 border border-blue-200/60 dark:border-blue-800/30 mb-3">
+              <Plus className="w-3.5 h-3.5 text-blue-500 shrink-0 mt-0.5" />
+              <div>
+                <p className="text-xs font-semibold text-blue-800 dark:text-blue-300">Run a pilot study</p>
+                <p className="text-[11px] text-blue-600/70 dark:text-blue-400/60 mt-0.5 leading-relaxed">Test extraction on a few papers and provide feedback to calibrate your fields</p>
+              </div>
+            </div>
+
+            {/* Field tags */}
+            {fieldNames.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-3">
+                {fieldNames.slice(0, 5).map((name: string, i: number) => (
+                  <span key={i} className="text-[11px] text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] px-2 py-0.5 rounded-md">{name}</span>
+                ))}
+                {fieldNames.length > 5 && (
+                  <span className="text-[11px] text-gray-400 dark:text-zinc-500 px-1 py-0.5">+{fieldNames.length - 5} more</span>
+                )}
+              </div>
+            )}
+
+            {/* Actions */}
+            <div className="flex gap-2">
+              {onPilot && (
+                <button onClick={() => onPilot(form)} className="flex-1 text-xs font-semibold rounded-lg py-2 cursor-pointer text-center transition-all duration-200 hover:-translate-y-px text-white border-none bg-gray-900 dark:bg-white dark:text-gray-900">
+                  Run pilot
+                </button>
+              )}
+              {onEdit && (
+                <button onClick={() => onEdit(form)} className="flex-1 text-xs font-semibold rounded-lg py-2 cursor-pointer text-center transition-all duration-200 text-gray-700 dark:text-zinc-300 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:bg-gray-50 dark:hover:bg-white/[0.03]">
+                  Edit fields
+                </button>
+              )}
+              <button
+                onClick={e => { e.stopPropagation(); onDelete(form.id); }}
+                className="text-xs font-semibold rounded-lg py-2 px-3 cursor-pointer text-center transition-all duration-200 text-gray-400 dark:text-zinc-500 border border-gray-200 dark:border-[#2a2a2a] bg-transparent hover:text-red-500 hover:border-red-200 dark:hover:text-red-400 dark:hover:border-red-800/50"
+              >
+                Delete
+              </button>
+            </div>
+          </div>
+        );
       })()}
 
-      {/* Footer */}
-      <div className="flex items-center justify-end gap-0.5 py-2.5 px-[18px] border-t border-gray-100 mt-auto dark:border-[#1f1f1f]">
-        {isFailed && (
-          <button onClick={e => { e.stopPropagation(); onGenerateCode(form.id); }} className={cn(typography.badge.default, "text-purple-500 hover:bg-purple-50 dark:hover:bg-purple-900/20 transition-colors bg-transparent border-none py-1.5 px-2.5 rounded-md cursor-pointer flex items-center gap-[5px] mr-auto")}>
-            <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round">
-              <path d="M2 8a6 6 0 0111.46-2.46M14 8a6 6 0 01-11.46 2.46" />
-              <path d="M14 2v4h-4M2 14v-4h4" />
-            </svg>
-            Retry
-          </button>
+    </div>
+  );
+}
+
+// Pipeline step definitions
+const PIPELINE_STEPS_DIRECT = [
+  'Analyzing your form',
+  'Grouping related fields',
+  'Building extraction rules',
+  'Validating rules',
+  'Finalizing',
+];
+const PIPELINE_STEPS_REVIEW = [
+  'Analyzing your form',
+  'Grouping related fields',
+  'Waiting for your review',
+  'Building extraction rules',
+  'Validating rules',
+  'Finalizing',
+];
+
+// Map backend stage names to step index (direct flow)
+const STAGE_TO_STEP_DIRECT: Record<string, number> = {
+  initializing: 0,
+  decomposing: 1,
+  generating_signatures: 2,
+  generating_modules: 2,
+  finalizing: 3,
+  completed: 4,
+};
+const STAGE_TO_STEP_REVIEW: Record<string, number> = {
+  initializing: 0,
+  decomposing: 1,
+  awaiting_review: 2,
+  generating_signatures: 3,
+  generating_modules: 3,
+  finalizing: 4,
+  completed: 5,
+};
+
+interface FieldEntry { name: string; fields: string[]; status: 'pending' | 'active' | 'done' }
+
+function GeneratingProgress({ jobId, form, elapsedLabel }: { jobId?: string; form: Form; elapsedLabel: (d: string) => string }) {
+  const queryClient = useQueryClient();
+  const { selectedProject } = useProject();
+
+  const [currentStep, setCurrentStep] = useState(0);
+  const [progress, setProgress] = useState(0);
+  const [fieldEntries, setFieldEntries] = useState<FieldEntry[]>([]);
+  const [isReviewFlow, setIsReviewFlow] = useState(false);
+  const [completed, setCompleted] = useState(false);
+
+  // Use refs so WebSocket callbacks always see the latest values (no stale closures)
+  const stageMapRef = useRef(STAGE_TO_STEP_DIRECT);
+  const stepsRef = useRef(PIPELINE_STEPS_DIRECT);
+  const steps = isReviewFlow ? PIPELINE_STEPS_REVIEW : PIPELINE_STEPS_DIRECT;
+  useEffect(() => {
+    stageMapRef.current = isReviewFlow ? STAGE_TO_STEP_REVIEW : STAGE_TO_STEP_DIRECT;
+    stepsRef.current = isReviewFlow ? PIPELINE_STEPS_REVIEW : PIPELINE_STEPS_DIRECT;
+  }, [isReviewFlow]);
+
+  useEffect(() => {
+    if (!jobId) return;
+    const token = apiClient.getToken() || undefined;
+
+    const ws = connectToJobLogs(jobId, {
+      onStage: (msg: LogMessage) => {
+        const stage = msg.stage || '';
+        if (stage === 'awaiting_review') setIsReviewFlow(true);
+        const step = stageMapRef.current[stage];
+        if (step !== undefined) setCurrentStep(step);
+      },
+      onProgress: (msg: LogMessage) => {
+        if (msg.progress != null) setProgress(msg.progress);
+      },
+      onData: (msg: LogMessage) => {
+        const data = msg.data;
+        if (!data) return;
+        if (data._type === 'field_list') {
+          setFieldEntries((data.signatures || []).map((s: any, i: number) => ({
+            name: s.name,
+            fields: s.fields || [],
+            status: i === 0 ? 'active' as const : 'pending' as const,
+          })));
+        } else if (data._type === 'field_done') {
+          setFieldEntries(prev => {
+            const updated = [...prev];
+            const idx = updated.findIndex(e => e.name === data.name);
+            if (idx >= 0) {
+              updated[idx] = { ...updated[idx], status: 'done' };
+              // Mark next pending entry as active
+              if (idx + 1 < updated.length && updated[idx + 1].status === 'pending') {
+                updated[idx + 1] = { ...updated[idx + 1], status: 'active' };
+              }
+            }
+            return updated;
+          });
+        }
+      },
+      onComplete: () => {
+        setCurrentStep(stepsRef.current.length - 1);
+        setProgress(100);
+        setCompleted(true);
+        // Hold completion state for 2s so user sees it, then refresh
+        setTimeout(() => {
+          queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id], exact: false });
+        }, 2500);
+      },
+    }, token);
+
+    return () => ws.close();
+  }, [jobId]);
+
+  // Fallback: no jobId (page refreshed) — show simple shimmer
+  if (!jobId) {
+    return (
+      <div className="px-[22px] pb-3.5">
+        <div className="flex items-center gap-2 mb-1.5">
+          <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse shrink-0" />
+          <span className="text-xs text-blue-600 dark:text-blue-400 font-medium">
+            {form.status === 'regenerating' ? 'Regenerating code…' : 'Generating code…'}
+          </span>
+          <span className="text-xs text-gray-400 dark:text-zinc-500 ml-auto shrink-0">{elapsedLabel(form.updated_at)}</span>
+        </div>
+        <div className="h-[3px] w-full rounded-full bg-blue-100 dark:bg-blue-900/30 overflow-hidden">
+          <div className="h-full w-full rounded-full bg-gradient-to-r from-blue-400 via-indigo-400 to-blue-400 animate-[shimmer_2s_linear_infinite]" style={{ backgroundSize: '200% 100%' }} />
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="px-[22px] pb-3.5">
+      {/* Divider */}
+      <div className="h-px bg-gray-100 dark:bg-[#1a1a1a] mb-3" />
+
+      {/* Two column layout */}
+      <div className="flex gap-5 min-h-0">
+        {/* Left: Pipeline */}
+        <div className="flex-1 min-w-0">
+          <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-2">Pipeline</div>
+          <div className="space-y-1">
+            {steps.map((label, i) => {
+              const isDone = completed || i < currentStep;
+              const isActive = !completed && i === currentStep;
+              const isPending = !completed && i > currentStep;
+              const isReviewStep = isReviewFlow && i === 2;
+
+              return (
+                <div key={i} className="flex items-center gap-2 py-0.5">
+                  {isDone && <div className="w-1.5 h-1.5 rounded-full bg-green-500 shrink-0" />}
+                  {isActive && !isReviewStep && <div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse shrink-0" />}
+                  {isActive && isReviewStep && <div className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />}
+                  {isPending && <div className="w-1.5 h-1.5 rounded-full bg-gray-200 dark:bg-zinc-700 shrink-0" />}
+                  <span className={cn(
+                    "text-xs leading-tight",
+                    isDone && "text-gray-700 dark:text-zinc-300",
+                    isActive && !isReviewStep && "text-blue-600 dark:text-blue-400 font-medium",
+                    isActive && isReviewStep && "text-amber-600 dark:text-amber-400 font-medium",
+                    isPending && "text-gray-300 dark:text-zinc-600",
+                  )}>
+                    {label}{isActive ? '…' : ''}
+                  </span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Right: Field groups being built */}
+        {fieldEntries.length > 0 && (
+          <div className="flex-1 min-w-0">
+            <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-2">
+              Groups <span className="normal-case tracking-normal font-normal">{fieldEntries.filter(f => f.status === 'done').length}/{fieldEntries.length}</span>
+            </div>
+            <div className="space-y-1">
+              {fieldEntries.map((entry, i) => {
+                // Convert PascalCase to readable: "ClassifyStudySetting" → "Classify Study Setting"
+                const readable = entry.name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+                return (
+                  <div key={i} className={cn(
+                    "flex items-center gap-2 py-1 px-2 rounded-md text-xs",
+                    entry.status === 'done' && "bg-green-50 dark:bg-green-900/10",
+                    entry.status === 'active' && "bg-blue-50 dark:bg-blue-900/10",
+                    entry.status === 'pending' && "bg-gray-50 dark:bg-[#141414]",
+                  )}>
+                    {entry.status === 'done' && <Check className="w-3 h-3 text-green-500 shrink-0" />}
+                    {entry.status === 'active' && <div className="w-3 h-3 shrink-0 flex items-center justify-center"><div className="w-1.5 h-1.5 rounded-full bg-blue-500 animate-pulse" /></div>}
+                    {entry.status === 'pending' && <div className="w-3 h-3 shrink-0" />}
+                    <span className={cn(
+                      "flex-1 min-w-0",
+                      entry.status === 'done' && "text-gray-700 dark:text-zinc-300",
+                      entry.status === 'active' && "text-blue-600 dark:text-blue-400",
+                      entry.status === 'pending' && "text-gray-300 dark:text-zinc-600",
+                    )}>{readable}</span>
+                    <span className="text-[10px] text-gray-300 dark:text-zinc-600 shrink-0 whitespace-nowrap">{entry.fields.length}f</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         )}
-        {onEdit && (
-          <button onClick={e => { e.stopPropagation(); onEdit(form); }} className={cn(typography.badge.default, "text-gray-500 hover:bg-gray-100 dark:text-zinc-400 dark:hover:bg-[#1a1a1a] transition-colors bg-transparent border-none py-1.5 px-2.5 rounded-md cursor-pointer flex items-center gap-[5px]")}>
-            <Edit3 className="w-[13px] h-[13px]" />
-            Edit
-          </button>
-        )}
-        <button onClick={e => { e.stopPropagation(); onDelete(form.id); }} className={cn(typography.badge.default, "text-gray-500 hover:bg-red-50 hover:text-red-500 dark:text-zinc-400 dark:hover:bg-red-900/20 dark:hover:text-red-400 transition-all bg-transparent border-none py-1.5 px-2.5 rounded-md cursor-pointer flex items-center gap-[5px]")}>
-          <Trash2 className="w-3.5 h-3.5" />
-          Delete
-        </button>
+      </div>
+
+      {/* Footer: progress bar + step indicator */}
+      <div className="mt-3">
+        <div className="h-[3px] w-full rounded-full bg-gray-100 dark:bg-[#1a1a1a] overflow-hidden">
+          <div
+            className={cn("h-full rounded-full transition-all duration-700 ease-out", completed ? "bg-green-500" : "bg-blue-500")}
+            style={{ width: `${Math.max(progress, 3)}%` }}
+          />
+        </div>
+        <div className="flex items-center justify-between mt-1.5">
+          <span className={cn("text-[10px]", completed ? "text-green-600 dark:text-green-400 font-medium" : "text-gray-400 dark:text-zinc-500")}>
+            {completed ? 'Complete! Ready for extraction.' : `Step ${Math.min(currentStep + 1, steps.length)} of ${steps.length} · ${elapsedLabel(form.updated_at)}`}
+          </span>
+        </div>
       </div>
     </div>
   );
 }
 
 const TYPE_LABELS: Record<string, string> = {
-  text:   "Text",
-  number: "Number",
-  enum:   "Multiple Choice",
-  array:  "Table",
+  text:     "Text",
+  number:   "Number",
+  select:   "Select",
+  boolean:  "Yes / No",
+  array:    "Table",
 };
 
-const FIELD_TYPE_COLORS: Record<string, { bg: string; border: string; text: string }> = {
-  text:   { bg: "rgba(59,130,246,0.08)",  border: "rgba(59,130,246,0.2)",  text: "#3b82f6" },
-  number: { bg: "rgba(22,163,74,0.08)",   border: "rgba(22,163,74,0.2)",   text: "#16a34a" },
-  enum:   { bg: "rgba(139,92,246,0.08)",  border: "rgba(139,92,246,0.2)",  text: "#8b5cf6" },
-  array:  { bg: "rgba(245,158,11,0.08)",  border: "rgba(245,158,11,0.2)",  text: "#f59e0b" },
-  object: { bg: "rgba(236,72,153,0.08)",  border: "rgba(236,72,153,0.2)",  text: "#ec4899" },
+const FIELD_TYPE_COLORS: Record<string, { bg: string; border: string; text: string; sidebar: string }> = {
+  text:    { bg: "#f0f3f8", border: "#d0d8e8", text: "#4a6085", sidebar: "#c4d0e4" },
+  number:  { bg: "#f0f5f0", border: "#c8dcc8", text: "#3d6b4e", sidebar: "#b8d4be" },
+  select:  { bg: "#f3f0f8", border: "#d4cce8", text: "#605085", sidebar: "#c4b8dc" },
+  boolean: { bg: "#f8f0f3", border: "#e8c8d4", text: "#854a60", sidebar: "#d8b0c0" },
+  array:   { bg: "#f5f3ee", border: "#dcd4c0", text: "#6b5a3d", sidebar: "#ccc4a8" },
 };
 
 const TYPE_ALIASES: Record<string, string> = {
-  // human-friendly labels
+  // canonical types
   "text":             "text",
   "number":           "number",
-  "multiple choice":  "enum",
+  "select":           "select",
+  "boolean":          "boolean",
+  "array":            "array",
+  // human-friendly labels
+  "multiple choice":  "select",
   "table / list":     "array",
   "table":            "array",
+  // legacy aliases (enum → select)
+  "enum":             "select",
+  "dropdown":         "select",
+  "multiple_choice":  "select",
+  // other aliases
   "structured object":"array",
   "object":           "array",
-  // developer aliases
-  text_long:        "text",
-  long_text:        "text",
-  dropdown:         "enum",
-  multiple_choice:  "enum",
-  select:           "enum",
-  list:             "array",
-  integer:          "number",
-  float:            "number",
-  decimal:          "number",
-  boolean:          "text",
+  text_long:          "text",
+  long_text:          "text",
+  list:               "array",
+  integer:            "number",
+  float:              "number",
+  decimal:            "number",
 };
 
 // Unified Form Dialog Component
@@ -752,9 +1266,15 @@ function FormDialog({
   // Local editable state
   const [formName, setFormName] = useState(form.form_name);
   const [formDescription, setFormDescription] = useState(form.form_description || '');
-  const [fields, setFields] = useState<FormField[]>(form.fields);
+  const [fields, setFields] = useState<FormField[]>(
+    form.fields.map(f => ({
+      ...f,
+      field_type: TYPE_ALIASES[f.field_type?.toLowerCase().trim()] ?? f.field_type,
+    }))
+  );
   const [enableReview, setEnableReview] = useState<boolean>(form.metadata?.enable_review ?? false);
   const [saving, setSaving] = useState(false);
+  const [jsonCopied, setJsonCopied] = useState(false);
 
   // Inline editing
   const [editingName, setEditingName] = useState(false);
@@ -765,7 +1285,9 @@ function FormDialog({
   const pipeline = useMemo(() => metadata?.decomposition?.pipeline || [], [metadata]);
   const signatures = metadata?.decomposition?.signatures || [];
   const hasPipeline = pipeline.length > 0;
-  const [activeView, setActiveView] = useState<'fields' | 'pipeline'>(hasPipeline ? 'pipeline' : 'fields');
+  const [activeView, setActiveView] = useState<'fields' | 'pipeline'>(
+    form.status === 'failed' ? 'fields' : hasPipeline ? 'pipeline' : 'fields'
+  );
 
   // Fields view state
   const [openSet, setOpenSet] = useState<Set<number>>(new Set());
@@ -805,8 +1327,8 @@ function FormDialog({
   const removeField = (index: number) => setFields(fields.filter((_, i) => i !== index));
   const updateField = (index: number, updates: Partial<FormField>) => {
     const updatedField = { ...fields[index], ...updates };
-    if (updates.field_type === 'enum' && !updatedField.options) updatedField.options = [''];
-    if (updates.field_type && updates.field_type !== 'enum') delete updatedField.options;
+    if (updates.field_type === 'select' && !updatedField.options) updatedField.options = [''];
+    if (updates.field_type && updates.field_type !== 'select') delete updatedField.options;
     setFields(fields.map((field, i) => (i === index ? updatedField : field)));
   };
   const addOption = (fi: number) => updateField(fi, { options: [...(fields[fi].options || []), ''] });
@@ -815,6 +1337,13 @@ function FormDialog({
     const opts = [...(fields[fi].options || [])]; opts[oi] = value; updateField(fi, { options: opts });
   };
   const sanitizeFieldName = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').replace(/_{2,}/g, '_').replace(/^(\d)/, '_$1');
+  const addSubfield = (fi: number) => updateField(fi, { subform_fields: [...(fields[fi].subform_fields || []), { field_name: '', field_type: 'text', field_description: '' }] });
+  const removeSubfield = (fi: number, si: number) => updateField(fi, { subform_fields: (fields[fi].subform_fields || []).filter((_: any, i: number) => i !== si) });
+  const updateSubfield = (fi: number, si: number, updates: Partial<FormField>) => {
+    const subs = [...(fields[fi].subform_fields || [])];
+    subs[si] = { ...subs[si], ...updates };
+    updateField(fi, { subform_fields: subs });
+  };
 
   // Pipeline helpers
   const toggleStage = (n: number) => { const s = new Set(expandedStages); s.has(n) ? s.delete(n) : s.add(n); setExpandedStages(s); };
@@ -842,14 +1371,14 @@ function FormDialog({
     for (const field of fields) {
       if (!field.field_name.trim()) { toast({ title: 'Validation', description: 'All fields must have a name', variant: 'error' }); return; }
       if (!field.field_description.trim()) { toast({ title: 'Validation', description: 'All fields must have a description', variant: 'error' }); return; }
-      if (field.field_type === 'enum') {
+      if (field.field_type === 'select') {
         const nonEmpty = (field.options || []).filter(o => o.trim());
-        if (nonEmpty.length === 0) { toast({ title: 'Validation', description: `Enum field "${field.field_name}" needs at least one option`, variant: 'error' }); return; }
+        if (nonEmpty.length === 0) { toast({ title: 'Validation', description: `Select field "${field.field_name}" needs at least one option`, variant: 'error' }); return; }
       }
     }
     setSaving(true);
     try {
-      const sanitizedFields = fields.map(f => ({ ...f, field_name: sanitizeFieldName(f.field_name), options: f.field_type === 'enum' ? (f.options || []).filter(o => o.trim()) : f.options }));
+      const sanitizedFields = fields.map(f => ({ ...f, field_name: sanitizeFieldName(f.field_name), options: f.field_type === 'select' ? (f.options || []).filter(o => o.trim()) : f.options }));
       await onUpdate(form.id, { form_name: formName, form_description: formDescription, fields: sanitizedFields, enable_review: enableReview });
       if (hasFieldChanges() && form.status === 'active') {
         await onGenerateCode(form.id, enableReview);
@@ -1036,7 +1565,7 @@ function FormDialog({
                             <div className="flex items-center gap-2">
                               <span className={cn("text-sm truncate", isOpen ? "font-semibold text-gray-900 dark:text-white" : field.field_name.trim() ? "font-medium text-gray-600 dark:text-zinc-300" : "font-medium text-gray-300 dark:text-zinc-600")}>{field.field_name.trim() || `field_${idx + 1}`}</span>
                               <span className="text-xs font-medium py-0.5 px-2 rounded-[5px] tracking-tight shrink-0 text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a]">{TYPE_LABELS[field.field_type] ?? field.field_type}</span>
-                              {field.field_type === 'enum' && field.options && field.options.filter((o: string) => o.trim()).length > 0 && (
+                              {field.field_type === 'select' && field.options && field.options.filter((o: string) => o.trim()).length > 0 && (
                                 <span className="text-xs text-gray-300 dark:text-zinc-600">{field.options.filter((o: string) => o.trim()).length} opts</span>
                               )}
                             </div>
@@ -1066,7 +1595,7 @@ function FormDialog({
                                     </select>
                                   </div>
                                 </div>
-                                {field.field_type === 'enum' && (
+                                {field.field_type === 'select' && (
                                   <div className="mb-3">
                                     <label className="text-xs text-gray-400 dark:text-zinc-600 block mb-1">Options</label>
                                     <div className="flex flex-wrap gap-1.5">
@@ -1082,6 +1611,33 @@ function FormDialog({
                                       ))}
                                       <button type="button" onClick={e => { e.stopPropagation(); addOption(idx); }} className="text-xs bg-transparent rounded-md py-1.5 px-3 cursor-pointer transition-colors" style={{ color: `${tc.text}80`, border: `1px dashed ${tc.text}30` }}>+ add</button>
                                     </div>
+                                    <label className="flex items-center gap-2 mt-2 cursor-pointer" onClick={e => e.stopPropagation()}>
+                                      <input type="checkbox" checked={field.multiple ?? false} onChange={e => updateField(idx, { multiple: e.target.checked })} className="w-3.5 h-3.5 rounded border-gray-300 dark:border-zinc-600 accent-violet-500" />
+                                      <span className="text-xs text-gray-500 dark:text-zinc-400">Allow multiple selections</span>
+                                    </label>
+                                  </div>
+                                )}
+                                {field.field_type === 'array' && (
+                                  <div className="mb-3">
+                                    <div className="flex items-center justify-between mb-1">
+                                      <label className="text-xs text-gray-400 dark:text-zinc-600">Subfields</label>
+                                      <button type="button" onClick={e => { e.stopPropagation(); addSubfield(idx); }} className="text-[11px] text-gray-400 hover:text-gray-600 bg-transparent border-none cursor-pointer p-0 transition-colors">+ add</button>
+                                    </div>
+                                    {(field.subform_fields || []).map((sf: FormField, si: number) => (
+                                      <div key={si} className="flex items-center gap-1.5 mb-1 group" onClick={e => e.stopPropagation()}>
+                                        <div className="w-1 h-1 rounded-full bg-gray-300 dark:bg-zinc-700 shrink-0" />
+                                        <input value={sf.field_name} onChange={e => updateSubfield(idx, si, { field_name: e.target.value })} placeholder="name" className="flex-1 text-xs font-mono text-gray-600 dark:text-zinc-300 bg-transparent border-none outline-none py-0.5 focus:bg-gray-50 dark:focus:bg-[#0d0d0d] focus:px-1.5 focus:rounded transition-all" />
+                                        <select value={sf.field_type} onChange={e => updateSubfield(idx, si, { field_type: e.target.value })} onClick={e => e.stopPropagation()} className="text-[11px] text-gray-400 bg-transparent border-none outline-none cursor-pointer appearance-none dark:[color-scheme:dark]">
+                                          {Object.keys(FIELD_TYPE_COLORS).filter(t => t !== 'array').map(t => <option key={t} value={t}>{TYPE_LABELS[t] ?? t}</option>)}
+                                        </select>
+                                        <button type="button" onClick={e => { e.stopPropagation(); removeSubfield(idx, si); }} className="bg-transparent border-none cursor-pointer text-gray-300 dark:text-zinc-700 p-0 hover:text-red-500 transition-colors shrink-0 opacity-0 group-hover:opacity-100">
+                                          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                                        </button>
+                                      </div>
+                                    ))}
+                                    {(field.subform_fields || []).length === 0 && (
+                                      <p className="text-[11px] text-gray-300 dark:text-zinc-700">No subfields yet</p>
+                                    )}
                                   </div>
                                 )}
                                 <div className="mb-3">
@@ -1107,12 +1663,26 @@ function FormDialog({
                                     <div className="text-sm text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-[#1a1a1a] border-l-2 border-l-gray-200 dark:border-l-[#2a2a2a] rounded-md p-3 mt-1">{field.example}</div>
                                   </div>
                                 )}
-                                {field.field_type === 'enum' && field.options && field.options.length > 0 && (
+                                {field.field_type === 'select' && field.options && field.options.length > 0 && (
                                   <div>
                                     <span className="text-xs text-gray-300 dark:text-zinc-600">Options ({field.options.length})</span>
                                     <div className="flex flex-wrap gap-1.5 mt-1.5">
                                       {field.options.map((opt: string, oi: number) => (
                                         <span key={oi} className="text-xs text-gray-500 dark:text-zinc-400 bg-gray-50 dark:bg-[#1a1a1a] py-0.5 px-2 rounded-md">{opt}</span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                                {field.field_type === 'array' && (field.subform_fields || []).length > 0 && (
+                                  <div>
+                                    <span className="text-xs text-gray-300 dark:text-zinc-600">Subfields ({field.subform_fields!.length})</span>
+                                    <div className="flex flex-col gap-1 mt-1.5">
+                                      {field.subform_fields!.map((sf: FormField, si: number) => (
+                                        <div key={si} className="flex items-center gap-2">
+                                          <div className="w-1 h-1 rounded-full bg-gray-300 dark:bg-zinc-700 shrink-0" />
+                                          <span className="text-xs font-mono text-gray-600 dark:text-zinc-300">{sf.field_name}</span>
+                                          <span className="text-[11px] text-gray-300 dark:text-zinc-600">{TYPE_LABELS[sf.field_type] ?? sf.field_type}</span>
+                                        </div>
                                       ))}
                                     </div>
                                   </div>
@@ -1211,12 +1781,38 @@ function FormDialog({
 
         {/* Footer */}
         <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 dark:border-[#1a1a1a] rounded-b-2xl flex-shrink-0">
-          <div>
+          <div className="flex items-center gap-1">
             {isEditable && (
               <Button variant="ghost" size="sm" onClick={handleDelete} className="text-gray-400 hover:text-red-500 dark:hover:text-red-400">
                 <Trash2 className="w-3.5 h-3.5 mr-1" /> Delete
               </Button>
             )}
+            <Button
+              variant="ghost"
+              size="sm"
+              className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300"
+              onClick={() => {
+                const json = JSON.stringify({
+                  form_name: formName,
+                  form_description: formDescription,
+                  fields: fields.map(({ field_name, field_type, field_description, example, options, subform_fields, extraction_hints }) => ({
+                    field_name,
+                    field_type,
+                    field_description,
+                    ...(example ? { example } : {}),
+                    ...(options ? { options } : {}),
+                    ...(subform_fields?.length ? { subform_fields } : {}),
+                    ...(extraction_hints ? { extraction_hints } : {}),
+                  })),
+                }, null, 2);
+                navigator.clipboard.writeText(json);
+                setJsonCopied(true);
+                setTimeout(() => setJsonCopied(false), 2000);
+              }}
+            >
+              {jsonCopied ? <ClipboardCheck className="w-3.5 h-3.5 mr-1" /> : <Clipboard className="w-3.5 h-3.5 mr-1" />}
+              {jsonCopied ? 'Copied!' : 'Copy JSON'}
+            </Button>
           </div>
           <div className="flex gap-2">
             {form.status === 'draft' && (
@@ -1266,7 +1862,7 @@ function CreateFormDialog({
   projectId: string;
   existingForms: Form[];
   onClose: () => void;
-  onSuccess: () => void;
+  onSuccess: (form: Form, launchTest?: boolean) => void;
 }) {
   const { toast } = useToast();
   const [formName, setFormName] = useState('');
@@ -1274,7 +1870,9 @@ function CreateFormDialog({
   const [fields, setFields] = useState<FormField[]>([
     { field_name: '', field_type: 'text', field_description: '', example: '' },
   ]);
-  const [saving, setSaving] = useState(false);
+  const [savingDraft, setSavingDraft] = useState(false);
+  const [savingCreate, setSavingCreate] = useState(false);
+  const saving = savingDraft || savingCreate;
   const [enableReview, setEnableReview] = useState(false);
   const [expandedFields, setExpandedFields] = useState<Set<number>>(new Set([0]));
   const [focusIndex, setFocusIndex] = useState(0);
@@ -1317,13 +1915,13 @@ function CreateFormDialog({
   const updateField = (index: number, updates: Partial<FormField>) => {
     const updatedField = { ...fields[index], ...updates };
 
-    // If field type changed to enum and no options, initialize empty array
-    if (updates.field_type === 'enum' && !updatedField.options) {
+    // If field type changed to select and no options, initialize empty array
+    if (updates.field_type === 'select' && !updatedField.options) {
       updatedField.options = [''];
     }
 
-    // If field type changed from enum to something else, remove options
-    if (updates.field_type && updates.field_type !== 'enum') {
+    // If field type changed from select to something else, remove options
+    if (updates.field_type && updates.field_type !== 'select') {
       delete updatedField.options;
     }
 
@@ -1440,160 +2038,160 @@ function CreateFormDialog({
     e.target.value = '';
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    // Validation
+  const validateForm = (): boolean => {
     if (!formName.trim()) {
       toast({ title: 'Validation', description: 'Please enter a form name', variant: 'error' });
-      return;
+      return false;
     }
     const duplicate = existingForms.some(
       (f) => f.form_name.trim().toLowerCase() === formName.trim().toLowerCase()
     );
     if (duplicate) {
       toast({ title: 'Duplicate name', description: `A form named "${formName.trim()}" already exists. Please use a different name.`, variant: 'error' });
-      return;
+      return false;
     }
     if (!formDescription.trim()) {
       toast({ title: 'Validation', description: 'Please enter a form description', variant: 'error' });
-      return;
+      return false;
     }
     if (formDescription.length < 10) {
       toast({ title: 'Validation', description: 'Form description must be at least 10 characters long', variant: 'error' });
-      return;
+      return false;
     }
     if (fields.length === 0) {
       toast({ title: 'Validation', description: 'Please add at least one field', variant: 'error' });
-      return;
+      return false;
     }
     for (const field of fields) {
       if (!field.field_name.trim()) {
         toast({ title: 'Validation', description: 'All fields must have a name', variant: 'error' });
-        return;
+        return false;
       }
       if (!field.field_description.trim()) {
         toast({ title: 'Validation', description: 'All fields must have a description', variant: 'error' });
-        return;
+        return false;
       }
-      if (field.field_type === 'enum') {
+      if (field.field_type === 'select') {
         if (!field.options || field.options.length === 0) {
-          toast({ title: 'Validation', description: `Enum field "${field.field_name}" must have at least one option`, variant: 'error' });
-          return;
+          toast({ title: 'Validation', description: `Select field "${field.field_name}" must have at least one option`, variant: 'error' });
+          return false;
         }
         const nonEmptyOptions = field.options.filter(opt => opt.trim());
         if (nonEmptyOptions.length === 0) {
-          toast({ title: 'Validation', description: `Enum field "${field.field_name}" must have at least one non-empty option`, variant: 'error' });
-          return;
+          toast({ title: 'Validation', description: `Select field "${field.field_name}" must have at least one non-empty option`, variant: 'error' });
+          return false;
         }
       }
     }
+    return true;
+  };
 
-    setSaving(true);
-    try {
-      // Sanitize field names and clean up options before submission
-      const sanitizedFields = fields.map(field => {
-        const sanitized: any = {
-          ...field,
-          field_name: sanitizeFieldName(field.field_name),
-        };
-
-        // Clean up options for enum fields - remove empty strings
-        if (field.field_type === 'enum' && field.options) {
-          sanitized.options = field.options.filter(opt => opt.trim());
-        }
-
-        return sanitized;
-      });
-
-      const request: CreateFormRequest = {
-        project_id: projectId,
-        form_name: formName,
-        form_description: formDescription,
-        fields: sanitizedFields,
-        enable_review: enableReview,
+  const buildRequest = (): CreateFormRequest => {
+    const sanitizedFields = fields.map(field => {
+      const sanitized: any = {
+        ...field,
+        field_name: sanitizeFieldName(field.field_name),
       };
+      if (field.field_type === 'select' && field.options) {
+        sanitized.options = field.options.filter(opt => opt.trim());
+      }
+      return sanitized;
+    });
+    return {
+      project_id: projectId,
+      form_name: formName,
+      form_description: formDescription,
+      fields: sanitizedFields,
+      enable_review: enableReview,
+    };
+  };
 
-      await formsService.create(request);
-      toast({
-        title: 'Success',
-        description: 'Form created successfully',
-        variant: 'success',
-      });
-      onSuccess();
+  const handleSaveDraft = async () => {
+    if (!validateForm()) return;
+    setSavingDraft(true);
+    try {
+      const form = await formsService.create({ ...buildRequest(), save_as_draft: true });
+      toast({ title: 'Draft saved', description: 'Form saved as draft', variant: 'success' });
+      onSuccess(form, false);
+    } catch (err: any) {
+      console.error('Failed to save draft:', err);
+      toast({ title: 'Error', description: getErrorMessage(err, 'Failed to save form'), variant: 'error' });
+    } finally {
+      setSavingDraft(false);
+    }
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!validateForm()) return;
+    setSavingCreate(true);
+    try {
+      // Single API call: create form with save_as_draft: false (default) triggers generation atomically
+      const form = await formsService.create(buildRequest());
+      toast({ title: 'Generating', description: 'Code generation started — the form card will update when ready.', variant: 'success' });
+      onSuccess(form, false);
     } catch (err: any) {
       console.error('Failed to create form:', err);
       console.error('Error response:', err.response?.data);
-
-      toast({
-        title: 'Error',
-        description: getErrorMessage(err, 'Failed to create form'),
-        variant: 'error',
-      });
+      toast({ title: 'Error', description: getErrorMessage(err, 'Failed to create form'), variant: 'error' });
     } finally {
-      setSaving(false);
+      setSavingCreate(false);
     }
   };
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={onClose}>
+    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => { if (!saving) onClose(); }}>
       <div className="bg-white dark:bg-[#111111] rounded-2xl border border-gray-200 dark:border-[#1f1f1f] w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
 
         {/* Header */}
-        <div className="flex items-center justify-between px-6 pt-5 pb-2 flex-shrink-0">
-          <h2 className="text-base font-semibold text-gray-900 dark:text-white tracking-tight">Create Form</h2>
-          <Button variant="ghost" size="icon" onClick={onClose} className="h-8 w-8 shrink-0">
+        <div className="flex items-center justify-between px-6 pt-5 pb-4 flex-shrink-0">
+          <h2 className="text-base font-semibold text-gray-900 dark:text-white tracking-tight">New extraction form</h2>
+          <Button variant="ghost" size="icon" onClick={onClose} disabled={saving} className="h-8 w-8 shrink-0">
             <X className="h-4 w-4" />
           </Button>
         </div>
 
-        {/* Form name + description — compact, heading-like */}
-        <div className="px-6 pb-3 flex-shrink-0">
-          <input
-            autoFocus
-            value={formName}
-            onChange={e => setFormName(e.target.value)}
-            placeholder="Form name, e.g. Patient Population"
-            className="w-full text-base font-semibold text-gray-900 dark:text-white bg-transparent border-none outline-none py-1 placeholder:text-gray-300 dark:placeholder:text-zinc-600 placeholder:font-normal"
-          />
-          <input
-            value={formDescription}
-            onChange={e => setFormDescription(e.target.value)}
-            placeholder="Describe what this form extracts from papers..."
-            className="w-full text-sm text-gray-500 dark:text-zinc-400 bg-transparent border-none outline-none py-0.5 placeholder:text-gray-300 dark:placeholder:text-zinc-600"
-          />
-          {formDescription.length > 0 && formDescription.length < 10 && (
-            <p className="text-[11px] text-amber-500 mt-0.5">{formDescription.length}/10 chars min</p>
-          )}
+        {/* Form name + description — labeled bordered inputs */}
+        <div className="px-6 pb-4 flex-shrink-0 space-y-3 border-b border-gray-100 dark:border-[#1a1a1a]">
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-zinc-400 mb-1.5">Form name</label>
+            <input
+              autoFocus
+              value={formName}
+              onChange={e => setFormName(e.target.value)}
+              placeholder="e.g. Patient population"
+              className="w-full text-sm text-gray-900 dark:text-white bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-3 py-2 outline-none focus:border-gray-400 dark:focus:border-[#3f3f3f] transition-colors placeholder:text-gray-300 dark:placeholder:text-zinc-600"
+            />
+          </div>
+          <div>
+            <label className="block text-xs font-medium text-gray-500 dark:text-zinc-400 mb-1.5">Description</label>
+            <input
+              value={formDescription}
+              onChange={e => setFormDescription(e.target.value)}
+              placeholder="What does this form extract?"
+              className="w-full text-sm text-gray-900 dark:text-white bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-3 py-2 outline-none focus:border-gray-400 dark:focus:border-[#3f3f3f] transition-colors placeholder:text-gray-300 dark:placeholder:text-zinc-600"
+            />
+            {formDescription.length > 0 && formDescription.length < 10 && (
+              <p className="text-[11px] text-amber-500 mt-1">{formDescription.length}/10 chars min</p>
+            )}
+          </div>
         </div>
 
-        {/* Metadata bar + mode tabs */}
-        <div className="px-6 pb-3 flex items-center justify-between flex-shrink-0">
-          <div className="flex items-center gap-4 text-sm text-gray-400 dark:text-zinc-500">
-            <span><span className="font-semibold text-gray-700 dark:text-zinc-300">{fields.length}</span> field{fields.length !== 1 ? 's' : ''}</span>
-            <span className="text-gray-200 dark:text-zinc-700">·</span>
-            <button
-              type="button"
-              onClick={() => setEnableReview(!enableReview)}
-              className={cn("text-xs bg-transparent border-none cursor-pointer p-0 transition-colors", enableReview ? "text-amber-500 font-semibold" : "text-gray-400 dark:text-zinc-500 hover:text-gray-600")}
-            >
-              Human Review: {enableReview ? 'ON' : 'OFF'}
-            </button>
-          </div>
-          <div className="flex items-center gap-4">
-            <button type="button" onClick={toggleAll} className="text-xs text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 bg-transparent border-none cursor-pointer p-0 transition-colors">
-              {allExpanded ? 'Collapse all' : 'Expand all'}
-            </button>
-            <span className="text-gray-200 dark:text-zinc-700">|</span>
-            <button type="button" onClick={() => setMode('manual')} className={cn("text-xs bg-transparent border-none cursor-pointer transition-colors px-0 pb-0.5", mode === 'manual' ? "text-gray-900 dark:text-white font-semibold border-b border-gray-900 dark:border-white" : "text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300")}>Manual</button>
-            <button type="button" onClick={() => { setMode('json'); setJsonError(''); }} className={cn("text-xs bg-transparent border-none cursor-pointer transition-colors px-0 pb-0.5", mode === 'json' ? "text-gray-900 dark:text-white font-semibold border-b border-gray-900 dark:border-white" : "text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300")}>JSON</button>
+        {/* Fields bar + mode tabs */}
+        <div className="px-6 py-3 flex items-center justify-between flex-shrink-0">
+          <span className="text-sm font-semibold text-gray-700 dark:text-zinc-300">
+            {fields.length} field{fields.length !== 1 ? 's' : ''}
+          </span>
+          <div className="flex items-center gap-1 bg-gray-100 dark:bg-[#1a1a1a] rounded-lg p-0.5">
+            <button type="button" onClick={() => setMode('manual')} className={cn("text-xs px-3 py-1 rounded-md cursor-pointer border-none transition-colors", mode === 'manual' ? "bg-white dark:bg-[#2a2a2a] text-gray-900 dark:text-white font-medium shadow-sm" : "bg-transparent text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300")}>Manual</button>
+            <button type="button" onClick={() => { setMode('json'); setJsonError(''); }} className={cn("text-xs px-3 py-1 rounded-md cursor-pointer border-none transition-colors", mode === 'json' ? "bg-white dark:bg-[#2a2a2a] text-gray-900 dark:text-white font-medium shadow-sm" : "bg-transparent text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300")}>JSON</button>
           </div>
         </div>
 
         {/* Content */}
-        <form onSubmit={handleSubmit} className="flex-1 flex flex-col min-h-0 border-t border-gray-100 dark:border-[#1a1a1a]">
+        <form onSubmit={e => e.preventDefault()} className="flex-1 flex flex-col min-h-0 border-t border-gray-100 dark:border-[#1a1a1a]">
 
           {mode === 'json' ? (
             <div className="flex-1 overflow-y-auto px-6 py-4">
@@ -1601,7 +2199,7 @@ function CreateFormDialog({
               <textarea
                 value={jsonInput}
                 onChange={e => { setJsonInput(e.target.value); setJsonError(''); }}
-                placeholder={`{\n  "form_name": "My Form",\n  "fields": [\n    { "field_name": "age", "field_type": "number", "field_description": "Patient age" },\n    { "field_name": "severity", "field_type": "enum", "field_description": "Severity", "options": ["mild", "moderate", "severe"] }\n  ]\n}`}
+                placeholder={`{\n  "form_name": "My Form",\n  "fields": [\n    { "field_name": "age", "field_type": "number", "field_description": "Patient age" },\n    { "field_name": "severity", "field_type": "select", "field_description": "Severity", "options": ["mild", "moderate", "severe"] }\n  ]\n}`}
                 rows={10}
                 className={cn("w-full text-xs font-mono text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-[#1a1a1a] rounded-lg p-4 outline-none leading-[1.7] resize-none mb-3 transition-colors border", jsonError ? "border-red-400 dark:border-red-600" : "border-gray-200 dark:border-[#2a2a2a] focus:border-gray-400 dark:focus:border-[#3f3f3f]")}
               />
@@ -1620,83 +2218,129 @@ function CreateFormDialog({
             <div className="flex-1 overflow-y-auto px-6 py-3">
               {fields.map((field, idx) => {
                 const isOpen = expandedFields.has(idx);
-                const tc = typeColors[field.field_type] || FIELD_TYPE_COLORS.text;
+                const tc = FIELD_TYPE_COLORS[field.field_type] || FIELD_TYPE_COLORS.text;
                 return (
-                  <div key={idx}>
-                    {/* Collapsed row */}
-                    <div
-                      className="flex items-center gap-3 py-2.5 px-2 cursor-pointer rounded-lg transition-colors hover:bg-black/[0.025] dark:hover:bg-white/[0.03]"
-                      onClick={() => { setFocusIndex(idx); toggleField(idx); }}
-                    >
-                      <div className="w-2 h-2 rounded-full shrink-0 transition-opacity" style={{ background: tc.text, opacity: isOpen ? 0.7 : 0.3 }} />
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className={cn("text-sm truncate", isOpen ? "font-semibold text-gray-900 dark:text-white" : field.field_name.trim() ? "font-medium text-gray-600 dark:text-zinc-300" : "font-medium text-gray-300 dark:text-zinc-600")}>{field.field_name.trim() || `field_${idx + 1}`}</span>
-                          <span className="text-xs font-medium py-0.5 px-2 rounded-[5px] tracking-tight shrink-0 text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a]">{TYPE_LABELS[field.field_type] ?? field.field_type}</span>
-                          {field.field_type === 'enum' && field.options && field.options.filter((o: string) => o.trim()).length > 0 && (
-                            <span className="text-xs text-gray-300 dark:text-zinc-600">{field.options.filter((o: string) => o.trim()).length} opts</span>
-                          )}
-                        </div>
-                        {!isOpen && field.field_description.trim() && (
-                          <div className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5 truncate">{field.field_description}</div>
+                  <div key={idx} className="mb-1">
+                    {/* Collapsed row — only when not expanded */}
+                    {!isOpen && (
+                      <div
+                        className="flex items-center gap-2 py-2.5 px-3 cursor-pointer rounded-lg transition-colors hover:bg-black/[0.025] dark:hover:bg-white/[0.03]"
+                        style={{ borderLeft: `3px solid ${tc.sidebar}`, borderRadius: '8px', paddingLeft: '10px' }}
+                        onClick={() => { setFocusIndex(idx); toggleField(idx); }}
+                      >
+                        <span className={cn("text-sm font-semibold shrink-0", field.field_name.trim() ? "text-gray-800 dark:text-zinc-200" : "text-gray-300 dark:text-zinc-600")}>
+                          {field.field_name.trim() || 'Untitled field'}
+                        </span>
+                        <span className="text-xs font-medium py-0.5 px-2 rounded-[5px] shrink-0" style={{ background: tc.bg, color: tc.text, border: `1px solid ${tc.border}` }}>
+                          {TYPE_LABELS[field.field_type] ?? field.field_type}
+                        </span>
+                        {field.field_description.trim() && (
+                          <span className="text-xs text-gray-400 dark:text-zinc-500 truncate min-w-0 flex-1">{field.field_description}</span>
                         )}
+                        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 text-gray-300 dark:text-zinc-600 ml-auto">
+                          <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                        </svg>
                       </div>
-                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 transition-transform duration-200 text-gray-300 dark:text-zinc-600" style={{ transform: isOpen ? "rotate(180deg)" : "rotate(0)" }}>
-                        <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                      </svg>
-                    </div>
+                    )}
 
-                    {/* Expanded — borderless inline editing */}
+                    {/* Expanded — card-style editing */}
                     {isOpen && (
-                      <div className="ml-5 mb-3 pl-4 border-l-2 space-y-1.5" style={{ borderLeftColor: `${tc.text}30` }}>
-                        <div className="flex gap-2 items-center">
-                          <input value={field.field_name} onChange={e => updateField(idx, { field_name: e.target.value })} placeholder="field_name" onClick={e => e.stopPropagation()} className="flex-1 text-sm font-mono text-gray-700 dark:text-zinc-300 bg-transparent border-none outline-none py-1 px-0 focus:bg-gray-50 dark:focus:bg-[#0d0d0d] focus:px-2 focus:rounded transition-all placeholder:text-gray-300 dark:placeholder:text-zinc-600" />
-                          <select value={field.field_type} onChange={e => updateField(idx, { field_type: e.target.value })} onClick={e => e.stopPropagation()} className="text-xs text-gray-500 dark:text-zinc-400 bg-transparent border-none outline-none cursor-pointer appearance-none pr-4 dark:[color-scheme:dark]">
-                            {Object.keys(FIELD_TYPE_COLORS).map(t => <option key={t} value={t}>{TYPE_LABELS[t] ?? t}</option>)}
-                          </select>
-                          {fields.length > 1 && (
-                            <button type="button" onClick={e => { e.stopPropagation(); removeField(idx); }} className="text-gray-300 dark:text-zinc-700 bg-transparent border-none cursor-pointer p-0 hover:text-red-500 transition-colors shrink-0">
-                              <Trash2 className="w-3 h-3" />
+                      <div className="mb-1 rounded-xl overflow-hidden" style={{ borderTop: `1px solid ${tc.border}`, borderRight: `1px solid ${tc.border}`, borderBottom: `1px solid ${tc.border}`, borderLeft: `3px solid ${tc.sidebar}` }} onClick={e => e.stopPropagation()}>
+                        {/* Field name + type dropdown + collapse + delete */}
+                        <div className="flex items-center gap-2 px-3 pt-3 pb-2">
+                          <input
+                            value={field.field_name}
+                            onChange={e => updateField(idx, { field_name: e.target.value })}
+                            placeholder="Untitled field"
+                            className="flex-1 text-sm font-semibold text-gray-800 dark:text-zinc-200 bg-transparent border-none outline-none placeholder:text-gray-300 dark:placeholder:text-zinc-600 placeholder:font-normal"
+                          />
+                          <div className="flex items-center gap-1 shrink-0">
+                            <div className="flex items-center gap-1 rounded-lg px-2 py-1" style={{ background: tc.bg, border: `1px solid ${tc.border}` }}>
+                              <select
+                                value={field.field_type}
+                                onChange={e => updateField(idx, { field_type: e.target.value })}
+                                className="text-xs font-medium bg-transparent border-none outline-none cursor-pointer appearance-none dark:[color-scheme:dark]"
+                                style={{ color: tc.text }}
+                              >
+                                {Object.keys(FIELD_TYPE_COLORS).map(t => <option key={t} value={t}>{TYPE_LABELS[t] ?? t}</option>)}
+                              </select>
+                              <svg width="10" height="10" viewBox="0 0 16 16" fill="none" className="pointer-events-none shrink-0" style={{ color: tc.text }}>
+                                <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                              </svg>
+                            </div>
+                            {fields.length > 1 && (
+                              <button type="button" onClick={() => removeField(idx)} className="p-1 text-gray-300 dark:text-zinc-700 bg-transparent border-none cursor-pointer hover:text-red-500 transition-colors rounded-md hover:bg-red-50 dark:hover:bg-red-950/30">
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            <button type="button" onClick={() => toggleField(idx)} className="p-1 text-gray-300 dark:text-zinc-700 bg-transparent border-none cursor-pointer hover:text-gray-600 dark:hover:text-zinc-300 transition-colors rounded-md">
+                              <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                                <path d="M4 10l4-4 4 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                              </svg>
                             </button>
-                          )}
+                          </div>
                         </div>
-                        <input value={field.field_description} onChange={e => updateField(idx, { field_description: e.target.value })} placeholder="What to extract from the paper..." onClick={e => e.stopPropagation()} className="w-full text-sm text-gray-500 dark:text-zinc-400 bg-transparent border-none outline-none py-0.5 px-0 focus:bg-gray-50 dark:focus:bg-[#0d0d0d] focus:px-2 focus:rounded transition-all placeholder:text-gray-300 dark:placeholder:text-zinc-600" />
-                        <input value={field.example || ''} onChange={e => updateField(idx, { example: e.target.value })} placeholder='Example: "18-65 years" (optional)' onClick={e => e.stopPropagation()} className="w-full text-xs text-gray-400 dark:text-zinc-500 bg-transparent border-none outline-none py-0.5 px-0 focus:bg-gray-50 dark:focus:bg-[#0d0d0d] focus:px-2 focus:rounded transition-all placeholder:text-gray-300 dark:placeholder:text-zinc-700" />
-                        {field.field_type === 'enum' && (
-                          <div className="flex flex-wrap gap-1.5 pt-1">
+                        {/* Extraction prompt */}
+                        <div className="px-3 pb-2">
+                          <label className="block text-[11px] font-medium text-gray-400 dark:text-zinc-500 mb-1">Extraction prompt</label>
+                          <input
+                            value={field.field_description}
+                            onChange={e => updateField(idx, { field_description: e.target.value })}
+                            placeholder="What should be extracted from the paper?"
+                            className="w-full text-sm text-gray-600 dark:text-zinc-300 bg-stone-50 dark:bg-[#0d0d0d] rounded-lg px-3 py-2 outline-none border-none placeholder:text-gray-300 dark:placeholder:text-zinc-600"
+                          />
+                        </div>
+                        {/* Example (optional) */}
+                        <div className="px-3 pb-3">
+                          <label className="block text-[11px] font-medium text-gray-400 dark:text-zinc-500 mb-1">Example <span className="font-normal text-gray-300 dark:text-zinc-600">(optional)</span></label>
+                          <input
+                            value={field.example || ''}
+                            onChange={e => updateField(idx, { example: e.target.value })}
+                            placeholder="e.g. 18-65 years"
+                            className="w-full text-sm text-gray-600 dark:text-zinc-300 bg-stone-50 dark:bg-[#0d0d0d] rounded-lg px-3 py-2 outline-none border-none placeholder:text-gray-300 dark:placeholder:text-zinc-600"
+                          />
+                        </div>
+                        {field.field_type === 'select' && (
+                          <div className="px-3 pb-3 flex flex-wrap gap-1.5">
                             {(field.options || ['']).map((opt: string, oi: number) => (
                               <div key={oi} className="flex items-center relative group">
-                                <input value={opt} onChange={e => updateOption(idx, oi, e.target.value)} placeholder={`option ${oi + 1}`} onClick={e => e.stopPropagation()} className="text-xs text-gray-600 dark:text-zinc-300 bg-gray-50 dark:bg-[#0d0d0d] border-none rounded-full py-1 pr-5 pl-2.5 outline-none w-[100px] focus:ring-1 focus:ring-gray-200 dark:focus:ring-[#333] transition-all" />
+                                <input value={opt} onChange={e => updateOption(idx, oi, e.target.value)} placeholder={`option ${oi + 1}`} className="text-xs text-gray-600 dark:text-zinc-300 bg-gray-50 dark:bg-[#0d0d0d] border border-gray-200 dark:border-[#2a2a2a] rounded-full py-1 pr-5 pl-2.5 outline-none w-[100px] focus:ring-1 focus:ring-gray-300 dark:focus:ring-[#3f3f3f] transition-all" />
                                 {(field.options?.length || 0) > 1 && (
-                                  <button type="button" onClick={e => { e.stopPropagation(); removeOption(idx, oi); }} className="absolute right-1.5 top-1/2 -translate-y-1/2 bg-transparent border-none cursor-pointer text-gray-300 p-0 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100">
+                                  <button type="button" onClick={() => removeOption(idx, oi)} className="absolute right-1.5 top-1/2 -translate-y-1/2 bg-transparent border-none cursor-pointer text-gray-300 p-0 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100">
                                     <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
                                   </button>
                                 )}
                               </div>
                             ))}
-                            <button type="button" onClick={e => { e.stopPropagation(); addOption(idx); }} className="text-xs text-gray-400 bg-gray-50 dark:bg-[#0d0d0d] rounded-full py-1 px-2.5 cursor-pointer border-none hover:text-gray-600 transition-colors">+</button>
+                            <button type="button" onClick={() => addOption(idx)} className="text-xs text-gray-400 bg-gray-50 dark:bg-[#0d0d0d] border border-gray-200 dark:border-[#2a2a2a] rounded-full py-1 px-2.5 cursor-pointer hover:text-gray-600 transition-colors">+</button>
+                            <label className="flex items-center gap-1.5 ml-1 cursor-pointer">
+                              <input type="checkbox" checked={field.multiple ?? false} onChange={e => updateField(idx, { multiple: e.target.checked })} className="w-3 h-3 rounded border-gray-300 dark:border-zinc-600 accent-violet-500" />
+                              <span className="text-[11px] text-gray-400 dark:text-zinc-500">Multiple</span>
+                            </label>
                           </div>
                         )}
-                        {(field.field_type === 'array' || field.field_type === 'object') && (
-                          <div className="pt-1">
-                            <div className="flex items-center justify-between mb-1">
-                              <span className="text-[11px] text-gray-400 dark:text-zinc-600">Subfields</span>
-                              <button type="button" onClick={e => { e.stopPropagation(); addSubfield(idx); }} className="text-[11px] text-gray-400 hover:text-gray-600 bg-transparent border-none cursor-pointer p-0 transition-colors">+ add</button>
+                        {(field.field_type === 'array') && (
+                          <div className="border-t border-gray-100 dark:border-[#2a2a2a] mx-3 pt-3 pb-3">
+                            <div className="flex items-center justify-between mb-2.5">
+                              <span className="text-[11px] font-medium text-gray-500 dark:text-zinc-400">
+                                Columns <span className="text-gray-300 dark:text-zinc-600 font-normal">· tables need at least one</span>
+                              </span>
+                              <button type="button" onClick={() => addSubfield(idx)} className="text-[11px] text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200 border border-gray-200 dark:border-[#2a2a2a] rounded-md px-2 py-0.5 bg-white dark:bg-[#1a1a1a] cursor-pointer transition-colors">+ Add column</button>
                             </div>
                             {(field.subform_fields || []).map((sf: FormField, si: number) => (
-                              <div key={si} className="flex items-center gap-1.5 mb-1 group" onClick={e => e.stopPropagation()}>
-                                <div className="w-1 h-1 rounded-full bg-gray-300 dark:bg-zinc-700 shrink-0" />
-                                <input value={sf.field_name} onChange={e => updateSubfield(idx, si, { field_name: e.target.value })} placeholder="name" className="flex-1 text-xs font-mono text-gray-600 dark:text-zinc-300 bg-transparent border-none outline-none py-0.5 focus:bg-gray-50 dark:focus:bg-[#0d0d0d] focus:px-1.5 focus:rounded transition-all" />
-                                <select value={sf.field_type} onChange={e => updateSubfield(idx, si, { field_type: e.target.value })} className="text-[11px] text-gray-400 bg-transparent border-none outline-none cursor-pointer appearance-none dark:[color-scheme:dark]">
-                                  {Object.keys(FIELD_TYPE_COLORS).filter(t => t !== 'array' && t !== 'object').map(t => <option key={t} value={t}>{t}</option>)}
+                              <div key={si} className="flex items-center gap-2 mb-1.5 group">
+                                <div className="w-5 h-5 rounded shrink-0" style={{ background: tc.bg, border: `1px solid ${tc.border}` }} />
+                                <input value={sf.field_name} onChange={e => updateSubfield(idx, si, { field_name: e.target.value })} placeholder="Column name" className="flex-1 text-xs text-gray-600 dark:text-zinc-300 bg-stone-50 dark:bg-[#0d0d0d] rounded px-2 py-1.5 outline-none border-none placeholder:text-gray-300 dark:placeholder:text-zinc-600" />
+                                <select value={sf.field_type} onChange={e => updateSubfield(idx, si, { field_type: e.target.value })} className="text-xs text-gray-500 dark:text-zinc-400 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded px-2 py-1.5 outline-none cursor-pointer dark:[color-scheme:dark] min-w-[80px]">
+                                  {Object.keys(FIELD_TYPE_COLORS).filter(t => t !== 'array').map(t => <option key={t} value={t}>{TYPE_LABELS[t] ?? t}</option>)}
                                 </select>
-                                <button type="button" onClick={() => removeSubfield(idx, si)} className="bg-transparent border-none cursor-pointer text-gray-300 dark:text-zinc-700 p-0 hover:text-red-500 transition-colors shrink-0 opacity-0 group-hover:opacity-100">
-                                  <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                                <button type="button" onClick={() => removeSubfield(idx, si)} className="bg-transparent border-none cursor-pointer text-gray-300 dark:text-zinc-700 p-1 hover:text-red-500 transition-colors shrink-0 opacity-0 group-hover:opacity-100 rounded">
+                                  <X className="w-3 h-3" />
                                 </button>
                               </div>
                             ))}
                             {(field.subform_fields || []).length === 0 && (
-                              <p className="text-[11px] text-gray-300 dark:text-zinc-700">No subfields yet</p>
+                              <p className="text-xs text-gray-300 dark:text-zinc-600 py-1">Tables need at least one column.</p>
                             )}
                           </div>
                         )}
@@ -1706,18 +2350,34 @@ function CreateFormDialog({
                 );
               })}
 
-              <div onClick={addField} className="flex items-center justify-center gap-1.5 py-2.5 border border-dashed border-gray-200 dark:border-[#2a2a2a] rounded-lg cursor-pointer mt-1 text-gray-300 dark:text-zinc-600 text-xs transition-colors hover:border-gray-400 dark:hover:border-[#3f3f3f] hover:text-gray-500 dark:hover:text-zinc-400">
-                <Plus className="w-3 h-3" /> Add field
-              </div>
             </div>
           )}
         </form>
 
+        {/* + Add field — always visible, outside scroll */}
+        {mode === 'manual' && (
+          <div className="px-6 pb-3 flex-shrink-0">
+            <div onClick={addField} className="flex items-center justify-center gap-1.5 py-2 border border-dashed border-gray-200 dark:border-[#2a2a2a] rounded-lg cursor-pointer text-gray-300 dark:text-zinc-600 text-xs transition-colors hover:border-gray-400 dark:hover:border-[#3f3f3f] hover:text-gray-500 dark:hover:text-zinc-400">
+              <Plus className="w-3 h-3" /> Add field
+            </div>
+          </div>
+        )}
+
         {/* Footer */}
-        <div className="flex items-center justify-end px-6 py-4 border-t border-gray-100 dark:border-[#1a1a1a] rounded-b-2xl flex-shrink-0">
+        <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 dark:border-[#1a1a1a] rounded-b-2xl flex-shrink-0">
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={enableReview}
+              onChange={e => setEnableReview(e.target.checked)}
+              className="w-3.5 h-3.5 rounded border-gray-300 dark:border-zinc-600 accent-amber-500"
+            />
+            <span className="text-xs text-gray-500 dark:text-zinc-400">Require human review</span>
+          </label>
           <div className="flex gap-2">
             <Button variant="ghost" size="sm" onClick={onClose} disabled={saving}>Cancel</Button>
-            <Button size="sm" onClick={handleSubmit as any} loading={saving}>Create Form</Button>
+            <Button variant="secondary" size="sm" onClick={handleSaveDraft} disabled={saving} loading={savingDraft}>Save draft</Button>
+            <Button size="sm" onClick={handleSubmit as any} disabled={saving} loading={savingCreate}>Build</Button>
           </div>
         </div>
       </div>

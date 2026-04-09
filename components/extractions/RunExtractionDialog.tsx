@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Play, X, FileText, Check, Loader2, AlertTriangle } from 'lucide-react';
 import { useQueryClient } from '@tanstack/react-query';
 import { extractionsService, documentsService } from '@/services';
@@ -46,6 +46,35 @@ export function RunExtractionDialog({
   const [formSearch, setFormSearch] = useState('');
   const [docSearch, setDocSearch] = useState('');
 
+  // Draggable divider state
+  const [leftWidth, setLeftWidth] = useState(42);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const isDragging = useRef(false);
+
+  const handleMouseDown = useCallback(() => {
+    isDragging.current = true;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const handleMouseMove = (e: MouseEvent) => {
+      if (!isDragging.current || !containerRef.current) return;
+      const rect = containerRef.current.getBoundingClientRect();
+      const pct = ((e.clientX - rect.left) / rect.width) * 100;
+      setLeftWidth(Math.min(65, Math.max(25, pct)));
+    };
+
+    const handleMouseUp = () => {
+      isDragging.current = false;
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+  }, []);
+
   // Load docs and reset state when dialog opens or initial values change
   useEffect(() => {
     if (!isOpen) return;
@@ -75,6 +104,8 @@ export function RunExtractionDialog({
       toast({ title: 'Success', description: 'Extraction started successfully', variant: 'success' });
       onClose();
       queryClient.invalidateQueries({ queryKey });
+      // Second invalidation after a short delay to catch backend state update
+      setTimeout(() => queryClient.invalidateQueries({ queryKey }), 2000);
     } catch (error: any) {
       toast({
         title: 'Error',
@@ -177,9 +208,9 @@ export function RunExtractionDialog({
         )}
 
         {/* Two-column body */}
-        <div className="flex flex-1 min-h-0 overflow-hidden">
+        <div ref={containerRef} className="flex flex-1 min-h-0 overflow-hidden">
           {/* Left — Form */}
-          <div className="w-[42%] flex flex-col border-r border-gray-100 dark:border-[#1f1f1f] min-h-0 overflow-hidden">
+          <div style={{ width: `${leftWidth}%` }} className="flex flex-col min-h-0 overflow-hidden flex-shrink-0">
             <div className="px-5 pt-4 pb-3 flex-shrink-0">
               <div className="flex items-center justify-between mb-3">
                 <span className="text-[11px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider">
@@ -275,6 +306,15 @@ export function RunExtractionDialog({
                 })
               )}
             </div>
+          </div>
+
+          {/* Draggable divider */}
+          <div
+            onMouseDown={handleMouseDown}
+            className="w-1 flex-shrink-0 cursor-col-resize relative group"
+          >
+            <div className="absolute inset-y-0 -left-1 -right-1" />
+            <div className="absolute inset-y-0 left-0 w-px bg-gray-100 dark:bg-[#1f1f1f] group-hover:bg-gray-300 dark:group-hover:bg-[#3a3a3a] transition-colors" />
           </div>
 
           {/* Right — Documents */}

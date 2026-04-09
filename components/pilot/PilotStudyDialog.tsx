@@ -9,6 +9,7 @@ import { useProject } from '@/contexts/ProjectContext';
 import { formsService, documentsService } from '@/services';
 import { apiClient } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { transformToLongFormat } from '@/lib/longFormatTransform';
 import type { Form, Document, PilotState, PilotFieldFeedback } from '@/types/api';
 
 type Step = 'select' | 'running' | 'review';
@@ -16,37 +17,15 @@ type Step = 'select' | 'running' | 'review';
 // Metadata keys that wrap every extracted field — must be filtered out
 const METADATA_KEYS = new Set(['source_text', 'source_location', 'confidence', 'reasoning']);
 
-function unwrapValue(v: any): any {
-  if (v && typeof v === 'object' && !Array.isArray(v) && 'value' in v) return v.value;
-  return v;
-}
-
 function extractDisplayValue(fieldData: any): string {
-  const value = unwrapValue(fieldData);
+  if (fieldData === null || fieldData === undefined) return '---';
+  const value = (fieldData && typeof fieldData === 'object' && !Array.isArray(fieldData) && 'value' in fieldData) ? fieldData.value : fieldData;
   if (value === null || value === undefined) return '---';
   if (typeof value === 'string') return value.trim() || '---';
   if (typeof value === 'number' || typeof value === 'boolean') return String(value);
-  if (Array.isArray(value)) {
-    if (value.length === 0) return '---';
-    if (value.every((v: any) => typeof v === 'string' || typeof v === 'number')) return value.join(', ');
-    return `${value.length} items`;
-  }
+  if (Array.isArray(value)) return value.length === 0 ? '---' : `${value.length} items`;
   const j = JSON.stringify(value);
   return j.length > 80 ? j.slice(0, 80) + '...' : j;
-}
-
-function getSourceText(fieldData: any): string | null {
-  if (fieldData && typeof fieldData === 'object' && !Array.isArray(fieldData)) {
-    return fieldData.source_text || null;
-  }
-  return null;
-}
-
-function getSourceLocation(fieldData: any): any {
-  if (fieldData && typeof fieldData === 'object' && !Array.isArray(fieldData)) {
-    return fieldData.source_location || null;
-  }
-  return null;
 }
 
 const formatFieldName = (f: string) =>
@@ -160,7 +139,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     const apiUrl = process.env.NEXT_PUBLIC_API_URL || window.location.origin;
     const wsBase = apiUrl.replace(/^https?/, (s: string) => (s === 'https' ? 'wss' : 'ws'));
     const token = apiClient.getToken();
-    const ws = new WebSocket(`${wsBase}/api/v1/ws/jobs/${activeJobId}`);
+    const ws = new WebSocket(`${wsBase}/api/v1/ws/jobs/${activeJobId}${token ? `?token=${encodeURIComponent(token)}` : ''}`);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -214,11 +193,9 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     try {
       const docIds = selectionMode === 'manual' ? Array.from(selectedDocIds) : undefined;
       const effectiveCount = docIds?.length || count;
-      const resp = await formsService.startPilot(form.id, docIds, count);
-      setActiveJobId(resp.job_id);
-      setPaperProgress({ done: 0, total: effectiveCount });
-      setStep('running');
+      await formsService.startPilot(form.id, docIds, count);
       toast({ title: 'Pilot started', description: `Extracting ${effectiveCount} papers`, variant: 'success' });
+      onClose();
     } catch (err: any) {
       toast({ title: 'Error', description: err?.message || 'Failed to start pilot', variant: 'error' });
     } finally {
@@ -324,15 +301,6 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
 
   const reviewedCount = Object.keys(fieldFeedback).length;
   const totalFieldCount = fieldNames.length;
-
-  // Cell status helper
-  const cellStatus = (fieldData: any): 'reported' | 'missing' => {
-    const display = extractDisplayValue(fieldData);
-    return (!display || display === '---' || display === 'NR') ? 'missing' : 'reported';
-  };
-
-  const cellBg = (status: 'reported' | 'missing') =>
-    status === 'reported' ? 'bg-green-50 dark:bg-[#0d1a10]' : 'bg-rose-50 dark:bg-[#1a0d0d]';
 
   // ── Render ────────────────────────────────────────────────────────────────
 
@@ -510,221 +478,195 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
             </div>
           )}
 
-          {/* ── STEP 3: Review — Table Grid ─────────────────────────────── */}
-          {step === 'review' && docIds.length > 0 && (
-            <div className="space-y-3">
-              {/* Stats bar */}
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-4 text-xs text-gray-400">
-                  <span><span className="font-medium text-gray-700 dark:text-zinc-300">{totalFieldCount}</span> fields</span>
-                  <span className="text-gray-200 dark:text-zinc-700">&middot;</span>
-                  <span><span className="font-medium text-gray-700 dark:text-zinc-300">{docIds.length}</span> papers</span>
-                  {reviewedCount > 0 && (
-                    <>
-                      <span className="text-gray-200 dark:text-zinc-700">&middot;</span>
-                      <span><span className="font-medium text-gray-700 dark:text-zinc-300">{reviewedCount}</span> rated</span>
-                    </>
-                  )}
-                  {pilotState?.field_examples && Object.keys(pilotState.field_examples).length > 0 && (
-                    <>
-                      <span className="text-gray-200 dark:text-zinc-700">&middot;</span>
-                      <span className="text-green-600 dark:text-green-400">
-                        {Object.values(pilotState.field_examples).reduce((s, arr) => s + arr.length, 0)} examples
-                      </span>
-                    </>
-                  )}
+          {/* ── STEP 3: Review — Evidence Table Style ───────────────────── */}
+          {step === 'review' && docIds.length > 0 && (() => {
+            // Build long-format joined table from pilot results
+            const pilotResults = docIds.map(docId => ({
+              id: docId,
+              document_id: docId,
+              extracted_data: (latestResults[docId] as Record<string, any>) || {},
+            }));
+            const docsMap = Object.fromEntries(docIds.map(id => [id, { id, filename: shortDocName(id) }]));
+            const { columns, rows } = transformToLongFormat(pilotResults, form.fields, docsMap);
+
+            // Detect paper boundaries for visual grouping
+            const paperBoundaries = new Set<number>();
+            for (let i = 1; i < rows.length; i++) {
+              if (rows[i]._documentId !== rows[i - 1]._documentId) paperBoundaries.add(i);
+            }
+
+            // Use original form field names for rating bar
+            const ratingFields = form.fields.map(f => f.field_name);
+            const isMissing = (val: string) => !val || val === 'NR' || val === 'N/A' || val === '—' || val === '';
+
+            return (
+              <div className="space-y-3">
+                {/* Stats bar */}
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div className="flex items-center gap-4 text-xs text-gray-400">
+                    <span><span className="font-medium text-gray-700 dark:text-zinc-300">{rows.length}</span> rows</span>
+                    <span className="text-gray-200 dark:text-zinc-700">&middot;</span>
+                    <span><span className="font-medium text-gray-700 dark:text-zinc-300">{docIds.length}</span> papers</span>
+                    {reviewedCount > 0 && (
+                      <>
+                        <span className="text-gray-200 dark:text-zinc-700">&middot;</span>
+                        <span><span className="font-medium text-gray-700 dark:text-zinc-300">{reviewedCount}</span> rated</span>
+                      </>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-3 text-[10px] font-medium text-gray-500 dark:text-zinc-500 uppercase tracking-wider">
+                    <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-sm bg-green-200 dark:bg-green-700 inline-block" />Reported</span>
+                    <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-sm bg-rose-200 dark:bg-rose-700 inline-block" />Not reported</span>
+                  </div>
                 </div>
-                {/* Legend */}
-                <div className="flex items-center gap-3 text-[10px] font-medium text-gray-500 dark:text-zinc-500 uppercase tracking-wider">
-                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-sm bg-green-200 dark:bg-green-700 inline-block" />Reported</span>
-                  <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-sm bg-rose-200 dark:bg-rose-700 inline-block" />Not reported</span>
+
+                {/* Rating bar */}
+                <div className="flex flex-wrap gap-2">
+                  {ratingFields.map(fieldName => {
+                    const fb = fieldFeedback[fieldName];
+                    const isCorrect = fb?.rating === 'correct';
+                    const isIncorrect = fb?.rating === 'incorrect';
+                    return (
+                      <div
+                        key={fieldName}
+                        className={cn(
+                          "flex items-center gap-1.5 px-3 py-1.5 rounded-lg border text-xs font-medium transition-colors",
+                          isCorrect && "border-green-300 dark:border-green-700 bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400",
+                          isIncorrect && "border-red-300 dark:border-red-700 bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-400",
+                          !isCorrect && !isIncorrect && "border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-600 dark:text-zinc-400"
+                        )}
+                      >
+                        <span>{formatFieldName(fieldName)}</span>
+                        <button
+                          onClick={() => setRating(fieldName, docIds[0], 'correct')}
+                          className={cn("p-0.5 rounded transition-all", isCorrect ? "text-green-600 dark:text-green-400" : "text-gray-300 dark:text-zinc-600 hover:text-green-500")}
+                          title="Looks correct"
+                        >
+                          <ThumbsUp className="w-3 h-3" />
+                        </button>
+                        <button
+                          onClick={() => { setRating(fieldName, docIds[0], 'incorrect'); setExpandedCell(fieldName); }}
+                          className={cn("p-0.5 rounded transition-all", isIncorrect ? "text-red-600 dark:text-red-400" : "text-gray-300 dark:text-zinc-600 hover:text-red-500")}
+                          title="Needs correction"
+                        >
+                          <ThumbsDown className="w-3 h-3" />
+                        </button>
+                      </div>
+                    );
+                  })}
                 </div>
-              </div>
 
-              {/* Table */}
-              <div className="overflow-auto rounded-xl border border-gray-200 dark:border-zinc-800/50 max-h-[calc(90vh-220px)]">
-                <table className="w-full text-xs border-separate border-spacing-0">
-                  <thead>
-                    <tr>
-                      {/* Sticky field name header */}
-                      <th className="sticky top-0 left-0 z-30 bg-gray-50 dark:bg-[#0d0d0d] px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-zinc-500 border-b-2 border-r border-gray-200 dark:border-zinc-800/60 min-w-[180px]">
-                        Field
-                      </th>
-                      {/* Rating header */}
-                      <th className="sticky top-0 z-20 bg-gray-50 dark:bg-[#0d0d0d] px-2 py-3 text-center text-[10px] font-semibold uppercase tracking-widest text-gray-400 dark:text-zinc-500 border-b-2 border-r border-gray-200 dark:border-zinc-800/60 w-[70px]">
-                        Rate
-                      </th>
-                      {/* Document columns */}
-                      {docIds.map(docId => (
-                        <th key={docId} className="sticky top-0 z-20 bg-gray-50 dark:bg-[#0d0d0d] px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500 border-b-2 border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 min-w-[180px] max-w-[240px]">
-                          <span className="truncate block">{shortDocName(docId)}</span>
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {fieldNames.map(fieldName => {
-                      const fb = fieldFeedback[fieldName];
-                      const isCorrect = fb?.rating === 'correct';
-                      const isIncorrect = fb?.rating === 'incorrect';
-                      const isExpanded = expandedCell === fieldName;
+                {/* Correction forms — shown below rating bar when field rated incorrect */}
+                {ratingFields.filter(fn => fieldFeedback[fn]?.rating === 'incorrect').map(fieldName => {
+                  const fb = fieldFeedback[fieldName];
+                  return (
+                    <div key={fieldName} className="rounded-lg border border-red-200 dark:border-red-800/30 bg-red-50 dark:bg-red-900/10 border-l-4 border-l-red-400 px-4 py-3">
+                      <div className="flex items-center gap-2 mb-2">
+                        <ThumbsDown className="w-3 h-3 text-red-500" />
+                        <p className="text-[11px] font-semibold text-red-700 dark:text-red-400">
+                          {formatFieldName(fieldName)} — provide the correct answer:
+                        </p>
+                      </div>
+                      <div className="grid grid-cols-3 gap-3">
+                        <div>
+                          <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400">Correct value</label>
+                          <input
+                            type="text"
+                            value={fb?.correct_value || ''}
+                            onChange={e => setCorrectionField(fieldName, 'correct_value', e.target.value)}
+                            placeholder="What should the value be?"
+                            className="mt-0.5 w-full text-xs px-2.5 py-2 rounded-md border border-red-200 dark:border-red-800/30 bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-300 dark:focus:ring-red-700"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400">Source text from paper</label>
+                          <input
+                            type="text"
+                            value={fb?.correct_source_text || ''}
+                            onChange={e => setCorrectionField(fieldName, 'correct_source_text', e.target.value)}
+                            placeholder="Copy the relevant sentence from the paper"
+                            className="mt-0.5 w-full text-xs px-2.5 py-2 rounded-md border border-red-200 dark:border-red-800/30 bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-300 dark:focus:ring-red-700"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400">Instruction for AI (optional)</label>
+                          <input
+                            type="text"
+                            value={fb?.note || ''}
+                            onChange={e => setCorrectionField(fieldName, 'note', e.target.value)}
+                            placeholder="e.g., Look in the acknowledgements section"
+                            className="mt-0.5 w-full text-xs px-2.5 py-2 rounded-md border border-red-200 dark:border-red-800/30 bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-300 dark:focus:ring-red-700"
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
 
-                      return (
-                        <React.Fragment key={fieldName}>
-                          <tr className={cn("group", isExpanded && "bg-gray-50/50 dark:bg-[#0d0d0d]/50")}>
-                            {/* Field name — sticky left */}
-                            <td
-                              className={cn(
-                                "sticky left-0 z-10 px-4 py-2.5 border-r border-gray-200 dark:border-zinc-800/60 align-top cursor-pointer",
-                                isExpanded ? "border-b-0 bg-gray-50 dark:bg-[#0d0d0d]" : "border-b bg-white dark:bg-[#111111]",
-                                isCorrect && "bg-green-50/50 dark:bg-green-900/10",
-                                isIncorrect && "bg-red-50/50 dark:bg-red-900/10",
-                              )}
-                              onClick={() => setExpandedCell(isExpanded ? null : fieldName)}
-                            >
-                              <span className="text-xs font-medium text-gray-700 dark:text-zinc-300">
-                                {formatFieldName(fieldName)}
-                              </span>
-                              {isCorrect && <span className="ml-1.5 text-[9px] text-green-500">OK</span>}
-                              {isIncorrect && <span className="ml-1.5 text-[9px] text-red-500">FIX</span>}
-                            </td>
-
-                            {/* Rating buttons */}
-                            <td className={cn(
-                              "px-1 py-2.5 border-r border-gray-200 dark:border-zinc-800/60 align-top",
-                              isExpanded ? "border-b-0 bg-gray-50 dark:bg-[#0d0d0d]" : "border-b bg-white dark:bg-[#111111]",
-                            )}>
-                              <div className="flex items-center justify-center gap-0.5">
-                                <button
-                                  onClick={() => setRating(fieldName, docIds[0], 'correct')}
-                                  className={cn(
-                                    "p-1.5 rounded transition-all",
-                                    isCorrect
-                                      ? "bg-green-100 text-green-600 dark:bg-green-900/30 dark:text-green-400"
-                                      : "text-gray-300 hover:text-green-500 hover:bg-green-50 dark:text-zinc-600 dark:hover:text-green-400"
-                                  )}
-                                  title="Looks correct"
-                                >
-                                  <ThumbsUp className="w-3.5 h-3.5" />
-                                </button>
-                                <button
-                                  onClick={() => { setRating(fieldName, docIds[0], 'incorrect'); setExpandedCell(fieldName); }}
-                                  className={cn(
-                                    "p-1.5 rounded transition-all",
-                                    isIncorrect
-                                      ? "bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400"
-                                      : "text-gray-300 hover:text-red-500 hover:bg-red-50 dark:text-zinc-600 dark:hover:text-red-400"
-                                  )}
-                                  title="Needs correction"
-                                >
-                                  <ThumbsDown className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </td>
-
-                            {/* Document cells */}
-                            {docIds.map(docId => {
-                              const docData = latestResults[docId] as Record<string, any> | undefined;
-                              const fieldData = docData?.[fieldName];
-                              const status = cellStatus(fieldData);
-                              const display = extractDisplayValue(fieldData);
-                              const srcText = getSourceText(fieldData);
-                              const srcLoc = getSourceLocation(fieldData);
+                {/* Long-format evidence table */}
+                <div className="overflow-auto rounded-xl border border-gray-200 dark:border-zinc-800/50 max-h-[calc(90vh-280px)]">
+                  <table className="w-full text-xs border-separate border-spacing-0">
+                    <thead>
+                      <tr>
+                        {columns.map((col, ci) => (
+                          <th
+                            key={col}
+                            className={cn(
+                              'sticky top-0 z-20 bg-gray-50 dark:bg-[#0d0d0d] px-3 py-2.5 text-left text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500 border-b-2 border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 whitespace-nowrap',
+                              ci === 0 && 'sticky left-0 z-40 min-w-[140px]',
+                              ci > 0 && 'min-w-[110px]'
+                            )}
+                          >
+                            {col === 'Paper' ? 'Paper' : col.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())}
+                          </th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {rows.map((row, ri) => {
+                        const isNewPaper = paperBoundaries.has(ri);
+                        // For visual grouping: only show Paper + flat fields on first row of each paper
+                        const isFirstRowOfPaper = ri === 0 || isNewPaper;
+                        return (
+                          <tr key={`${row._resultId}-${ri}`}>
+                            {columns.map((col, ci) => {
+                              const val = row[col] ?? '';
+                              const missing = isMissing(val);
+                              const isFirstCol = ci === 0;
+                              // For flat fields (non-Paper), blank out duplicate rows in same paper group
+                              const isFlatField = form.fields.some(f => f.field_type !== 'array' && f.field_name === col);
+                              const showBlank = !isFirstCol && isFlatField && !isFirstRowOfPaper;
 
                               return (
                                 <td
-                                  key={docId}
+                                  key={col}
                                   className={cn(
-                                    "px-3 py-2.5 border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 align-top min-w-[180px] max-w-[240px] transition-colors",
-                                    isExpanded ? "border-b-0" : "border-b",
-                                    cellBg(status),
-                                    "cursor-pointer hover:brightness-95 dark:hover:brightness-110"
+                                    'px-3 py-2 border-b border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 align-top',
+                                    isFirstCol && 'sticky left-0 z-10 bg-white dark:bg-[#111111] font-medium text-gray-700 dark:text-zinc-300',
+                                    !isFirstCol && !showBlank && (missing ? 'bg-rose-50 dark:bg-[#1a0d0d]' : 'bg-green-50 dark:bg-[#0d1a10]'),
+                                    !isFirstCol && showBlank && 'bg-white dark:bg-[#111111]',
+                                    isNewPaper && 'border-t-2 border-t-gray-400 dark:border-t-zinc-600'
                                   )}
-                                  onClick={() => setExpandedCell(isExpanded ? null : fieldName)}
                                 >
-                                  <div className="flex items-start gap-1">
-                                    <span className={cn(
-                                      "leading-relaxed line-clamp-2",
-                                      status === 'missing' ? "text-gray-400 dark:text-zinc-600 italic" : "text-gray-900 dark:text-white"
-                                    )}>
-                                      {display}
+                                  {showBlank ? null : missing && !isFirstCol ? (
+                                    <span className="text-gray-300 dark:text-zinc-700">NR</span>
+                                  ) : (
+                                    <span className={cn(isFirstCol ? "text-gray-700 dark:text-zinc-300" : "text-gray-800 dark:text-zinc-200")}>
+                                      {val}
                                     </span>
-                                    {srcLoc?.page && (
-                                      <span className="text-[9px] text-gray-400 dark:text-zinc-600 shrink-0 mt-0.5">
-                                        p.{srcLoc.page}
-                                      </span>
-                                    )}
-                                  </div>
-                                  {srcLoc?.section && (
-                                    <span className="text-[9px] text-gray-400 dark:text-zinc-600 block mt-0.5">
-                                      {srcLoc.section}
-                                    </span>
-                                  )}
-                                  {/* Source text preview on expand */}
-                                  {isExpanded && srcText && srcText !== 'NR' && (
-                                    <p className="mt-1.5 pl-2 border-l-2 border-green-300 dark:border-green-700 text-[10px] text-gray-400 dark:text-zinc-500 italic leading-relaxed line-clamp-3">
-                                      {srcText}
-                                    </p>
                                   )}
                                 </td>
                               );
                             })}
                           </tr>
-
-                          {/* Correction form — ALWAYS visible when thumbs down is active */}
-                          {isIncorrect && (
-                            <tr>
-                              <td colSpan={2 + docIds.length} className="px-4 py-3 border-b border-gray-200 dark:border-zinc-800/60 bg-red-50 dark:bg-red-900/10 border-l-4 border-l-red-400">
-                                <div className="flex items-center gap-2 mb-2">
-                                  <ThumbsDown className="w-3 h-3 text-red-500" />
-                                  <p className="text-[11px] font-semibold text-red-700 dark:text-red-400">
-                                    {formatFieldName(fieldName)} -- provide the correct answer:
-                                  </p>
-                                </div>
-                                <div className="grid grid-cols-3 gap-3">
-                                  <div>
-                                    <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400">Correct value</label>
-                                    <input
-                                      type="text"
-                                      value={fb?.correct_value || ''}
-                                      onChange={e => setCorrectionField(fieldName, 'correct_value', e.target.value)}
-                                      placeholder="What should the value be?"
-                                      autoFocus={expandedCell === fieldName}
-                                      className="mt-0.5 w-full text-xs px-2.5 py-2 rounded-md border border-red-200 dark:border-red-800/30 bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-300 dark:focus:ring-red-700"
-                                    />
-                                  </div>
-                                  <div>
-                                    <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400">Source text from paper</label>
-                                    <input
-                                      type="text"
-                                      value={fb?.correct_source_text || ''}
-                                      onChange={e => setCorrectionField(fieldName, 'correct_source_text', e.target.value)}
-                                      placeholder="Copy the relevant sentence from the paper"
-                                      className="mt-0.5 w-full text-xs px-2.5 py-2 rounded-md border border-red-200 dark:border-red-800/30 bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-300 dark:focus:ring-red-700"
-                                    />
-                                  </div>
-                                  <div>
-                                    <label className="text-[10px] font-medium text-gray-500 dark:text-zinc-400">Instruction for AI (optional)</label>
-                                    <input
-                                      type="text"
-                                      value={fb?.note || ''}
-                                      onChange={e => setCorrectionField(fieldName, 'note', e.target.value)}
-                                      placeholder="e.g., Look in the acknowledgements section"
-                                      className="mt-0.5 w-full text-xs px-2.5 py-2 rounded-md border border-red-200 dark:border-red-800/30 bg-white dark:bg-[#111111] text-gray-900 dark:text-white placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-red-300 dark:focus:ring-red-700"
-                                    />
-                                  </div>
-                                </div>
-                              </td>
-                            </tr>
-                          )}
-                        </React.Fragment>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
 
         {/* Footer */}

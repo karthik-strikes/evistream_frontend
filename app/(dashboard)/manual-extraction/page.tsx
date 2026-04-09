@@ -360,13 +360,7 @@ export default function ManualExtractionPage() {
 
   // ── Render ────────────────────────────────────────────────────────
 
-  if (!selectedProject) {
-    return (
-      <DashboardLayout title="Manual Extraction" description="Manually extract data from documents">
-        <div className="flex items-center justify-center h-48 text-sm text-gray-400">Select a project to get started</div>
-      </DashboardLayout>
-    );
-  }
+  if (!selectedProject) return null;
 
   return (
     <DashboardLayout title="Manual Extraction" description="Manually extract data from documents">

@@ -290,6 +290,7 @@ export function IssueReporter() {
   };
 
   const handlePointerUp = () => {
+    if (!hasMoved) setOpen(true);
     dragRef.current = null;
     setDragging(false);
   };
@@ -310,7 +311,7 @@ export function IssueReporter() {
         onPointerUp={handlePointerUp}
       >
         <button
-          onClick={() => { if (!hasMoved) setOpen(true); }}
+          onClick={() => {}}
           aria-label="Report an issue"
           style={dragging ? { pointerEvents: 'none' } : undefined}
           className={[

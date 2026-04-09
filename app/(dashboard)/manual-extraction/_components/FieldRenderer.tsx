@@ -20,7 +20,25 @@ export function FieldRenderer({ field, value, onChange, index, isAiPrefilled, id
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => onChange(e.target.value);
 
   const renderInput = () => {
-    if (field.field_type === 'enum' || field.field_type === 'list') {
+    if (field.field_type === 'select' || field.field_type === 'enum' || field.field_type === 'list') {
+      if (field.multiple) {
+        // Multi-select: render checkboxes
+        const selected: string[] = Array.isArray(val) ? val : val ? String(val).split(',').map((s: string) => s.trim()).filter(Boolean) : [];
+        const toggleOption = (opt: string) => {
+          const next = selected.includes(opt) ? selected.filter((s: string) => s !== opt) : [...selected, opt];
+          onChange(next);
+        };
+        return (
+          <div className="flex flex-wrap gap-1.5">
+            {field.options?.map((o) => (
+              <label key={o} className={cn("flex items-center gap-1.5 text-sm px-2.5 py-1.5 rounded-lg border cursor-pointer transition-colors", selected.includes(o) ? "border-violet-300 dark:border-violet-600 bg-violet-50/50 dark:bg-violet-900/20 text-gray-800 dark:text-zinc-200" : "border-gray-200 dark:border-[#2a2a2a] text-gray-500 dark:text-zinc-400 hover:border-gray-300 dark:hover:border-[#3a3a3a]")}>
+                <input type="checkbox" checked={selected.includes(o)} onChange={() => toggleOption(o)} className="w-3.5 h-3.5 rounded border-gray-300 dark:border-zinc-600 accent-violet-500" />
+                {o}
+              </label>
+            ))}
+          </div>
+        );
+      }
       return (
         <select value={val} onChange={handleChange} className={cn(inputCls, "cursor-pointer dark:[color-scheme:dark]", isAiPrefilled && "bg-blue-50/30 dark:bg-blue-900/10")}>
           <option value="">Select an option…</option>
@@ -28,15 +46,14 @@ export function FieldRenderer({ field, value, onChange, index, isAiPrefilled, id
         </select>
       );
     }
-    if (field.field_type === 'textarea') {
+    if (field.field_type === 'boolean') {
       return (
-        <textarea
-          value={val}
-          onChange={handleChange}
-          placeholder={field.example || `Enter ${field.field_name}`}
-          rows={3}
-          className={cn(inputCls, "resize-none", isAiPrefilled && "bg-blue-50/30 dark:bg-blue-900/10")}
-        />
+        <select value={val} onChange={handleChange} className={cn(inputCls, "cursor-pointer dark:[color-scheme:dark]", isAiPrefilled && "bg-blue-50/30 dark:bg-blue-900/10")}>
+          <option value="">Select…</option>
+          <option value="Yes">Yes</option>
+          <option value="No">No</option>
+          <option value="NR">NR</option>
+        </select>
       );
     }
     return (

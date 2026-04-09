@@ -6,6 +6,8 @@ import { useProject } from '@/contexts/ProjectContext';
 import { formsService, documentsService, resultsService, adjudicationService } from '@/services';
 import { useToast } from '@/hooks/use-toast';
 import { cn } from '@/lib/utils';
+import { PermissionGate } from '@/components/ui/permission-gate';
+import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 import type { ConsensusSummary, ConsensusSummaryDoc } from '@/types/api';
 import {
   ArrowLeft, ArrowRight, FileText, GripVertical, Loader2, Search,
@@ -532,11 +534,16 @@ export default function ConsensusPro() {
     else goBackToDashboard();
   };
 
+  const { can_adjudicate, isAdmin, isOwner } = useProjectPermissions();
+
   // ── No project ──────────────────────────────────────────────────────────────────
-  if (!selectedProject) {
+  if (!selectedProject) return null;
+
+  // ── Permission gate ──────────────────────────────────────────────────────────
+  if (!can_adjudicate && !isAdmin && !isOwner) {
     return (
       <DashboardLayout title="Consensus" description="Corpus-level consensus review">
-        <div className="flex items-center justify-center h-48 text-sm text-gray-400">Select a project to get started</div>
+        <PermissionGate permission="can_adjudicate">{null}</PermissionGate>
       </DashboardLayout>
     );
   }

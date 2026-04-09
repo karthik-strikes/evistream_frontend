@@ -53,14 +53,14 @@ export class JobLogsWebSocket {
   connect(token?: string): void {
     this.isIntentionallyClosed = false;
 
-    const wsUrl = this.buildWebSocketUrl();
+    let wsUrl = this.buildWebSocketUrl();
+    // Send token as query parameter (backend reads from URL, not message body)
+    if (token) {
+      wsUrl += `?token=${encodeURIComponent(token)}`;
+    }
     this.ws = new WebSocket(wsUrl);
 
     this.ws.onopen = () => {
-      // Send auth token as first message instead of URL query param
-      if (token) {
-        this.ws!.send(JSON.stringify({ type: 'auth', token }));
-      }
       this.reconnectAttempts = 0;
       this.reconnectDelay = 1000;
       this.callbacks.onConnected?.();

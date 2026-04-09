@@ -53,3 +53,4 @@ export { FileDropzone, FileList } from './file-dropzone';
 export { SuccessAnimation, SuccessToast, ProgressCelebration } from './success-animation';
 export { Sparkline, generateTrendData } from './sparkline';
 export { TextLink } from './text-link';
+export { PermissionGate } from './permission-gate';

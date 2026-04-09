@@ -93,6 +93,7 @@ export interface FormField {
   field_description: string;
   field_control_type?: string;
   options?: string[];
+  multiple?: boolean;
   example?: string;
   extraction_hints?: string;
   subform_fields?: FormField[];
@@ -180,6 +181,7 @@ export interface CreateFormRequest {
   form_description: string;  // Required!
   fields: FormField[];
   enable_review?: boolean;  // Optional, defaults to false
+  save_as_draft?: boolean;  // Optional, defaults to false — skips code generation
 }
 
 // Extractions
@@ -292,6 +294,9 @@ export interface Notification {
   created_at: string;
 }
 
+// Project Roles
+export type ProjectRole = 'owner' | 'manager' | 'member' | 'viewer';
+
 // Project Members
 export interface ProjectMemberPermissions {
   can_view_docs: boolean;
@@ -302,6 +307,7 @@ export interface ProjectMemberPermissions {
   can_adjudicate: boolean;
   can_qa_review: boolean;
   can_manage_assignments: boolean;
+  can_manage_members: boolean;
 }
 
 export interface ProjectMember {
@@ -310,6 +316,7 @@ export interface ProjectMember {
   user_id: string;
   email: string;
   full_name: string | null;
+  role: ProjectRole;
   can_view_docs: boolean;
   can_upload_docs: boolean;
   can_create_forms: boolean;
@@ -318,12 +325,14 @@ export interface ProjectMember {
   can_adjudicate: boolean;
   can_qa_review: boolean;
   can_manage_assignments: boolean;
+  can_manage_members: boolean;
   invited_by: string | null;
   created_at: string;
 }
 
 export interface ProjectMemberInvite {
   email: string;
+  role: ProjectRole;
   can_view_docs: boolean;
   can_upload_docs: boolean;
   can_create_forms: boolean;
@@ -332,9 +341,11 @@ export interface ProjectMemberInvite {
   can_adjudicate: boolean;
   can_qa_review: boolean;
   can_manage_assignments: boolean;
+  can_manage_members: boolean;
 }
 
 export interface ProjectMemberUpdate {
+  role?: ProjectRole;
   can_view_docs?: boolean;
   can_upload_docs?: boolean;
   can_create_forms?: boolean;
@@ -343,10 +354,13 @@ export interface ProjectMemberUpdate {
   can_adjudicate?: boolean;
   can_qa_review?: boolean;
   can_manage_assignments?: boolean;
+  can_manage_members?: boolean;
 }
 
 export interface MyPermissionsResponse {
   is_owner: boolean;
+  is_admin: boolean;
+  role: ProjectRole;
   can_view_docs: boolean;
   can_upload_docs: boolean;
   can_create_forms: boolean;
@@ -355,6 +369,22 @@ export interface MyPermissionsResponse {
   can_adjudicate: boolean;
   can_qa_review: boolean;
   can_manage_assignments: boolean;
+  can_manage_members: boolean;
+}
+
+export interface OwnershipTransferRequest {
+  new_owner_id: string;
+}
+
+export interface PermissionAuditLog {
+  id: string;
+  project_id: string;
+  actor_id: string;
+  target_user_id: string | null;
+  action: string;
+  old_values: Record<string, unknown> | null;
+  new_values: Record<string, unknown> | null;
+  created_at: string;
 }
 
 export interface ConsensusSummaryDoc {

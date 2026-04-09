@@ -11,7 +11,8 @@ import { extractionsService, formsService, documentsService } from '@/services';
 import type { FormCoverage } from '@/services/extractions.service';
 import { useToast } from '@/hooks/use-toast';
 import { useRouter } from 'next/navigation';
-import { EmptyState } from '@/components/ui';
+import { EmptyState, TooltipSimple } from '@/components/ui';
+import { cn } from '@/lib/utils';
 import type { Form, Document } from '@/types/api';
 import { getErrorMessage } from '@/lib/utils';
 import {
@@ -47,7 +48,8 @@ export default function ExtractionsPage() {
     enabled: !!selectedProject,
     refetchInterval: (query) => {
       const data = query.state.data ?? [];
-      return data.some((c: FormCoverage) => c.active_jobs.length > 0) ? 5000 : false;
+      // Fast poll when jobs are active, slow poll otherwise to catch newly started extractions
+      return data.some((c: FormCoverage) => c.active_jobs.length > 0) ? 5000 : 15000;
     },
   });
 
@@ -67,6 +69,15 @@ export default function ExtractionsPage() {
     queryFn: () => documentsService.getAll(selectedProject!.id),
     enabled: !!selectedProject,
   });
+
+  // Build docNamesMap from all documents for the running card to show filenames
+  const docNamesMap = useMemo(() => {
+    const map = new Map<string, string>();
+    for (const doc of allDocuments) {
+      map.set(doc.id, doc.filename || doc.id);
+    }
+    return map;
+  }, [allDocuments]);
 
   // Count active extractions (for RunExtractionDialog's concurrency warning)
   const activeExtractionCount = coverageData.reduce(
@@ -214,18 +225,7 @@ export default function ExtractionsPage() {
     c.form_name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  if (!selectedProject) {
-    return (
-      <DashboardLayout title="Extractions">
-        <EmptyState
-          icon={AlertCircle}
-          title="No Project Selected"
-          description="Please create or select a project to run extractions"
-          action={{ label: 'Go to Dashboard', onClick: () => router.push('/dashboard') }}
-        />
-      </DashboardLayout>
-    );
-  }
+  if (!selectedProject) return null;
 
   if (!can_view_results) {
     return (
@@ -273,14 +273,24 @@ export default function ExtractionsPage() {
                 className="w-full pl-9 pr-3 py-2 text-xs rounded-lg border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#0a0a0a] text-gray-900 dark:text-white placeholder:text-gray-400 dark:placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-gray-300 dark:focus:ring-zinc-600"
               />
             </div>
-            {can_run_extractions && (
+            {can_run_extractions ? (
               <button
                 onClick={() => { setRunDialogInitialFormId(undefined); setRunDialogInitialDocIds(undefined); setShowRunDialog(true); }}
-                className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-gray-900 dark:bg-white text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-gray-100 transition-colors"
+                className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg transition-colors bg-gray-900 dark:bg-white text-white dark:text-gray-900 hover:bg-gray-800 dark:hover:bg-gray-100"
               >
                 <Play className="h-3.5 w-3.5" />
                 Run New Extraction
               </button>
+            ) : (
+              <TooltipSimple text='You need the "Run Extractions" permission'>
+                <button
+                  disabled
+                  className="flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-lg bg-gray-200 dark:bg-[#2a2a2a] text-gray-400 dark:text-zinc-600 cursor-not-allowed"
+                >
+                  <Play className="h-3.5 w-3.5" />
+                  Run New Extraction
+                </button>
+              </TooltipSimple>
             )}
           </div>
 
@@ -298,6 +308,7 @@ export default function ExtractionsPage() {
                   key={coverage.form_id}
                   coverage={coverage}
                   paperProgress={paperProgress}
+                  docNamesMap={docNamesMap}
                   canRunExtractions={can_run_extractions}
                   onRetryFailed={handleRetryFailed}
                   onRunRemaining={handleRunRemaining}

@@ -54,11 +54,36 @@ function safeRemoveItem(key: string): void {
   }
 }
 
+// Synchronously restore from localStorage to avoid "No Project Selected" flash on refresh
+function getInitialProjects(): Project[] {
+  const stored = safeGetItem('projects');
+  if (stored) {
+    try { return JSON.parse(stored); } catch { /* ignore */ }
+  }
+  return [];
+}
+
+function getInitialSelectedProject(projects: Project[]): Project | null {
+  const storedId = safeGetItem('selectedProjectId');
+  if (storedId && projects.length > 0) {
+    const found = projects.find((p) => p.id === storedId);
+    if (found) return found;
+  }
+  return projects.length > 0 ? projects[0] : null;
+}
+
 export function ProjectProvider({ children }: { children: ReactNode }) {
   const { loading: authLoading } = useAuth();
-  const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProject, setSelectedProjectState] = useState<Project | null>(null);
-  const [loading, setLoading] = useState(true);
+  // Synchronously restore state from localStorage on mount to avoid
+  // "No Project Selected" flash on page refresh
+  const [{ initialProjects, initialSelected }] = useState(() => {
+    const p = getInitialProjects();
+    const s = getInitialSelectedProject(p);
+    return { initialProjects: p, initialSelected: s };
+  });
+  const [projects, setProjects] = useState<Project[]>(initialProjects);
+  const [selectedProject, setSelectedProjectState] = useState<Project | null>(initialSelected);
+  const [loading, setLoading] = useState(!initialSelected);
   const [error, setError] = useState<string | null>(null);
   const [myPermissions, setMyPermissions] = useState<MyPermissionsResponse | null>(null);
   const [isOwner, setIsOwner] = useState(false);
@@ -67,7 +92,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
   const refreshProjects = useCallback(async () => {
     if (refreshInFlight.current) return;
     refreshInFlight.current = true;
-    setLoading(true);
+    // Only show loading if we have no cached projects (avoids flash on background refresh)
+    if (!safeGetItem('projects')) setLoading(true);
     setError(null);
     try {
       const data = await projectsService.getAll();
@@ -121,7 +147,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, [projects]);
 
-  // Fetch permissions for selected project
+  // Fetch permissions for selected project (with in-memory cache)
+  const permsCacheRef = useRef<Record<string, MyPermissionsResponse>>({});
   useEffect(() => {
     if (!selectedProject) {
       setMyPermissions(null);
@@ -131,15 +158,26 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     const token = apiClient.getToken();
     if (!token) return;
 
+    // Return cached permissions immediately if available
+    const cached = permsCacheRef.current[selectedProject.id];
+    if (cached) {
+      setMyPermissions(cached);
+      setIsOwner(cached.is_owner);
+      return;
+    }
+
     projectMembersService.getMyPermissions(selectedProject.id)
       .then((perms) => {
+        permsCacheRef.current[selectedProject.id] = perms;
         setMyPermissions(perms);
         setIsOwner(perms.is_owner);
       })
       .catch((err: unknown) => {
         console.error('Failed to fetch permissions:', err);
-        setMyPermissions({
+        const fallback: MyPermissionsResponse = {
           is_owner: false,
+          is_admin: false,
+          role: 'member',
           can_view_docs: true,
           can_upload_docs: false,
           can_create_forms: false,
@@ -148,7 +186,9 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
           can_adjudicate: false,
           can_qa_review: false,
           can_manage_assignments: false,
-        });
+          can_manage_members: false,
+        };
+        setMyPermissions(fallback);
         setIsOwner(false);
       });
   }, [selectedProject]);

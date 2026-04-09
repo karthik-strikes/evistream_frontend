@@ -293,16 +293,6 @@ export default function DocumentsPage() {
           </Alert>
         )}
 
-        {/* No Project Selected Warning */}
-        {!selectedProject && (
-          <EmptyState
-            icon={AlertCircle}
-            title="No Project Selected"
-            description="Please create or select a project to manage documents"
-            action={{ label: 'Go to Projects', onClick: () => router.push('/projects') }}
-          />
-        )}
-
         {selectedProject && can_view_docs && (
           <>
             {/* Drop Zone */}

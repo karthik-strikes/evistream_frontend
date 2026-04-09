@@ -10,6 +10,7 @@ import {
   ShieldCheck, Loader2, AlertTriangle, CheckCircle2, Flag, BarChart3, ArrowLeft,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { PermissionGate } from '@/components/ui/permission-gate';
 
 type Screen = 'queue' | 'review' | 'dashboard';
 
@@ -114,6 +115,7 @@ export default function QAPage() {
 
   return (
     <DashboardLayout>
+      <PermissionGate permission="can_qa_review">
       <div className="p-6 max-w-7xl mx-auto">
         {screen === 'queue' ? (
           <>
@@ -261,6 +263,7 @@ export default function QAPage() {
           </>
         ) : null}
       </div>
+      </PermissionGate>
     </DashboardLayout>
   );
 }

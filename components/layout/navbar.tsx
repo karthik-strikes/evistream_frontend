@@ -8,6 +8,7 @@ import { NotificationCenter } from './notification-center';
 import { useTheme } from '@/contexts/ThemeContext';
 import { cn } from '@/lib/utils';
 import { authService } from '@/services/auth.service';
+import { ProjectSelector } from '@/components/ProjectSelector';
 
 interface NavbarProps {
   title?: string;
@@ -84,6 +85,8 @@ export function Navbar({ title, description }: NavbarProps) {
 
           {/* Right side */}
           <div className="flex items-center gap-2 flex-1 justify-end">
+            <ProjectSelector />
+
             <div className="h-3.5 w-px bg-gray-200/50 dark:bg-[#1a1a1a]/30" />
 
             <button

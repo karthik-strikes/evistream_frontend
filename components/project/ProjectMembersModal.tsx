@@ -3,7 +3,7 @@
 import { useState, useEffect } from 'react';
 import { X, UserPlus, Lock } from 'lucide-react';
 import { projectMembersService } from '@/services/project-members.service';
-import type { ProjectMemberInvite } from '@/types/api';
+import type { ProjectMemberInvite, ProjectRole } from '@/types/api';
 import { useToast } from '@/hooks/use-toast';
 
 interface ProjectMembersModalProps {
@@ -13,7 +13,13 @@ interface ProjectMembersModalProps {
   onClose: () => void;
 }
 
-const DEFAULT_PERMISSIONS: Omit<ProjectMemberInvite, 'email'> = {
+const ROLE_OPTIONS: { value: ProjectRole; label: string; description: string }[] = [
+  { value: 'manager', label: 'Manager', description: 'Full access — manage members, run extractions, adjudicate, QA review' },
+  { value: 'member', label: 'Member', description: 'Custom permissions — configure individual access below' },
+  { value: 'viewer', label: 'Viewer', description: 'Read-only — can view documents and results only' },
+];
+
+const DEFAULT_MEMBER_PERMISSIONS = {
   can_view_docs: true,
   can_upload_docs: false,
   can_create_forms: false,
@@ -22,6 +28,7 @@ const DEFAULT_PERMISSIONS: Omit<ProjectMemberInvite, 'email'> = {
   can_adjudicate: false,
   can_qa_review: false,
   can_manage_assignments: false,
+  can_manage_members: false,
 };
 
 const PERMISSION_LABELS: Record<string, string> = {
@@ -33,19 +40,22 @@ const PERMISSION_LABELS: Record<string, string> = {
   can_adjudicate: 'Adjudicate',
   can_qa_review: 'QA Review',
   can_manage_assignments: 'Manage Assignments',
+  can_manage_members: 'Manage Members',
 };
 
 export function ProjectMembersModal({ projectId, projectName, isOpen, onClose }: ProjectMembersModalProps) {
   const { toast } = useToast();
   const [notOwner, setNotOwner] = useState(false);
   const [inviteEmail, setInviteEmail] = useState('');
-  const [invitePerms, setInvitePerms] = useState({ ...DEFAULT_PERMISSIONS });
+  const [selectedRole, setSelectedRole] = useState<ProjectRole>('member');
+  const [memberPerms, setMemberPerms] = useState({ ...DEFAULT_MEMBER_PERMISSIONS });
   const [inviting, setInviting] = useState(false);
 
   useEffect(() => {
     if (isOpen) {
       setInviteEmail('');
-      setInvitePerms({ ...DEFAULT_PERMISSIONS });
+      setSelectedRole('member');
+      setMemberPerms({ ...DEFAULT_MEMBER_PERMISSIONS });
       setNotOwner(false);
     }
   }, [isOpen]);
@@ -54,12 +64,15 @@ export function ProjectMembersModal({ projectId, projectName, isOpen, onClose }:
     if (!inviteEmail.trim()) return;
     setInviting(true);
     try {
-      await projectMembersService.inviteMember(projectId, {
+      const invite: ProjectMemberInvite = {
         email: inviteEmail.trim(),
-        ...invitePerms,
-      });
+        role: selectedRole,
+        ...memberPerms,
+      };
+      await projectMembersService.inviteMember(projectId, invite);
       setInviteEmail('');
-      setInvitePerms({ ...DEFAULT_PERMISSIONS });
+      setSelectedRole('member');
+      setMemberPerms({ ...DEFAULT_MEMBER_PERMISSIONS });
       toast({ title: 'Member invited successfully' });
       onClose();
     } catch (err: unknown) {
@@ -97,8 +110,8 @@ export function ProjectMembersModal({ projectId, projectName, isOpen, onClose }:
         {notOwner ? (
           <div className="flex flex-col items-center justify-center py-10 px-5 text-center">
             <Lock className="h-7 w-7 text-gray-300 dark:text-gray-600 mb-2" />
-            <p className="text-sm font-medium text-gray-600 dark:text-gray-300">Owner access required</p>
-            <p className="text-xs text-gray-400 mt-1">Only the project owner can invite members.</p>
+            <p className="text-sm font-medium text-gray-600 dark:text-gray-300">Access required</p>
+            <p className="text-xs text-gray-400 mt-1">You need member management permissions to invite users.</p>
           </div>
         ) : (
           <div className="px-5 py-4 space-y-4">
@@ -123,20 +136,55 @@ export function ProjectMembersModal({ projectId, projectName, isOpen, onClose }:
               </button>
             </div>
 
-            {/* Permissions */}
-            <div className="grid grid-cols-2 gap-y-2 gap-x-4">
-              {(Object.keys(DEFAULT_PERMISSIONS) as Array<keyof typeof DEFAULT_PERMISSIONS>).map((perm) => (
-                <label key={perm} className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={invitePerms[perm]}
-                    onChange={(e) => setInvitePerms((prev) => ({ ...prev, [perm]: e.target.checked }))}
-                    className="w-3.5 h-3.5 rounded accent-gray-900 dark:accent-white"
-                  />
-                  {PERMISSION_LABELS[perm]}
-                </label>
-              ))}
+            {/* Role selector */}
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Role</label>
+              <div className="space-y-1.5">
+                {ROLE_OPTIONS.map((option) => (
+                  <label
+                    key={option.value}
+                    className={`flex items-start gap-3 p-2.5 rounded-lg border cursor-pointer transition-colors ${
+                      selectedRole === option.value
+                        ? 'border-gray-900 dark:border-white bg-gray-50 dark:bg-[#1a1a1a]'
+                        : 'border-gray-200 dark:border-[#2a2a2a] hover:border-gray-300 dark:hover:border-[#3a3a3a]'
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="role"
+                      value={option.value}
+                      checked={selectedRole === option.value}
+                      onChange={() => setSelectedRole(option.value)}
+                      className="mt-0.5 accent-gray-900 dark:accent-white"
+                    />
+                    <div>
+                      <div className="text-sm font-medium text-gray-900 dark:text-white">{option.label}</div>
+                      <div className="text-xs text-gray-400 mt-0.5">{option.description}</div>
+                    </div>
+                  </label>
+                ))}
+              </div>
             </div>
+
+            {/* Individual permissions — only for Member role */}
+            {selectedRole === 'member' && (
+              <div className="space-y-2">
+                <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Permissions</label>
+                <div className="grid grid-cols-2 gap-y-2 gap-x-4">
+                  {(Object.keys(DEFAULT_MEMBER_PERMISSIONS) as Array<keyof typeof DEFAULT_MEMBER_PERMISSIONS>).map((perm) => (
+                    <label key={perm} className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={memberPerms[perm]}
+                        onChange={(e) => setMemberPerms((prev) => ({ ...prev, [perm]: e.target.checked }))}
+                        className="w-3.5 h-3.5 rounded accent-gray-900 dark:accent-white"
+                      />
+                      {PERMISSION_LABELS[perm]}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>

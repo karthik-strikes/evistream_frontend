@@ -31,12 +31,12 @@ export const formsService = {
     return apiClient.post<Form>(`/api/v1/forms/${id}/regenerate${params}`);
   },
 
-  async approveDecomposition(id: string): Promise<{ message: string; form_id: string; status: string }> {
-    return apiClient.post<{ message: string; form_id: string; status: string }>(`/api/v1/forms/${id}/approve-decomposition`, {});
+  async approveDecomposition(id: string): Promise<{ message: string; form_id: string; job_id: string; status: string }> {
+    return apiClient.post<{ message: string; form_id: string; job_id: string; status: string }>(`/api/v1/forms/${id}/approve-decomposition`, {});
   },
 
-  async rejectDecomposition(id: string, feedback: string): Promise<{ message: string; form_id: string; feedback: string; status: string }> {
-    return apiClient.post<{ message: string; form_id: string; feedback: string; status: string }>(`/api/v1/forms/${id}/reject-decomposition`, { feedback });
+  async rejectDecomposition(id: string, feedback: string): Promise<{ message: string; form_id: string; job_id: string; feedback: string; status: string }> {
+    return apiClient.post<{ message: string; form_id: string; job_id: string; feedback: string; status: string }>(`/api/v1/forms/${id}/reject-decomposition`, { feedback });
   },
 
   // ── Pilot Study ─────────────────────────────────────────────────────────

@@ -3,7 +3,7 @@
 import { useState, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
-import { EmptyState } from '@/components/ui';
+import { EmptyState, PermissionGate } from '@/components/ui';
 import { Loader2, PlayCircle } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { jobsService, formsService } from '@/services';
@@ -35,7 +35,7 @@ export default function JobsPage() {
     refetchInterval: (query) => {
       const data = query.state.data ?? [];
       const hasActive = data.some((j: Job) => j.status === 'pending' || j.status === 'processing');
-      return hasActive ? 3000 : false;
+      return hasActive ? 5000 : false;
     },
   });
 
@@ -116,18 +116,7 @@ export default function JobsPage() {
     setActiveFilter(filter as JobFilterType);
   };
 
-  if (!selectedProject) {
-    return (
-      <DashboardLayout title="Jobs">
-        <EmptyState
-          icon={PlayCircle}
-          title="No Project Selected"
-          description="Please select a project to view jobs"
-          action={{ label: 'Go to Dashboard', onClick: () => router.push('/dashboard') }}
-        />
-      </DashboardLayout>
-    );
-  }
+  if (!selectedProject) return null;
 
   const SectionHeader = ({
     label,
@@ -166,6 +155,7 @@ export default function JobsPage() {
       title="Jobs"
       description="Track document processing, code generation, and extractions"
     >
+      <PermissionGate permission="can_view_results">
       {isLoading ? (
         <div className="flex items-center justify-center py-12">
           <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
@@ -256,6 +246,7 @@ export default function JobsPage() {
           )}
         </div>
       )}
+      </PermissionGate>
     </DashboardLayout>
   );
 }
