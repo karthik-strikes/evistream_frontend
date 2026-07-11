@@ -144,8 +144,10 @@ class APIClient {
             // _doRefresh failed — fall through to redirect below
           }
 
-          // No refresh token or refresh failed — redirect to login
-          const publicPaths = ['/', '/login', '/register'];
+          // No refresh token or refresh failed — redirect to login.
+          // '/demo' is public and self-bootstraps its own session, so a stale-token
+          // 401 from a concurrent provider request must NOT hijack it to /login.
+          const publicPaths = ['/', '/login', '/register', '/demo'];
           if (typeof window !== 'undefined' && !publicPaths.includes(window.location.pathname) && !isRedirecting) {
             isRedirecting = true;
             this.clearToken();
@@ -155,8 +157,12 @@ class APIClient {
           }
         }
 
+        // Allow specific calls to opt out of the global error toast
+        // (e.g. when the caller wants to handle 4xx errors with custom UX).
+        const skipGlobalToast = (originalRequest as any)?._skipGlobalToast === true;
+
         // Global error toast for non-401 errors
-        if (typeof window !== 'undefined' && error.response?.status !== 401) {
+        if (typeof window !== 'undefined' && error.response?.status !== 401 && !skipGlobalToast) {
           const httpStatus = error.response?.status;
           const data = error.response?.data as Record<string, any> | undefined;
           const message = data?.detail || error.message || 'An error occurred';
@@ -168,7 +174,9 @@ class APIClient {
             });
           }
 
-          if (httpStatus && httpStatus >= 400) {
+          // Skip 403 toasts — pages render inline lock-UI empty states for permission gaps,
+          // and a duplicate generic toast just adds noise.
+          if (httpStatus && httpStatus >= 400 && httpStatus !== 403) {
             toast({
               variant: 'error',
               title: `Error${httpStatus ? ` (${httpStatus})` : ''}`,

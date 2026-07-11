@@ -11,7 +11,7 @@ interface ProjectHubCardProps {
   breakdownLines?: string[];
   actionLabel?: string;
   badge?: string;
-  onClick: () => void;
+  onClick?: () => void;
 }
 
 export function ProjectHubCard({
@@ -25,11 +25,14 @@ export function ProjectHubCard({
   onClick,
 }: ProjectHubCardProps) {
   return (
-    <button
+    <div
+      role={onClick ? 'button' : undefined}
+      tabIndex={onClick ? 0 : undefined}
       onClick={onClick}
+      onKeyDown={onClick ? (e) => { if (e.key === 'Enter' || e.key === ' ') onClick(); } : undefined}
       className={cn(
-        'relative bg-white rounded-xl border border-gray-200 flex flex-col text-left transition-all duration-150 cursor-pointer overflow-hidden',
-        'hover:shadow-card-hover hover:-translate-y-px',
+        'relative bg-white rounded-xl border border-gray-200 flex flex-col text-left transition-all duration-150 overflow-hidden',
+        onClick ? 'cursor-pointer hover:shadow-card-hover hover:-translate-y-px' : 'cursor-default',
         'dark:bg-[#111111] dark:border-[#1f1f1f]',
       )}
     >
@@ -73,6 +76,6 @@ export function ProjectHubCard({
           </span>
         )}
       </div>
-    </button>
+    </div>
   );
 }

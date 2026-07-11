@@ -1,6 +1,8 @@
-# eviStream Frontend
+# eviStream — Frontend
 
-Next.js 14 web application for the eviStream AI-powered medical data extraction platform.
+Next.js web application for **eviStream**, an AI-powered platform for extracting structured data from research papers (systematic reviews, meta-analyses, evidence synthesis).
+
+**Live:** https://evistreams.com · **Try it (no login):** https://evistreams.com/demo
 
 ---
 
@@ -8,63 +10,45 @@ Next.js 14 web application for the eviStream AI-powered medical data extraction 
 
 | Layer | Technology |
 |---|---|
-| Framework | Next.js 14 (App Router) |
+| Framework | Next.js 15 (App Router) |
 | Language | TypeScript 5 |
 | Styling | Tailwind CSS 3 |
-| UI Primitives | Radix UI |
-| Icons | Lucide React |
-| HTTP Client | Axios |
-| Server State | TanStack React Query 5 |
-| Client State | React Context + Zustand |
+| UI Primitives | Radix UI + lucide-react |
+| HTTP | Axios (single `APIClient` with token refresh) |
+| Server state | TanStack React Query 5 |
+| Client state | React Context + Zustand |
 | Forms | React Hook Form + Zod |
-| Real-time | WebSocket (job log streaming) |
-| File Upload | react-dropzone |
+| Realtime | WebSocket (live job logs) |
 
 ---
 
 ## Getting Started
 
 ### Prerequisites
-
 - Node.js 18+
-- Backend running on `http://localhost:8000`
+- Backend running on `http://localhost:8001`
 
 ### Setup
-
 ```bash
-# Install dependencies
 npm install
-
-# Copy environment file
 cp .env.local.example .env.local
-
-# Start development server
-npm run dev
+npm run dev            # http://localhost:3000
 ```
-
-Open [http://localhost:3000](http://localhost:3000).
 
 ### Scripts
-
 ```bash
-npm run dev       # Development server with hot reload
-npm run build     # Production build
-npm start         # Start production server
-npm run lint      # ESLint
-npm run format    # Prettier
+npm run dev      # dev server (hot reload)
+npm run build    # production build
+npm start        # start production server
+npm run lint     # ESLint
 ```
 
----
-
-## Environment Variables
-
+### Environment
 ```env
-# .env.local
-NEXT_PUBLIC_API_URL=http://localhost:8000
-NEXT_PUBLIC_WS_URL=localhost:8000
+# .env.local  (git-ignored)
+NEXT_PUBLIC_API_URL=http://localhost:8001
 ```
-
-All API calls are proxied through Next.js rewrites (see `next.config.js`) to avoid CORS issues.
+API calls are made same-origin (`/api/...`) and proxied to the backend via Next.js rewrites (`next.config.js`), avoiding CORS. `.env.local` is never committed — only `.env.local.example` is tracked.
 
 ---
 
@@ -73,159 +57,62 @@ All API calls are proxied through Next.js rewrites (see `next.config.js`) to avo
 ```
 frontend/
 ├── app/
-│   ├── layout.tsx                  # Root layout (theme blocking script, fonts)
-│   ├── providers.tsx               # React Query + Context providers
-│   ├── page.tsx                    # Landing page
-│   ├── globals.css                 # Global styles + animations
+│   ├── layout.tsx / providers.tsx      # root layout, theme + React Query + Auth/Project providers
+│   ├── page.tsx                        # landing page
+│   ├── middleware.ts                   # route guard (public vs authed)
 │   ├── (auth)/
-│   │   ├── login/page.tsx
-│   │   └── register/page.tsx
+│   │   ├── login/ · register/ · reset-password/
+│   │   └── demo/                       # zero-login demo — mints a session, redirects to dashboard
 │   └── (dashboard)/
-│       ├── dashboard/page.tsx      # Main dashboard with project switcher
-│       ├── projects/page.tsx       # Project management
-│       ├── projects/[id]/page.tsx  # Project detail
-│       ├── documents/page.tsx      # Document upload & management
-│       ├── forms/page.tsx          # Form creation + AI code generation
-│       ├── extractions/page.tsx    # Run extraction jobs
-│       ├── manual-extraction/      # Manual data extraction
-│       ├── results/page.tsx        # View & export results
-│       ├── jobs/page.tsx           # Job monitoring
-│       ├── activity/page.tsx       # Activity feed
-│       ├── chat/page.tsx           # Paper chat (ask documents)
-│       ├── consensus/page.tsx      # Consensus review
-│       └── settings/page.tsx
-│
-├── components/
-│   ├── layout/
-│   │   ├── dashboard-layout.tsx    # Main layout wrapper
-│   │   ├── sidebar.tsx             # Collapsible nav sidebar (collapsed by default)
-│   │   ├── navbar.tsx              # Top navigation bar
-│   │   └── notification-center.tsx # Notifications panel
-│   ├── ui/                         # Radix-based primitives
-│   │   ├── button.tsx
-│   │   ├── input.tsx, textarea.tsx, select.tsx, label.tsx
-│   │   ├── card.tsx, dialog.tsx, badge.tsx
-│   │   ├── progress.tsx, spinner.tsx, skeleton.tsx
-│   │   ├── toast.tsx, toaster.tsx, alert.tsx
-│   │   ├── file-dropzone.tsx
-│   │   ├── stats-card.tsx, sparkline.tsx
-│   │   ├── empty-state.tsx, confirmation-dialog.tsx
-│   │   └── logo.tsx
-│   ├── animated/                   # Animation-heavy components
-│   ├── chat/                       # Chat interface components
-│   └── features/                   # Feature-specific components
-│
-├── services/                       # API abstraction layer
-│   ├── auth.service.ts
-│   ├── projects.service.ts
-│   ├── documents.service.ts
-│   ├── forms.service.ts
-│   ├── extractions.service.ts
-│   ├── results.service.ts
-│   ├── jobs.service.ts
-│   ├── activity.service.ts
-│   ├── notifications.service.ts
-│   ├── jobLogsWebSocket.ts         # WebSocket with auto-reconnect
-│   └── index.ts
-│
-├── contexts/
-│   ├── ProjectContext.tsx           # Active project state + CRUD
-│   └── ThemeContext.tsx             # Dark/light/system theme
-│
-├── hooks/
-│   ├── useJobWebSocket.ts           # Real-time job log streaming
-│   ├── useScrollReveal.ts
-│   ├── useParallax.ts
-│   ├── useMousePosition.ts
-│   └── use-toast.ts
-│
-├── lib/
-│   ├── api.ts                       # Axios APIClient singleton
-│   ├── utils.ts                     # cn(), formatDate(), etc.
-│   ├── colors.ts                    # Status color mappings
-│   └── typography.ts                # Semantic typography classes
-│
-├── types/
-│   └── api.ts                       # All API request/response types
-│
-└── public/
-    └── landing-preview.html         # Static landing page asset
+│       ├── dashboard/ · projects/ · documents/ · forms/
+│       ├── extractions/ · results/ · jobs/ · manual-extraction/
+│       ├── consensus/ · qa/ · data-cleaning/ · vocabularies
+│       ├── activity/ · chat/ · usage/ · invitations/ · admin/ · settings/
+├── components/                         # layout, ui primitives, feature components (pilot, project, source-evidence, ...)
+├── contexts/                           # AuthContext, ProjectContext, ThemeContext
+├── services/                           # typed API wrappers (auth, projects, documents, forms, results, usage, ...)
+├── lib/                                # api.ts (APIClient), utils, colors, typography, csv, source-evidence helpers
+├── hooks/                              # useJobWebSocket, use-toast, ...
+├── types/api.ts                        # all request/response types
+└── public/                             # static assets (incl. pdf.worker.min.mjs)
 ```
 
 ---
 
 ## Architecture
 
-### API Layer
-
-All backend communication goes through the `APIClient` singleton (`lib/api.ts`):
-
-- Automatic JWT Bearer token injection from localStorage
-- 401 interceptor auto-redirects to `/login`
-- All service files import from `APIClient` — no direct `fetch`/`axios` calls in components
+### API layer
+All backend calls go through the `APIClient` singleton (`lib/api.ts`):
+- Injects the JWT `Authorization` header from `localStorage`
+- **Proactive** refresh ~60s before expiry + **reactive** refresh on 401
+- On unrecoverable 401, redirects to `/login` — except on public paths (`/`, `/login`, `/register`, `/demo`)
 
 ```
-Component → Service → APIClient → Backend API (:8000)
+Component → Service → APIClient → nginx → Backend API (:8001)
 ```
 
-### State Management
+### Auth & route guarding
+`middleware.ts` gates routes on a lightweight `is_logged_in` cookie (the real JWT stays in `localStorage`; the backend verifies it). `/demo` is public and self-bootstraps its own session.
 
+### State management
 | What | How |
 |---|---|
-| Active project | `ProjectContext` (React Context + localStorage fallback) |
-| Theme (dark/light) | `ThemeContext` (React Context + localStorage + system preference) |
-| Server data | TanStack React Query (1min stale time, no refetch on focus) |
-| Local UI state | `useState` / `useReducer` in components |
+| Auth user | `AuthContext` (+ `/auth/me`) |
+| Active project | `ProjectContext` |
+| Theme (dark/light/system) | `ThemeContext` + pre-hydration blocking script (no flash) |
+| Server data | TanStack React Query (stale-time, no refetch on focus) |
 
-### Dark Mode
-
-- `ThemeContext` adds/removes `dark` class on `<html>`
-- A blocking `<script>` in `layout.tsx` applies the saved theme before React hydrates, preventing flash
-- Tailwind uses `darkMode: 'class'` strategy
-
-### Real-time Job Logs
-
-`JobLogsWebSocket` (`services/jobLogsWebSocket.ts`) connects to the backend WebSocket endpoint and streams live logs during extraction/generation jobs:
-
-- Auto-reconnection with exponential backoff (5 attempts)
-- Message type routing: `log`, `progress`, `stage`, `data`, `complete`, `error`
-- Consumed via `useJobWebSocket` hook in pages
-
-### Form Generation Flow
-
-1. User defines a form (fields, sections) in `/forms`
-2. `formsService.create()` submits definition to backend
-3. Backend starts async AI code generation job
-4. Frontend connects WebSocket to stream live generation logs
-5. On completion, user can review and approve/reject the AI decomposition
-6. Approved form is registered as a schema ready for extraction
+### Realtime job logs
+`useJobWebSocket` streams live extraction/generation logs from the backend WebSocket (auto-reconnect with backoff), routing `log / progress / stage / complete / error` messages.
 
 ---
 
 ## Key Conventions
 
-**Path aliases** — use `@/` instead of relative imports:
-```ts
-import { Button } from '@/components/ui/button';
-import { projectsService } from '@/services';
-```
-
-**Colors** — always use `lib/colors.ts` for status colors, never hardcode:
-```ts
-import { statusColor, statusBg } from '@/lib/colors';
-```
-
-**Typography** — use semantic classes from `lib/typography.ts`:
-```ts
-import { typography } from '@/lib/typography';
-<h1 className={typography.page.title}>...</h1>
-```
-
-**Forms** — React Hook Form + Zod always, no uncontrolled inputs:
-```ts
-const schema = z.object({ name: z.string().min(1) });
-const { register, handleSubmit } = useForm({ resolver: zodResolver(schema) });
-```
+- **Path aliases:** `import { Button } from '@/components/ui/button'` (never deep relative paths).
+- **Forms:** React Hook Form + Zod, no uncontrolled inputs.
+- **Design:** cool, minimal, breathy UI; reuse `lib/colors.ts` and `lib/typography.ts` rather than hardcoding.
+- **Destructive/manage actions:** render only for owners/admins (or matching `can_manage_*` permission).
 
 ---
 
@@ -233,18 +120,17 @@ const { register, handleSubmit } = useForm({ resolver: zodResolver(schema) });
 
 | Route | Description |
 |---|---|
-| `/` | Landing page |
-| `/login` | Authentication |
-| `/register` | Account creation |
+| `/` · `/login` · `/register` · `/reset-password` | Landing + auth |
+| **`/demo`** | Zero-login demo — signs in to a sandboxed demo account, no credentials |
 | `/dashboard` | Overview with project switcher, stats, recent extractions |
-| `/projects` | List and manage projects |
-| `/documents` | Upload PDFs, view processing status |
-| `/forms` | Create extraction forms, trigger AI code generation |
-| `/extractions` | Run extraction jobs against uploaded documents |
-| `/results` | Browse, filter, and export extraction results |
-| `/manual-extraction` | Manually fill in extraction fields |
-| `/consensus` | Review and reconcile AI vs manual extractions |
-| `/jobs` | Monitor all async jobs |
-| `/activity` | Full activity feed |
+| `/projects` · `/projects/[id]` | Manage projects; project hub |
+| `/documents` | Upload PDFs, processing status, source viewer |
+| `/forms` | Build extraction forms + AI (LangGraph) code generation + decomposition review |
+| `/extractions` · `/extractions/[id]` | Run and inspect extraction jobs |
+| `/results` | Browse, filter, export results |
+| `/manual-extraction` | Manual double-review (R1/R2) with per-document queue |
+| `/consensus` · `/qa` | Adjudication and QA review |
+| `/data-cleaning` · `/vocabularies` | Post-extraction cleanup + controlled vocabularies |
+| `/jobs` · `/activity` · `/usage` | Job monitoring, activity feed, usage/cost |
+| `/invitations` · `/admin` · `/settings` | Membership, admin, user/app settings |
 | `/chat` | Chat with uploaded papers |
-| `/settings` | User and app settings |

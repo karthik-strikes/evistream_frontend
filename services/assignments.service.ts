@@ -43,4 +43,9 @@ export const assignmentsService = {
       `/api/v1/assignments/progress?project_id=${projectId}`
     );
   },
+
+  async clearAssignments(projectId: string, reviewerUserId?: string): Promise<{ deleted: number }> {
+    const qs = reviewerUserId ? `?reviewer_user_id=${reviewerUserId}` : '';
+    return apiClient.delete<{ deleted: number }>(`/api/v1/assignments/project/${projectId}${qs}`);
+  },
 };

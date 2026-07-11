@@ -8,7 +8,7 @@ import { useProject } from '@/contexts/ProjectContext';
 import { useToast } from '@/hooks/use-toast';
 import { documentsService } from '@/services';
 import type { Document } from '@/types/api';
-import { Loader2, AlertCircle, FileUp, Layers, Plus, X, ChevronDown, Search } from 'lucide-react';
+import { Loader2, AlertCircle, FileUp, FolderOpen, Layers, Plus, X, ChevronDown, Search } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { Input } from '@/components/ui';
 import { cn } from '@/lib/utils';
@@ -172,7 +172,18 @@ export default function ChatPage() {
     </div>
   );
 
-  if (!selectedProject) return null;
+  if (!selectedProject) {
+    return (
+      <DashboardLayout title="Paper Chat" description="Ask questions about your research papers">
+        <EmptyState
+          icon={FolderOpen}
+          title="No project selected"
+          description="Create or open a project to chat with your papers."
+          action={{ label: 'Go to projects', onClick: () => router.push('/projects') }}
+        />
+      </DashboardLayout>
+    );
+  }
 
   if (loading) {
     return (

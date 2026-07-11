@@ -24,7 +24,10 @@ export interface LongFormatRow {
   _paperFilename: string;
   _resultId: string;
   _documentId: string;
-  [key: string]: string;
+  /** Raw wrapped cell envelopes ({value, source_text, ...}) keyed by column name —
+   *  used by the renderer to surface per-cell source evidence. */
+  _rawCells?: Record<string, any>;
+  [key: string]: any;
 }
 
 export interface LongFormatResult {
@@ -36,18 +39,53 @@ export interface LongFormatResult {
 // Helpers
 // ---------------------------------------------------------------------------
 
+function formatArray(arr: any[]): string {
+  if (arr.length === 0) return '';
+  if (arr.every(d => typeof d === 'string' || typeof d === 'number' || typeof d === 'boolean')) {
+    return arr.join(', ');
+  }
+  const items = arr.map(item => {
+    if (item == null) return '';
+    if (typeof item !== 'object') return String(item);
+    const flat: Record<string, any> = {};
+    for (const [k, v] of Object.entries(item)) {
+      const u = (v && typeof v === 'object' && 'value' in v) ? (v as any).value : v;
+      if (u != null && typeof u !== 'object') flat[k] = u;
+    }
+    const nameKey = Object.keys(flat).find(k => /name|title|label/i.test(k));
+    if (nameKey) return String(flat[nameKey]);
+    return Object.values(flat).slice(0, 3).join(', ');
+  });
+  return items.filter(s => s && s.trim()).join(' · ');
+}
+
+/**
+ * Provenance display rule for a value cell:
+ *   genuine "not_reported" → 'NR'; any failure (error | missing) → '' (blank).
+ * Returns null when status doesn't dictate the display (fall through to the raw value).
+ */
+function statusDisplay(data: any): string | null {
+  if (data && typeof data === 'object' && typeof data.status === 'string') {
+    if (data.status === 'error' || data.status === 'missing') return '';
+    if (data.status === 'not_reported') return 'NR';
+  }
+  return null;
+}
+
 /** Unwrap {value, source_text} wrappers to get the display value. */
 export function extractScalar(data: any): string {
   if (data == null) return '';
   if (typeof data === 'string') return data;
   if (typeof data === 'number' || typeof data === 'boolean') return String(data);
-  if (Array.isArray(data)) return `[${data.length} items]`;
+  if (Array.isArray(data)) return formatArray(data);
   if (typeof data === 'object') {
+    const sd = statusDisplay(data);
+    if (sd !== null) return sd;
     // {value, source_text} pattern
     if ('value' in data) {
       const v = data.value;
       if (v == null) return '';
-      if (Array.isArray(v)) return `[${v.length} items]`;
+      if (Array.isArray(v)) return formatArray(v);
       return String(v);
     }
     return JSON.stringify(data);
@@ -59,8 +97,10 @@ export function extractScalar(data: any): string {
 function extractSubfieldValue(entry: any, key: string): string {
   if (!entry || entry[key] == null) return '';
   const raw = entry[key];
-  if (typeof raw === 'object' && raw !== null && 'value' in raw) {
-    return raw.value == null ? '' : String(raw.value);
+  if (typeof raw === 'object' && raw !== null) {
+    const sd = statusDisplay(raw);
+    if (sd !== null) return sd;
+    if ('value' in raw) return raw.value == null ? '' : String(raw.value);
   }
   return String(raw);
 }
@@ -192,10 +232,12 @@ export function transformToLongFormat(
     const filename = doc?.filename ?? result.document_id;
     const data = result.extracted_data ?? {};
 
-    // Extract flat field values
+    // Extract flat field values + capture raw wrapped envelopes for evidence lookup
     const flatValues: Record<string, string> = {};
+    const flatRaw: Record<string, any> = {};
     for (const f of classification.flatFields) {
       flatValues[f.field_name] = extractScalar(data[f.field_name]);
+      flatRaw[f.field_name] = data[f.field_name];
     }
 
     const baseRow = {
@@ -207,7 +249,7 @@ export function transformToLongFormat(
 
     // No table fields — one row per paper
     if (!classification.deepestTableField) {
-      rows.push({ ...baseRow, ...flatValues });
+      rows.push({ ...baseRow, ...flatValues, _rawCells: { ...flatRaw } });
       continue;
     }
 
@@ -237,6 +279,7 @@ export function transformToLongFormat(
     // Explode deepest array into rows
     for (const entry of deepestArray) {
       const row: LongFormatRow = { ...baseRow, ...flatValues };
+      const rawCells: Record<string, any> = { ...flatRaw };
 
       // Add parent table values (joined by key)
       for (const { field: parent, joinKey, entries } of parentLookups) {
@@ -249,14 +292,17 @@ export function transformToLongFormat(
         for (const sf of (parent.subform_fields ?? [])) {
           if ((classification.deepestTableField?.subform_fields ?? []).some(d => d.field_name === sf.field_name)) continue;
           row[sf.field_name] = matchedParent ? extractSubfieldValue(matchedParent, sf.field_name) : '';
+          rawCells[sf.field_name] = matchedParent ? matchedParent[sf.field_name] : undefined;
         }
       }
 
       // Add deepest table subfield values
       for (const sf of (classification.deepestTableField?.subform_fields ?? [])) {
         row[sf.field_name] = extractSubfieldValue(entry, sf.field_name);
+        rawCells[sf.field_name] = entry?.[sf.field_name];
       }
 
+      row._rawCells = rawCells;
       rows.push(row);
     }
   }
@@ -287,6 +333,7 @@ function fallbackTransform(
   const columns = ['Paper', ...Array.from(allKeys).sort()];
   const rows: LongFormatRow[] = results.map(r => {
     const doc = documentsMap[r.document_id];
+    const rawCells: Record<string, any> = {};
     const row: LongFormatRow = {
       _paperFilename: doc?.filename ?? r.document_id,
       _resultId: r.id,
@@ -295,7 +342,9 @@ function fallbackTransform(
     };
     for (const k of allKeys) {
       row[k] = extractScalar(r.extracted_data?.[k]);
+      rawCells[k] = r.extracted_data?.[k];
     }
+    row._rawCells = rawCells;
     return row;
   });
   return { columns, rows };

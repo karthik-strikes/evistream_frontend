@@ -8,16 +8,17 @@ import { resultsService, extractionsService, documentsService, formsService, job
 import { ExtractionResult, Extraction, Document } from '@/types/api';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useToast } from '@/hooks/use-toast';
-import { Spinner, EmptyState, Progress, Tooltip } from '@/components/ui';
+import { Spinner, EmptyState, Progress, Tooltip, Badge } from '@/components/ui';
 import {
-  Download, AlertCircle, FileText, Table as TableIcon,
+  Download, AlertCircle, FileText, FolderOpen, Table as TableIcon,
   Search, ChevronDown, ArrowUpDown, X, MapPin,
 } from 'lucide-react';
 import { PdfSourceViewer } from '@/components/PdfSourceViewer';
 import { useSourceLinking } from '@/hooks/useSourceLinking';
 import type { SourceLocation } from '@/types/api';
-import { cn, formatDate, getErrorMessage } from '@/lib/utils';
+import { cn, formatDate, getErrorMessage, formatModelName, modelTagTheme } from '@/lib/utils';
 import { PermissionGate } from '@/components/ui/permission-gate';
+import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 import { FinalDatasetView } from './_components/FinalDatasetView';
 import LongFormatTable from './_components/LongFormatTable';
 import { transformToLongFormat, toCSV, toJSON } from '@/lib/longFormatTransform';
@@ -88,6 +89,62 @@ function hasSourceText(data: any): boolean {
 function hasAnyEvidence(data: any): boolean {
   if (typeof data !== 'object' || data === null || Array.isArray(data)) return false;
   return hasSourceText(data) || !!data.source_location;
+}
+
+// A field counts as "empty" when it has no substantive value — null/blank,
+// an NR-like token, or a cell whose status is not_reported/missing/error.
+// Mirrors the backend's _field_is_empty so card and page counts agree.
+const NR_LIKE = new Set(['', 'NR', 'NA', 'N/A', 'NONE', 'NOT REPORTED', 'NOT_REPORTED', '—', '-']);
+function fieldIsEmpty(v: any): boolean {
+  if (v === null || v === undefined) return true;
+  if (typeof v === 'string') return v.trim() === '' || NR_LIKE.has(v.trim().toUpperCase());
+  if (typeof v === 'number' || typeof v === 'boolean') return false;
+  if (Array.isArray(v)) return v.length === 0 || v.every(fieldIsEmpty);
+  if (typeof v === 'object') {
+    const st = (v as any).status;
+    if (st === 'missing' || st === 'error' || st === 'not_reported') return true;
+    if (st === 'reported') return false;
+    if ('value' in v) return fieldIsEmpty((v as any).value);
+    const vals = Object.values(v);
+    return vals.length === 0 || vals.every(fieldIsEmpty);
+  }
+  return false;
+}
+
+// Map a stored model_name to a coarse family for the per-model toggle.
+function modelFamily(model?: string | null): 'gpt' | 'claude' | 'gemini' | 'other' {
+  const m = (model || '').toLowerCase();
+  if (m.includes('gpt') || m.includes('openai') || /\bo[134]\b/.test(m)) return 'gpt';
+  if (m.includes('claude') || m.includes('anthropic') || m.includes('opus') || m.includes('sonnet') || m.includes('haiku')) return 'claude';
+  if (m.includes('gemini') || m.includes('google')) return 'gemini';
+  return 'other';
+}
+
+const FAMILY_LABEL: Record<string, string> = { gpt: 'GPT', claude: 'Claude', gemini: 'Gemini', other: 'Other' };
+const FAMILY_CLASS: Record<string, string> = {
+  gpt: 'model-dia--gpt', claude: 'model-dia--claude', gemini: 'model-dia--gemini', other: 'model-dia--other',
+};
+
+function ModelDiamond({
+  label, variant, active, onClick, title,
+}: {
+  label: string;
+  variant: string;
+  active: boolean;
+  onClick: () => void;
+  title: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title}
+      aria-pressed={active}
+      className={cn('model-dia', variant, active ? 'is-active' : 'is-inactive')}
+    >
+      <span className="inner">{label}</span>
+    </button>
+  );
 }
 
 const formatFieldName = (f: string) =>
@@ -206,6 +263,7 @@ function ResultsContent() {
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const router = useRouter();
+  const { can_run_extractions } = useProjectPermissions();
   const extractionIdParam = searchParams.get('extraction_id');
   const formIdParam = searchParams.get('form_id');
   const sourceTabParam = searchParams.get('tab');
@@ -218,6 +276,7 @@ function ResultsContent() {
   const [sortKey, setSortKey] = useState<SortKey>('date_newest');
   const [sourceTab, setSourceTab] = useState<'ai' | 'manual' | 'final'>((sourceTabParam as any) || 'ai');
   const [expandedFormId, setExpandedFormId] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState<string | null>(null);
 
   // Update URL when extraction or tab changes (enables browser back/forward)
   const selectExtraction = (id: string) => {
@@ -257,7 +316,7 @@ function ResultsContent() {
     enabled: !!selectedProject,
     refetchInterval: (query) => {
       const all = query.state.data?.allExtractions ?? [];
-      return all.some((e: any) => e.status === 'running' || e.status === 'pending') ? 5000 : false;
+      return all.some((e: any) => e.status === 'running' || e.status === 'pending') ? 4000 : false;
     },
   });
   // extractionsData.extractions = only completed/manual/consensus (for picker/tabs)
@@ -337,7 +396,8 @@ function ResultsContent() {
 
     // No URL extraction_id — auto-select first from tab-filtered list
     if (extractions.length > 0) {
-      const currentStillValid = extractions.some((e: Extraction) => e.id === selectedExtractionId);
+      // Check allExtractions (not tab-filtered) so a pending/running retry doesn't evict the selection
+      const currentStillValid = allExtractions.some((e: Extraction) => e.id === selectedExtractionId);
       if (!currentStillValid) {
         setSelectedExtractionId(extractions[0].id);
       }
@@ -346,11 +406,19 @@ function ResultsContent() {
     }
   }, [searchParams, extractions, allExtractions, isFormView]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Auto-refresh results while the relevant extraction(s) are still running.
+  const selectedInFlight = selectedExtraction?.status === 'running' || selectedExtraction?.status === 'pending'
+    || selectedJob?.status === 'processing' || selectedJob?.status === 'pending';
+  const formInFlight = !!formIdParam && allExtractions.some((e: Extraction) =>
+    e.form_id === formIdParam && (e.status === 'running' || e.status === 'pending'));
+
   // Form-level merged results (when form_id param is set)
   const { data: formResults = [], isLoading: formResultsLoading, error: formResultsError } = useQuery({
     queryKey: ['results-by-form', selectedProject?.id, formIdParam],
-    queryFn: () => resultsService.getAll({ projectId: selectedProject!.id, formId: formIdParam! }),
+    queryFn: () => resultsService.getAllForForm(selectedProject!.id, formIdParam!),
     enabled: isFormView && !!selectedProject && !!formIdParam,
+    staleTime: 0,
+    refetchInterval: formInFlight ? 4000 : false,
   });
 
   // Per-extraction results (existing behavior)
@@ -360,20 +428,48 @@ function ResultsContent() {
     queryKey: ['results', effectiveExtractionId],
     queryFn: () => resultsService.getAll({ extractionId: effectiveExtractionId }),
     enabled: !isFormView && !!effectiveExtractionId,
+    staleTime: 0,
+    refetchInterval: selectedInFlight ? 4000 : false,
   });
 
-  // Deduplicate form results: keep newest result per document_id
+  // When the viewed extraction's job finishes, refetch its rows immediately
+  // (covers the gap between status polls and the results poll switching off).
+  useEffect(() => {
+    if (isFormView || !effectiveExtractionId) return;
+    const s = selectedExtraction?.status;
+    if (s === 'completed' || s === 'manual' || s === 'consensus' || selectedJob?.status === 'completed') {
+      queryClient.invalidateQueries({ queryKey: ['results', effectiveExtractionId] });
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedExtraction?.status, selectedJob?.status, effectiveExtractionId, isFormView]);
+
+  // Distinct model families across this form's runs (for the per-model toggle)
+  const modelFamiliesInForm = useMemo(() => {
+    if (!isFormView) return [] as string[];
+    const present = new Set<string>();
+    for (const r of formResults) present.add(modelFamily(r.model_name));
+    return (['gpt', 'claude', 'gemini', 'other'] as const).filter((f) => present.has(f)) as string[];
+  }, [formResults, isFormView]);
+
+  // Selected model only applies if it actually ran for this form.
+  const effectiveModel = selectedModel && modelFamiliesInForm.includes(selectedModel) ? selectedModel : null;
+
+  // Deduplicate form results: keep newest result per document_id. When a model
+  // family is selected, restrict to that family first → latest per paper per model.
   const deduplicatedFormResults = useMemo(() => {
     if (!isFormView) return [];
+    const source = effectiveModel
+      ? formResults.filter((r) => modelFamily(r.model_name) === effectiveModel)
+      : formResults;
     const byDoc = new Map<string, typeof formResults[0]>();
-    for (const r of formResults) {
+    for (const r of source) {
       const existing = byDoc.get(r.document_id);
       if (!existing || new Date(r.created_at) > new Date(existing.created_at)) {
         byDoc.set(r.document_id, r);
       }
     }
     return Array.from(byDoc.values());
-  }, [formResults, isFormView]);
+  }, [formResults, isFormView, effectiveModel]);
 
   // Unified results: form view uses deduplicated, extraction view uses per-extraction
   const results = isFormView ? deduplicatedFormResults : extractionResults;
@@ -457,6 +553,57 @@ function ResultsContent() {
     return { filled, total, pct: total > 0 ? Math.round((filled / total) * 100) : 0 };
   }, [allFieldNames]);
 
+  // ── Flagged papers (more than half their fields empty) ──────────────────────
+  const flaggedOnly = searchParams.get('flagged') === '1';
+
+  const isResultFlagged = useCallback((r: ExtractionResult) => {
+    const total = allFieldNames.length;
+    if (total === 0) return false;
+    const empty = allFieldNames.filter(f => fieldIsEmpty(r.extracted_data[f])).length;
+    return empty * 2 > total; // strictly more than half empty
+  }, [allFieldNames]);
+
+  const flaggedResults = useMemo(() => results.filter(isResultFlagged), [results, isResultFlagged]);
+  const flaggedDocIds = useMemo(() => flaggedResults.map(r => r.document_id), [flaggedResults]);
+  const flaggedSet = useMemo(() => new Set(flaggedDocIds), [flaggedDocIds]);
+
+  // The extraction to retry against: the selected run, or the form's latest run.
+  const retryExtractionId = useMemo(() => {
+    if (selectedExtractionId) return selectedExtractionId;
+    if (formIdParam) {
+      const runs = allExtractions
+        .filter((e: Extraction) => e.form_id === formIdParam)
+        .sort((a: Extraction, b: Extraction) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+      return runs[0]?.id || '';
+    }
+    return '';
+  }, [selectedExtractionId, formIdParam, allExtractions]);
+
+  const setFlaggedFilter = (on: boolean) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (on) params.set('flagged', '1'); else params.delete('flagged');
+    router.push(`/results?${params.toString()}`, { scroll: false });
+  };
+
+  const handleRetryFlagged = async () => {
+    if (!retryExtractionId || flaggedDocIds.length === 0) return;
+    try {
+      await extractionsService.retryFailed(retryExtractionId, flaggedDocIds);
+      toast({
+        title: 'Retrying',
+        description: `Re-extracting ${flaggedDocIds.length} flagged ${flaggedDocIds.length === 1 ? 'paper' : 'papers'} as a new run`,
+        variant: 'success',
+      });
+      // Mark the Run Extraction page's coverage stale so it refetches on mount
+      // and shows the new run's LIVE card immediately (no 15s poll delay).
+      queryClient.invalidateQueries({ queryKey: ['extraction-coverage', selectedProject?.id] });
+      queryClient.invalidateQueries({ queryKey: ['extractions-with-forms', selectedProject?.id] });
+      router.push('/extractions');
+    } catch (error: any) {
+      toast({ title: 'Error', description: getErrorMessage(error, 'Failed to start retry'), variant: 'error' });
+    }
+  };
+
   // Sort results
   const sortedResults = useMemo(() => {
     return [...results].sort((a, b) => {
@@ -474,13 +621,15 @@ function ResultsContent() {
 
   // Filter for cards view
   const filteredResults = useMemo(() => {
-    if (!searchQuery.trim()) return sortedResults;
+    let base = sortedResults;
+    if (flaggedOnly) base = base.filter(r => flaggedSet.has(r.document_id));
+    if (!searchQuery.trim()) return base;
     const q = searchQuery.toLowerCase();
-    return sortedResults.filter(r => {
+    return base.filter(r => {
       if (documentsMap[r.document_id]?.filename.toLowerCase().includes(q)) return true;
       return Object.values(r.extracted_data).some(v => extractScalarValue(v).toLowerCase().includes(q));
     });
-  }, [sortedResults, searchQuery, documentsMap]);
+  }, [sortedResults, searchQuery, documentsMap, flaggedOnly, flaggedSet]);
 
   // Build form picker: group extractions by form_id
   // Form picker shows forms that have results for the active tab
@@ -539,7 +688,18 @@ function ResultsContent() {
   // Show form picker when no form_id or extraction_id in URL
   const showFormPicker = !isFormView && !extractionIdParam;
 
-  if (!selectedProject) return null;
+  if (!selectedProject) {
+    return (
+      <DashboardLayout title="Results" description="View and export extraction results">
+        <EmptyState
+          icon={FolderOpen}
+          title="No project selected"
+          description="Create or open a project to view extraction results."
+          action={{ label: 'Go to projects', onClick: () => router.push('/projects') }}
+        />
+      </DashboardLayout>
+    );
+  }
 
   return (
     <DashboardLayout title="Results" description="View and export extraction results">
@@ -618,12 +778,39 @@ function ResultsContent() {
               <span className="text-sm text-amber-700 dark:text-amber-400">
                 ⚠ {failedDocIds.length} paper{failedDocIds.length !== 1 ? 's' : ''} failed to extract.
               </span>
-              <button
-                onClick={handleRetryFailed}
-                className="text-xs font-semibold text-amber-700 dark:text-amber-400 bg-amber-100 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 px-3 py-1.5 rounded-lg cursor-pointer transition-colors hover:bg-amber-200 dark:hover:bg-amber-900/40"
-              >
-                Retry Failed Papers
-              </button>
+              {can_run_extractions && (
+                <button
+                  onClick={handleRetryFailed}
+                  className="text-xs font-semibold text-amber-700 dark:text-amber-400 bg-amber-100 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 px-3 py-1.5 rounded-lg cursor-pointer transition-colors hover:bg-amber-200 dark:hover:bg-amber-900/40"
+                >
+                  Retry Failed Papers
+                </button>
+              )}
+            </div>
+          )}
+
+          {/* Flagged papers banner */}
+          {flaggedResults.length > 0 && (
+            <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/40">
+              <span className="text-sm text-amber-700 dark:text-amber-400">
+                ⚠ {flaggedResults.length} {flaggedResults.length === 1 ? 'paper has' : 'papers have'} more than half their fields empty{flaggedOnly ? ' (showing only these)' : ''}.
+              </span>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <button
+                  onClick={() => setFlaggedFilter(!flaggedOnly)}
+                  className="text-xs font-semibold text-amber-700 dark:text-amber-400 bg-amber-100/60 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 px-3 py-1.5 rounded-lg cursor-pointer transition-colors hover:bg-amber-200 dark:hover:bg-amber-900/40"
+                >
+                  {flaggedOnly ? 'Show all' : `View ${flaggedResults.length} flagged`}
+                </button>
+                {can_run_extractions && retryExtractionId && (
+                  <button
+                    onClick={handleRetryFlagged}
+                    className="text-xs font-semibold text-white bg-amber-600 hover:bg-amber-700 dark:bg-amber-500 dark:hover:bg-amber-600 px-3 py-1.5 rounded-lg cursor-pointer transition-colors"
+                  >
+                    Retry all flagged
+                  </button>
+                )}
+              </div>
             </div>
           )}
 
@@ -710,6 +897,19 @@ function ResultsContent() {
                       View details
                     </button>
                   )}
+                  {/* Model tag — which LLM produced these AI results (one per run) */}
+                  {sourceTab === 'ai' && (() => {
+                    const models = [...new Set(filteredResults.map(r => r.model_name).filter(Boolean) as string[])];
+                    if (models.length === 0) return null;
+                    if (models.length === 1) {
+                      return <Badge className={cn('border-0 font-semibold tracking-tight shadow-sm', modelTagTheme(models[0]))}>{formatModelName(models[0])}</Badge>;
+                    }
+                    return (
+                      <Badge variant="secondary" title={models.map(formatModelName).join(', ')}>
+                        Mixed ({models.length} models)
+                      </Badge>
+                    );
+                  })()}
                 </div>
               )}
             </div>
@@ -734,6 +934,37 @@ function ResultsContent() {
               </div>
             )}
           </div>
+
+          {/* Per-model toggle — latest result per paper, by model (All runs view) */}
+          {isFormView && modelFamiliesInForm.length > 1 && (
+            <div className="flex items-center gap-7 flex-wrap py-1">
+              <span className="text-[11px] text-gray-400 dark:text-zinc-500">
+                {effectiveModel
+                  ? `Showing latest ${FAMILY_LABEL[effectiveModel]} results`
+                  : 'Latest per paper by model'}
+              </span>
+              {modelFamiliesInForm.map((fam, i) => (
+                <div key={fam} className={cn('model-dia-float', i % 3 === 0 ? 'd1' : i % 3 === 1 ? 'd2' : 'd3')}>
+                  <ModelDiamond
+                    label={FAMILY_LABEL[fam]}
+                    variant={FAMILY_CLASS[fam]}
+                    active={effectiveModel === fam}
+                    onClick={() => setSelectedModel((prev) => (prev === fam ? null : fam))}
+                    title={`Show each paper's latest ${FAMILY_LABEL[fam]} result`}
+                  />
+                </div>
+              ))}
+              {effectiveModel && (
+                <button
+                  type="button"
+                  onClick={() => setSelectedModel(null)}
+                  className="text-[11px] font-medium text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200 underline-offset-2 hover:underline transition-colors"
+                >
+                  ↩ Clear filter
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Results area */}
           {loading ? (

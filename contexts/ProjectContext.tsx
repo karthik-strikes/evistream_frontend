@@ -182,6 +182,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
           can_upload_docs: false,
           can_create_forms: false,
           can_run_extractions: false,
+          can_run_manual_extractions: false,
           can_view_results: true,
           can_adjudicate: false,
           can_qa_review: false,

@@ -5,14 +5,20 @@ import { ChevronDown, ChevronRight, Save, RotateCcw, ArrowRight } from 'lucide-r
 import { cn } from '@/lib/utils';
 import type { Form, FormField } from '@/types/api';
 import { FieldRenderer } from './FieldRenderer';
+import { TableField } from './TableField';
 import { modKey } from '../_hooks/useExtractionKeyboard';
+import { isTableField, flattenScalarFields, type AiTablePrefill } from '../_lib/fieldKinds';
 
 interface ExtractionFormProps {
   form: Form;
   formData: Record<string, any>;
   aiPrefilledKeys: Set<string>;
+  aiPrefilledTablePrefill: Record<string, AiTablePrefill>;
+  tableErrors: Record<string, Record<number, Set<string>>>;
   onFieldChange: (fieldName: string, value: any) => void;
+  onTableChange: (parentName: string, rows: Array<Record<string, string>>) => void;
   onSave: () => void;
+  onSavePartial: () => void;
   onSaveAndNext: () => void;
   onReset: () => void;
   saving: boolean;
@@ -23,8 +29,12 @@ export function ExtractionForm({
   form,
   formData,
   aiPrefilledKeys,
+  aiPrefilledTablePrefill,
+  tableErrors,
   onFieldChange,
+  onTableChange,
   onSave,
+  onSavePartial,
   onSaveAndNext,
   onReset,
   saving,
@@ -32,12 +42,19 @@ export function ExtractionForm({
 }: ExtractionFormProps) {
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
 
-  const allFields = useMemo(() => flattenFields(form.fields), [form.fields]);
-  const filled = allFields.filter(f => formData[f.field_name]?.toString().trim()).length;
-  const total = allFields.length;
+  const scalarFields = useMemo(() => flattenScalarFields(form.fields), [form.fields]);
+  const tableFieldsList = useMemo(() => form.fields.filter(isTableField), [form.fields]);
+
+  const filledScalars = scalarFields.filter(f => formData[f.field_name]?.toString().trim()).length;
+  const completedTables = tableFieldsList.filter(f => {
+    const rows = formData[f.field_name];
+    return Array.isArray(rows) && rows.length > 0;
+  }).length;
+  const filled = filledScalars + completedTables;
+  const total = scalarFields.length + tableFieldsList.length;
   const pct = total > 0 ? Math.round((filled / total) * 100) : 0;
 
-  const emptyFields = allFields.filter(f => !formData[f.field_name]?.toString().trim());
+  const emptyFields = scalarFields.filter(f => !formData[f.field_name]?.toString().trim());
   const displayEmpty = emptyFields.slice(0, 3);
   const moreCount = emptyFields.length - displayEmpty.length;
 
@@ -55,7 +72,6 @@ export function ExtractionForm({
     document.getElementById(`field-${fieldName}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   };
 
-  // Progress bar color
   const barColor = pct >= 100 ? 'bg-green-500 dark:bg-green-400' : pct >= 50 ? 'bg-amber-500 dark:bg-amber-400' : 'bg-gray-400 dark:bg-zinc-500';
   const mk = modKey();
 
@@ -110,6 +126,20 @@ export function ExtractionForm({
       <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5 min-h-0">
         {hasSubforms ? (
           form.fields.map((field) => {
+            if (isTableField(field)) {
+              const rows = Array.isArray(formData[field.field_name]) ? formData[field.field_name] : [];
+              return (
+                <TableField
+                  key={field.field_name}
+                  field={field}
+                  rows={rows}
+                  onChange={(rows) => onTableChange(field.field_name, rows)}
+                  aiPrefill={aiPrefilledTablePrefill[field.field_name]}
+                  errors={tableErrors[field.field_name]}
+                  saving={saving}
+                />
+              );
+            }
             if (field.subform_fields && field.subform_fields.length > 0) {
               const isCollapsed = collapsedSections.has(field.field_name);
               return (
@@ -137,8 +167,11 @@ export function ExtractionForm({
                 </div>
               );
             }
-            // Top-level field without subform
-            return renderFieldWithCounter(field);
+            return (
+              <div key={field.field_name} className="rounded-xl border border-gray-100 dark:border-[#1f1f1f] px-4 py-3 bg-white dark:bg-[#111111]">
+                {renderFieldWithCounter(field)}
+              </div>
+            );
           })
         ) : (
           form.fields.map((field) => renderFieldWithCounter(field))
@@ -168,7 +201,15 @@ export function ExtractionForm({
           </button>
         )}
         <button
-          onClick={onReset}
+          onClick={onSavePartial}
+          disabled={saving}
+          title="Save in-progress work to server (skips validation, won't mark as complete)"
+          className="inline-flex items-center justify-center gap-1.5 text-xs font-medium text-gray-600 dark:text-zinc-400 bg-transparent hover:bg-gray-100 dark:hover:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-3 py-2.5 cursor-pointer transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          Save partial
+        </button>
+        <button
+          onClick={() => { if (window.confirm('Clear all fields? This cannot be undone.')) onReset(); }}
           title="Reset fields"
           className="px-3 text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-2.5 cursor-pointer hover:bg-gray-200 dark:hover:bg-[#222] transition-colors"
         >
@@ -177,20 +218,4 @@ export function ExtractionForm({
       </div>
     </div>
   );
-}
-
-/** Flatten form fields, expanding subform_fields with composite keys to avoid collisions */
-function flattenFields(fields: FormField[]): FormField[] {
-  const result: FormField[] = [];
-  for (const f of fields) {
-    if (f.subform_fields && f.subform_fields.length > 0) {
-      result.push(...f.subform_fields.map(sub => ({
-        ...sub,
-        field_name: `${f.field_name}_${sub.field_name}`,
-      })));
-    } else {
-      result.push(f);
-    }
-  }
-  return result;
 }

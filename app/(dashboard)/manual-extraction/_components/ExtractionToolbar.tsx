@@ -14,7 +14,14 @@ interface ExtractionToolbarProps {
   queueOpen: boolean;
   onToggleQueue: () => void;
   showAiToggle: boolean;
+  reviewerRole?: string | null;
 }
+
+const ROLE_PILL: Record<string, { label: string; cls: string }> = {
+  reviewer_1:  { label: 'R1',  cls: 'text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-400/15' },
+  reviewer_2:  { label: 'R2',  cls: 'text-emerald-600 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-400/15' },
+  adjudicator: { label: 'Adjudicator', cls: 'text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15' },
+};
 
 export function ExtractionToolbar({
   formName,
@@ -25,7 +32,9 @@ export function ExtractionToolbar({
   queueOpen,
   onToggleQueue,
   showAiToggle,
+  reviewerRole,
 }: ExtractionToolbarProps) {
+  const rolePill = reviewerRole ? ROLE_PILL[reviewerRole] : null;
   return (
     <div className="flex items-center gap-2 mb-3 flex-wrap">
       <button
@@ -34,6 +43,15 @@ export function ExtractionToolbar({
       >
         <ArrowLeft className="w-3.5 h-3.5" /> Back
       </button>
+
+      {rolePill && (
+        <>
+          <span className="text-gray-300 dark:text-zinc-700 text-xs">·</span>
+          <span className={cn('inline-flex items-center text-[10px] font-semibold rounded-full px-2 py-0.5', rolePill.cls)} title={`Extracting as ${rolePill.label}`}>
+            {rolePill.label}
+          </span>
+        </>
+      )}
 
       <span className="text-gray-300 dark:text-zinc-700 text-xs">·</span>
       <span className="text-xs font-medium text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] px-2 py-0.5 rounded-md">{formName}</span>

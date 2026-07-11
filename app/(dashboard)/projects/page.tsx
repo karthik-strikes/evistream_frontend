@@ -27,6 +27,34 @@ const relativeTime = (date: string) => {
   return `${Math.floor(months / 12)}y ago`;
 };
 
+// Step 2 — deterministic color per project name (cool engineering tones + warm accents)
+const PROJECT_PALETTE = [
+  '#3b82f6', // blue
+  '#0ea5e9', // sky
+  '#06b6d4', // cyan
+  '#14b8a6', // teal
+  '#10b981', // emerald
+  '#6366f1', // indigo
+  '#8b5cf6', // violet
+  '#f59e0b', // amber
+  '#ec4899', // pink
+  '#f43f5e', // rose
+] as const;
+
+function projectColor(name: string): string {
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+  return PROJECT_PALETTE[Math.abs(h) % PROJECT_PALETTE.length];
+}
+
+// Step 5 — heuristic status from available counts
+type ProjectStatus = 'Empty' | 'Setup' | 'Active';
+function projectStatus(forms: number, docs: number): ProjectStatus {
+  if (forms === 0 && docs === 0) return 'Empty';
+  if (forms === 0 || docs === 0) return 'Setup';
+  return 'Active';
+}
+
 export default function ProjectsPage() {
   const { toast } = useToast();
   const router = useRouter();
@@ -42,7 +70,6 @@ export default function ProjectsPage() {
   const menuRef = useRef<HTMLDivElement>(null);
   const [membersModalProject, setMembersModalProject] = useState<{ id: string; name: string } | null>(null);
 
-  // Close menu on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
@@ -53,26 +80,22 @@ export default function ProjectsPage() {
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // Fetch lightweight stats (counts only) for each project instead of all forms+documents
-  const { data: projectStats = {}, isLoading: dataLoading } = useQuery({
+  // The dashboard /stats endpoint already returns counts for ALL of the user's
+  // projects in `projects_overview` (batched server-side). One call covers every card.
+  const { data: projectStats = {} } = useQuery({
     queryKey: ['projects-stats', contextProjects?.map((p: any) => p.id).join(',')],
     queryFn: async () => {
       if (!contextProjects?.length) return {};
-      const results = await Promise.all(
-        contextProjects.map(async (proj: any) => {
-          try {
-            const stats = await dashboardService.getStats(proj.id);
-            return { id: proj.id, forms: stats.stats.forms, documents: stats.stats.documents };
-          } catch {
-            return { id: proj.id, forms: 0, documents: 0 };
-          }
-        })
+      const stats = await dashboardService.getStats(contextProjects[0].id);
+      return Object.fromEntries(
+        (stats.projects_overview || []).map((p) => [
+          p.id,
+          { id: p.id, forms: p.form_count, documents: p.document_count },
+        ])
       );
-      return Object.fromEntries(results.map((r) => [r.id, r]));
     },
     enabled: !!contextProjects?.length,
   });
-
 
   const handleCreate = async () => {
     if (!createData.name.trim()) return;
@@ -198,7 +221,6 @@ export default function ProjectsPage() {
           </div>
         )}
 
-
         {/* -- Empty state -- */}
         {projects.length === 0 && (
           <div className="text-center py-20 animate-dashboard-fadeIn">
@@ -224,7 +246,7 @@ export default function ProjectsPage() {
           </div>
         )}
 
-        {/* -- Project list (full-width stacked cards) -- */}
+        {/* -- Project grid -- */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4" style={{ animation: 'dashboard-slideUp 0.35s ease' }}>
           {filteredProjects.map((proj: any, i: number) => {
             const isActive = proj.id === contextProject?.id;
@@ -232,22 +254,83 @@ export default function ProjectsPage() {
             const stats = projectStats[proj.id];
             const totalForms = stats?.forms ?? 0;
             const totalDocs = stats?.documents ?? 0;
+            const color = projectColor(proj.name);
+            const status = projectStatus(totalForms, totalDocs);
 
             return (
               <div
                 key={proj.id}
                 className={cn(
-                  "relative rounded-xl cursor-pointer transition-all duration-150 hover:shadow-card-hover hover:-translate-y-px",
+                  // Step 6: add `group` so children can use group-hover
+                  "group relative rounded-xl cursor-pointer transition-all duration-150 hover:shadow-card-hover hover:-translate-y-px",
+                  // Step 6: quiet active state — just a colored left border, no loud gradient
                   isActive
-                    ? "border border-amber-200 dark:border-[#1f1f1f] border-l-[4px] border-l-amber-400 dark:border-l-amber-400 bg-gradient-to-r from-amber-50 to-white dark:from-amber-400/10 dark:to-[#111111]"
+                    ? "border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111]"
                     : "border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111]"
                 )}
                 onClick={() => { if (!isEditing) router.push(`/projects/${proj.id}`); }}
-                style={{ animation: `dashboard-scaleIn 0.3s cubic-bezier(0.2,0.8,0.2,1) ${0.03 + i * 0.04}s both` }}
+                style={{
+                  animation: `dashboard-scaleIn 0.3s cubic-bezier(0.2,0.8,0.2,1) ${0.03 + i * 0.04}s both`,
+                  borderLeft: `${isActive ? 4 : 3}px solid ${color}`,
+                  boxShadow: isActive ? `0 0 0 1px ${color}26` : undefined,
+                }}
               >
+                {/* Hybrid: static asymmetric glows (anchor) + barely-perceptible slow rotation (flow) + hover scan (futuristic reward) */}
+                {!isEditing && (
+                  <div className="absolute inset-0 overflow-hidden rounded-xl pointer-events-none">
+                    {/* Layer 1 — undertone: very faint slow-rotating conic, gives "alive" feeling without distraction */}
+                    <div
+                      className={cn(
+                        "absolute animate-spin transition-opacity duration-700 ease-out",
+                        isActive ? "opacity-25" : "opacity-[0.08] group-hover:opacity-25"
+                      )}
+                      style={{
+                        top: '-50%',
+                        left: '-50%',
+                        right: '-50%',
+                        bottom: '-50%',
+                        animationDuration: '32s',
+                        animationTimingFunction: 'linear',
+                        background: `conic-gradient(from 0deg at 60% 40%, transparent 0deg, ${color} 60deg, transparent 130deg, ${color} 230deg, transparent 310deg)`,
+                        filter: 'blur(50px)',
+                        willChange: 'transform',
+                      }}
+                    />
+                    {/* Layer 2 — top-right large glow (primary anchor) */}
+                    <div
+                      className={cn(
+                        "absolute top-0 right-0 w-44 h-44 rounded-full transition-opacity duration-500 ease-out",
+                        isActive ? "opacity-40" : "opacity-[0.14] group-hover:opacity-40"
+                      )}
+                      style={{
+                        background: `radial-gradient(circle, ${color} 0%, transparent 65%)`,
+                        transform: 'translate(35%, -40%)',
+                      }}
+                    />
+                    {/* Layer 3 — bottom-left small glow (counter-balance) */}
+                    <div
+                      className={cn(
+                        "absolute bottom-0 left-0 w-32 h-32 rounded-full transition-opacity duration-700 ease-out",
+                        isActive ? "opacity-25" : "opacity-[0.08] group-hover:opacity-25"
+                      )}
+                      style={{
+                        background: `radial-gradient(circle, ${color} 0%, transparent 70%)`,
+                        transform: 'translate(-30%, 35%)',
+                      }}
+                    />
+                    {/* Layer 4 — hover-only diagonal scan line (futuristic interaction reward) */}
+                    <div
+                      className="absolute inset-y-0 -left-1/3 w-1/3 opacity-0 group-hover:opacity-100 transition-all duration-[1100ms] ease-out group-hover:translate-x-[450%]"
+                      style={{
+                        background: `linear-gradient(105deg, transparent 30%, ${color}40 50%, transparent 70%)`,
+                        filter: 'blur(8px)',
+                      }}
+                    />
+                  </div>
+                )}
                 {isEditing ? (
                   /* -- Inline edit form -- */
-                  <div onClick={(e) => e.stopPropagation()} className="py-5 px-[22px] flex flex-col gap-2">
+                  <div onClick={(e) => e.stopPropagation()} className="relative py-5 px-[22px] flex flex-col gap-2">
                     <input autoFocus type="text" value={editData.name}
                       onChange={(e) => setEditData({ ...editData, name: e.target.value })}
                       onKeyDown={(e) => { if (e.key === 'Enter') handleUpdate(proj.id); if (e.key === 'Escape') setEditingId(null); }}
@@ -267,18 +350,32 @@ export default function ProjectsPage() {
                   </div>
                 ) : (
                   /* -- Card content -- */
-                  <div className="py-5 px-[22px]">
-                    {/* Top row: name + active badge + menu */}
+                  <div className="relative py-5 px-[22px]">
+
+                    {/* Top row: initial badge + name + menu */}
                     <div className="flex items-start justify-between mb-1">
-                      <div className="flex items-center gap-2 min-w-0 pr-2">
-                        <span className="text-sm font-semibold text-gray-900 dark:text-white truncate">{proj.name}</span>
-                        {isActive && (
-                          <span className="shrink-0 text-[10px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15 px-1.5 py-0.5 rounded-full">
-                            Active
-                          </span>
-                        )}
+                      <div className="flex items-center gap-2.5 min-w-0 pr-2">
+                        <span
+                          className="shrink-0 w-7 h-7 rounded-lg flex items-center justify-center text-[13px] font-semibold transition-all"
+                          style={isActive
+                            ? { backgroundColor: color, color: '#fff', boxShadow: `0 2px 8px -2px ${color}80` }
+                            : { backgroundColor: `${color}1f`, color }
+                          }
+                        >
+                          {proj.name.trim().charAt(0).toUpperCase() || '?'}
+                        </span>
+                        <span className={cn(
+                          "text-sm truncate text-gray-900 dark:text-white",
+                          isActive ? "font-semibold" : "font-medium"
+                        )}>{proj.name}</span>
                       </div>
-                      <div className="relative shrink-0" ref={menuOpenId === proj.id ? menuRef : undefined} onClick={(e) => e.stopPropagation()}>
+
+                      {/* Step 6: menu button hidden until hover */}
+                      <div
+                        className="relative shrink-0 opacity-0 group-hover:opacity-100 transition-opacity duration-150"
+                        ref={menuOpenId === proj.id ? menuRef : undefined}
+                        onClick={(e) => e.stopPropagation()}
+                      >
                         <button
                           onClick={() => setMenuOpenId(menuOpenId === proj.id ? null : proj.id)}
                           className="font-inherit text-base text-gray-400 bg-transparent border border-transparent rounded-md px-1.5 py-0.5 cursor-pointer leading-none hover:bg-gray-100 dark:hover:bg-[#1a1a1a] hover:border-gray-200"
@@ -313,32 +410,52 @@ export default function ProjectsPage() {
                       </div>
                     </div>
 
-                    {/* Description */}
-                    <div className="text-xs text-gray-400 dark:text-gray-500 truncate mb-4">
-                      {proj.description || 'No description'}
+                    {/* Recency stamp */}
+                    <div className="text-[11px] text-gray-400 dark:text-gray-600 mb-2 pl-[38px]">
+                      {relativeTime(proj.updated_at || proj.created_at)}
                     </div>
 
-                    {/* Bottom row: stats + set active */}
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs text-gray-400 dark:text-gray-500">
-                        {totalForms} {totalForms === 1 ? 'form' : 'forms'} · {totalDocs} {totalDocs === 1 ? 'doc' : 'docs'}
-                      </span>
+                    {/* Description only if present */}
+                    {proj.description && (
+                      <div className="text-xs text-gray-500 dark:text-gray-400 truncate mb-3 pl-[38px]">
+                        {proj.description}
+                      </div>
+                    )}
+
+                    {/* Bottom row: status pill (only when actionable) + counts + set active */}
+                    <div className="flex items-center justify-between mt-3 pl-[38px]">
+                      <div className="flex items-center gap-2">
+                        {/* Status pill — only shown when project needs setup */}
+                        {status === 'Setup' && (
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full text-blue-600 bg-blue-50 dark:text-blue-400 dark:bg-blue-400/10">
+                            Setup
+                          </span>
+                        )}
+
+                        {/* Counts — always visible */}
+                        <span className="text-[11px] text-gray-400 dark:text-gray-600">
+                          {totalForms} {totalForms === 1 ? 'form' : 'forms'} · {totalDocs} {totalDocs === 1 ? 'doc' : 'docs'}
+                        </span>
+                      </div>
+
+                      {/* Step 6: set active hidden until hover */}
                       {!isActive && (
                         <button
                           onClick={(e) => { e.stopPropagation(); setSelectedProject(proj); }}
-                          className="font-inherit text-xs font-semibold text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 cursor-pointer bg-transparent border-none transition-colors"
+                          className="font-inherit text-xs font-semibold text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 cursor-pointer bg-transparent border-none transition-colors opacity-0 group-hover:opacity-100 duration-150"
                         >
                           Set active
                         </button>
                       )}
                     </div>
+
                   </div>
                 )}
               </div>
             );
           })}
 
-          {/* New project card */}
+          {/* New project tile */}
           <button
             onClick={() => setShowCreate(true)}
             className="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 dark:border-[#1f1f1f]/60 p-4 cursor-pointer hover:border-gray-400 dark:hover:border-gray-500 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]/40 transition-all duration-150 min-h-[110px] bg-transparent"

@@ -6,6 +6,8 @@ export interface GetResultsOptions {
   formId?: string;
   documentId?: string;
   extractionId?: string;
+  limit?: number;
+  offset?: number;
 }
 
 export const resultsService = {
@@ -15,11 +17,27 @@ export const resultsService = {
     if (options.formId) params.append('form_id', options.formId);
     if (options.documentId) params.append('document_id', options.documentId);
     if (options.extractionId) params.append('extraction_id', options.extractionId);
+    if (options.limit != null) params.append('limit', String(options.limit));
+    if (options.offset != null) params.append('offset', String(options.offset));
 
     const queryString = params.toString();
     const url = queryString ? `/api/v1/results?${queryString}` : '/api/v1/results';
 
     return apiClient.get<ExtractionResult[]>(url);
+  },
+
+  // Fetch ALL results for a form across every run/model, paginating past the
+  // backend's per-request cap (le=500). The "all runs" Results view needs the
+  // full set so per-model toggles and latest-per-paper dedup are correct.
+  async getAllForForm(projectId: string, formId: string): Promise<ExtractionResult[]> {
+    const pageSize = 500; // backend hard cap (le=500)
+    const all: ExtractionResult[] = [];
+    for (let offset = 0; ; offset += pageSize) {
+      const page = await this.getAll({ projectId, formId, limit: pageSize, offset });
+      all.push(...page);
+      if (page.length < pageSize) break;
+    }
+    return all;
   },
 
   async getById(id: string): Promise<ExtractionResult> {
@@ -55,6 +73,8 @@ export const resultsService = {
     form_id: string;
     extracted_data: Record<string, any>;
     extraction_type: 'manual' | 'consensus';
+    reviewer_role?: string | null;
+    is_partial?: boolean;
   }): Promise<ExtractionResult> {
     return apiClient.post<ExtractionResult>('/api/v1/results/manual', data);
   },

@@ -1,5 +1,5 @@
 import { apiClient } from '@/lib/api';
-import type { User, AdminUserUpdate, AdminStats, AdminUsersResponse, PermissionAuditLog } from '@/types/api';
+import type { User, AdminUserUpdate, AdminStats, AdminUsersResponse, PermissionAuditLog, AdminAuditLogResponse } from '@/types/api';
 
 export const adminService = {
   async listUsers(page = 1, pageSize = 20): Promise<AdminUsersResponse> {
@@ -30,5 +30,15 @@ export const adminService = {
 
   async getPermissionAuditLog(projectId: string, limit = 50): Promise<PermissionAuditLog[]> {
     return apiClient.get<PermissionAuditLog[]>(`/api/v1/admin/projects/${projectId}/audit-log?limit=${limit}`);
+  },
+
+  async listAuditLog(page = 1, pageSize = 20): Promise<AdminAuditLogResponse> {
+    return apiClient.get<AdminAuditLogResponse>(
+      `/api/v1/admin/audit-log?page=${page}&page_size=${pageSize}`
+    );
+  },
+
+  async createUser(email: string, fullName: string, role: 'admin' | 'user', password: string): Promise<User> {
+    return apiClient.post<User>('/api/v1/admin/users', { email, full_name: fullName || undefined, role, password });
   },
 };

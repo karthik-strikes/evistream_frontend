@@ -1154,7 +1154,7 @@ footer { border-top: 1px solid var(--zinc-200); padding: 48px 24px 20px; backgro
             </div>
             <h3 className="card-title">Consensus Review</h3>
             <p className="card-body">Compare AI, R1, and R2 side-by-side. Resolve conflicts with majority-vote suggestions.</p>
-            <span className="card-tag">adjudication · consensus</span>
+            <span className="card-tag">consensus review</span>
           </div>
           <div className="grid-card reveal">
             <span className="card-num">06</span>

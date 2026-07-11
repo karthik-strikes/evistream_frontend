@@ -1,12 +1,14 @@
 'use client';
 
 import * as React from 'react';
+import { createPortal } from 'react-dom';
 import { cn } from '@/lib/utils';
 
 interface TooltipProps {
   content: React.ReactNode;
   children: React.ReactNode;
   side?: 'top' | 'right' | 'bottom' | 'left';
+  align?: 'start' | 'center' | 'end';
   className?: string;
   delay?: number;
 }
@@ -15,11 +17,76 @@ export function Tooltip({
   content,
   children,
   side = 'top',
+  align = 'center',
   className,
   delay = 200,
 }: TooltipProps) {
   const [isVisible, setIsVisible] = React.useState(false);
+  const [coords, setCoords] = React.useState<{ top: number; left: number } | null>(null);
+  const triggerRef = React.useRef<HTMLDivElement>(null);
+  const tooltipRef = React.useRef<HTMLDivElement>(null);
   const timeoutRef = React.useRef<NodeJS.Timeout>();
+  const [mounted, setMounted] = React.useState(false);
+
+  React.useEffect(() => {
+    setMounted(true);
+  }, []);
+
+  const computePosition = React.useCallback(() => {
+    const trigger = triggerRef.current;
+    const tooltip = tooltipRef.current;
+    if (!trigger || !tooltip) return;
+
+    const t = trigger.getBoundingClientRect();
+    const w = tooltip.offsetWidth;
+    const h = tooltip.offsetHeight;
+    const gap = 8;
+    const margin = 8;
+
+    let top = 0;
+    let left = 0;
+
+    if (side === 'top') {
+      top = t.top - h - gap;
+    } else if (side === 'bottom') {
+      top = t.bottom + gap;
+    } else if (side === 'left') {
+      left = t.left - w - gap;
+    } else if (side === 'right') {
+      left = t.right + gap;
+    }
+
+    if (side === 'top' || side === 'bottom') {
+      if (align === 'start') left = t.left;
+      else if (align === 'end') left = t.right - w;
+      else left = t.left + t.width / 2 - w / 2;
+    } else {
+      if (align === 'start') top = t.top;
+      else if (align === 'end') top = t.bottom - h;
+      else top = t.top + t.height / 2 - h / 2;
+    }
+
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    if (left + w > vw - margin) left = vw - w - margin;
+    if (left < margin) left = margin;
+    if (top + h > vh - margin) top = vh - h - margin;
+    if (top < margin) top = margin;
+
+    setCoords({ top, left });
+  }, [side, align]);
+
+  React.useLayoutEffect(() => {
+    if (!isVisible) return;
+    computePosition();
+    const handler = () => computePosition();
+    window.addEventListener('scroll', handler, true);
+    window.addEventListener('resize', handler);
+    return () => {
+      window.removeEventListener('scroll', handler, true);
+      window.removeEventListener('resize', handler);
+    };
+  }, [isVisible, computePosition]);
 
   const showTooltip = () => {
     timeoutRef.current = setTimeout(() => {
@@ -32,6 +99,7 @@ export function Tooltip({
       clearTimeout(timeoutRef.current);
     }
     setIsVisible(false);
+    setCoords(null);
   };
 
   React.useEffect(() => {
@@ -42,44 +110,32 @@ export function Tooltip({
     };
   }, []);
 
-  const sideClasses = {
-    top: 'bottom-full left-1/2 -translate-x-1/2 mb-2',
-    bottom: 'top-full left-1/2 -translate-x-1/2 mt-2',
-    left: 'right-full top-1/2 -translate-y-1/2 mr-2',
-    right: 'left-full top-1/2 -translate-y-1/2 ml-2',
-  };
-
-  const arrowClasses = {
-    top: 'top-full left-1/2 -translate-x-1/2 border-l-transparent border-r-transparent border-b-transparent border-t-gray-900 dark:border-t-zinc-100',
-    bottom: 'bottom-full left-1/2 -translate-x-1/2 border-l-transparent border-r-transparent border-t-transparent border-b-gray-900 dark:border-b-zinc-100',
-    left: 'left-full top-1/2 -translate-y-1/2 border-t-transparent border-b-transparent border-r-transparent border-l-gray-900 dark:border-l-zinc-100',
-    right: 'right-full top-1/2 -translate-y-1/2 border-t-transparent border-b-transparent border-l-transparent border-r-gray-900 dark:border-r-zinc-100',
-  };
-
   return (
     <div
+      ref={triggerRef}
       className="relative inline-block"
       onMouseEnter={showTooltip}
       onMouseLeave={hideTooltip}
     >
       {children}
-      {isVisible && (
+      {mounted && isVisible && createPortal(
         <div
+          ref={tooltipRef}
+          style={{
+            position: 'fixed',
+            top: coords?.top ?? -9999,
+            left: coords?.left ?? -9999,
+            visibility: coords ? 'visible' : 'hidden',
+          }}
           className={cn(
-            'absolute z-50 px-3 py-2 text-sm text-white bg-gray-900 dark:bg-zinc-100 dark:text-gray-900 rounded shadow-lg whitespace-nowrap pointer-events-none',
-            sideClasses[side],
+            'z-[100] px-3 py-2 text-sm text-white bg-gray-900 dark:bg-zinc-100 dark:text-gray-900 rounded shadow-lg whitespace-nowrap pointer-events-none',
             className
           )}
           role="tooltip"
         >
           {content}
-          <div
-            className={cn(
-              'absolute w-0 h-0 border-4',
-              arrowClasses[side]
-            )}
-          />
-        </div>
+        </div>,
+        document.body
       )}
     </div>
   );
@@ -91,6 +147,7 @@ export function TooltipSimple({
   children,
   ...props
 }: Omit<TooltipProps, 'content'> & { text: string }) {
+  if (!text) return <>{children}</>;
   return (
     <Tooltip content={text} {...props}>
       {children}

@@ -1,15 +1,10 @@
 'use client';
 
-import { useState, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import { useForm, Controller } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { Megaphone, CheckCircle2 } from 'lucide-react';
-import {
-  Dialog,
-  DialogContent,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { ChevronLeft, X, CheckCircle2 } from 'lucide-react';
 import {
   Select,
   SelectContent,
@@ -43,7 +38,7 @@ const PRIORITIES: { value: IssuePriority; label: string; dot: string }[] = [
   { value: 'critical', label: 'Critical', dot: 'bg-red-500' },
 ];
 
-// ─── Shared input / textarea classes (matches site's input.tsx & textarea.tsx) ─
+// ─── Shared input / textarea classes ─────────────────────────────────────────
 
 const inputCls = [
   'w-full rounded border border-border bg-white px-3 py-2 text-sm transition-colors',
@@ -76,10 +71,11 @@ function SuccessState() {
   );
 }
 
-// ─── Dialog Form ──────────────────────────────────────────────────────────────
+// ─── IssueReporter ────────────────────────────────────────────────────────────
 
-function IssueReporterDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function IssueReporter() {
   const { currentUser } = useAuth();
+  const [open, setOpen] = useState(false);
   const [success, setSuccess] = useState(false);
 
   const {
@@ -96,6 +92,21 @@ function IssueReporterDialog({ open, onClose }: { open: boolean; onClose: () => 
 
   const category = watch('category');
 
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !isSubmitting) close();
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [open, isSubmitting]);
+
+  function close() {
+    reset();
+    setSuccess(false);
+    setOpen(false);
+  }
+
   async function onSubmit(values: FormValues) {
     await issuesService.create({
       ...values,
@@ -103,46 +114,89 @@ function IssueReporterDialog({ open, onClose }: { open: boolean; onClose: () => 
       browser_info: typeof window !== 'undefined' ? navigator.userAgent : undefined,
     });
     setSuccess(true);
-    setTimeout(() => {
-      setSuccess(false);
-      reset();
-      onClose();
-    }, 2200);
-  }
-
-  function handleOpenChange(isOpen: boolean) {
-    if (!isOpen && !isSubmitting) {
-      reset();
-      setSuccess(false);
-      onClose();
-    }
+    setTimeout(() => close(), 2200);
   }
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-[460px] p-0 overflow-hidden gap-0 select-text">
+    <>
+      {/* Edge handle */}
+      <div className="fixed right-0 top-[62%] -translate-y-1/2 z-[45]">
+        <button
+          onClick={() => setOpen(true)}
+          aria-label="Report an issue"
+          className={[
+            'flex items-center justify-center',
+            'h-14 w-7',
+            'rounded-l-xl rounded-r-none',
+            'bg-zinc-200/70 dark:bg-zinc-700/60 backdrop-blur-sm',
+            'shadow-lg',
+            'transition-transform duration-200 hover:scale-x-110 hover:bg-zinc-300/80 dark:hover:bg-zinc-600/70',
+            'focus:outline-none focus-visible:ring-2 focus-visible:ring-black dark:focus-visible:ring-white focus-visible:ring-offset-2',
+          ].join(' ')}
+        >
+          <ChevronLeft
+            strokeWidth={2.5}
+            className={[
+              'h-6 w-6 text-zinc-600 dark:text-zinc-300',
+              'transition-transform duration-300',
+              open ? 'rotate-180' : '',
+            ].join(' ')}
+          />
+        </button>
+      </div>
+
+      {/* Backdrop */}
+      {open && (
+        <div
+          className="fixed inset-0 bg-black/20 z-40 transition-opacity"
+          onClick={close}
+        />
+      )}
+
+      {/* Slide-out panel */}
+      <div
+        className={[
+          'fixed top-0 right-0 h-full w-full sm:w-[460px]',
+          'bg-white dark:bg-[#111111] shadow-2xl z-50',
+          'transition-transform duration-300 ease-in-out',
+          'flex flex-col overflow-hidden',
+          open ? 'translate-x-0' : 'translate-x-full',
+        ].join(' ')}
+      >
         {success ? (
           <SuccessState />
         ) : (
           <>
             {/* Header */}
-            <div className="px-6 pt-5 pb-4 border-b border-gray-100 dark:border-[#1f1f1f]">
-              <DialogTitle className="text-sm font-semibold text-gray-900 dark:text-[#e8e8e8] leading-none">
-                Report an Issue
-              </DialogTitle>
-              {currentUser?.email && (
-                <p className="text-xs text-gray-400 dark:text-[#666] mt-1.5 flex items-center gap-1.5">
-                  <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
-                  Reporting as{' '}
-                  <span className="font-medium text-gray-600 dark:text-[#aaa]">
-                    {currentUser.email}
-                  </span>
-                </p>
-              )}
+            <div className="flex items-start justify-between px-6 pt-5 pb-4 border-b border-gray-100 dark:border-[#1f1f1f] flex-shrink-0">
+              <div>
+                <h2 className="text-sm font-semibold text-gray-900 dark:text-[#e8e8e8] leading-none">
+                  Report an Issue
+                </h2>
+                {currentUser?.email && (
+                  <p className="text-xs text-gray-400 dark:text-[#666] mt-1.5 flex items-center gap-1.5">
+                    <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 flex-shrink-0" />
+                    Reporting as{' '}
+                    <span className="font-medium text-gray-600 dark:text-[#aaa]">
+                      {currentUser.email}
+                    </span>
+                  </p>
+                )}
+              </div>
+              <button
+                onClick={close}
+                className="p-1.5 hover:bg-gray-100 dark:hover:bg-white/5 rounded-lg transition-colors -mt-0.5"
+                aria-label="Close"
+              >
+                <X className="h-4 w-4 text-gray-500 dark:text-zinc-400" />
+              </button>
             </div>
 
             {/* Form */}
-            <form onSubmit={handleSubmit(onSubmit)} className="px-6 py-5 space-y-4">
+            <form
+              onSubmit={handleSubmit(onSubmit)}
+              className="px-6 py-5 space-y-4 overflow-y-auto flex-1"
+            >
               {/* Title */}
               <div>
                 <label className={labelCls}>
@@ -257,91 +311,7 @@ function IssueReporterDialog({ open, onClose }: { open: boolean; onClose: () => 
             </form>
           </>
         )}
-      </DialogContent>
-    </Dialog>
-  );
-}
-
-// ─── FAB ─────────────────────────────────────────────────────────────────────
-
-export function IssueReporter() {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState({ x: 0, y: 0 });
-  const [dragging, setDragging] = useState(false);
-  const [hasMoved, setHasMoved] = useState(false);
-  const dragRef = useRef<{ startX: number; startY: number; origX: number; origY: number } | null>(null);
-
-  const wrapperRef = useRef<HTMLDivElement>(null);
-
-  const handlePointerDown = (e: React.PointerEvent) => {
-    e.preventDefault();
-    dragRef.current = { startX: e.clientX, startY: e.clientY, origX: pos.x, origY: pos.y };
-    setDragging(true);
-    setHasMoved(false);
-    wrapperRef.current?.setPointerCapture(e.pointerId);
-  };
-
-  const handlePointerMove = (e: React.PointerEvent) => {
-    if (!dragRef.current || !dragging) return;
-    const dx = e.clientX - dragRef.current.startX;
-    const dy = e.clientY - dragRef.current.startY;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) setHasMoved(true);
-    setPos({ x: dragRef.current.origX + dx, y: dragRef.current.origY + dy });
-  };
-
-  const handlePointerUp = () => {
-    if (!hasMoved) setOpen(true);
-    dragRef.current = null;
-    setDragging(false);
-  };
-
-  return (
-    <>
-      <div
-        ref={wrapperRef}
-        className="fixed bottom-20 right-6 z-[45]"
-        style={{
-          transform: `translate(${pos.x}px, ${pos.y}px)`,
-          cursor: dragging ? 'grabbing' : 'grab',
-          touchAction: 'none',
-          userSelect: 'none',
-        }}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-      >
-        <button
-          onClick={() => {}}
-          aria-label="Report an issue"
-          style={dragging ? { pointerEvents: 'none' } : undefined}
-          className={[
-            'group relative overflow-hidden',
-            'h-12 w-12 hover:w-40',
-            'rounded-full bg-[#0a0a0a] hover:bg-zinc-800 dark:bg-white dark:hover:bg-zinc-100',
-            'text-white dark:text-black',
-            'shadow-lg shadow-black/20 dark:shadow-white/10',
-            'transition-[width,background-color] duration-300 ease-out-back',
-            'focus:outline-none focus-visible:ring-2 focus-visible:ring-black dark:focus-visible:ring-white focus-visible:ring-offset-2',
-          ].join(' ')}
-        >
-          {/* Sonar rings — anchored to the left circle area */}
-          <span className="absolute left-0 top-0 inline-flex h-12 w-12 rounded-full bg-black/20 dark:bg-white/20 animate-pulsing-ring" style={{ animationDelay: '0s' }} />
-          <span className="absolute left-0 top-0 inline-flex h-12 w-12 rounded-full bg-black/15 dark:bg-white/15 animate-pulsing-ring" style={{ animationDelay: '0.7s' }} />
-          <span className="absolute left-0 top-0 inline-flex h-12 w-12 rounded-full bg-black/10 dark:bg-white/10 animate-pulsing-ring" style={{ animationDelay: '1.4s' }} />
-
-          {/* Icon — always centered in the 48px circle */}
-          <span className="absolute left-0 top-0 h-12 w-12 flex items-center justify-center">
-            <Megaphone className="h-[18px] w-[18px]" style={{ transform: 'translateX(-1.5px)' }} />
-          </span>
-
-          {/* Label — fades in after circle area */}
-          <span className="absolute left-12 top-0 h-12 flex items-center pr-4 whitespace-nowrap text-sm font-medium opacity-0 group-hover:opacity-100 transition-opacity duration-200 delay-100">
-            Report Issue
-          </span>
-        </button>
       </div>
-
-      <IssueReporterDialog open={open} onClose={() => setOpen(false)} />
     </>
   );
 }

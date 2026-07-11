@@ -37,6 +37,10 @@ function LoginContent() {
   const [tagline, setTagline] = useState('');
   const [taglineIdx, setTaglineIdx] = useState(0);
   const taglineRef = useRef(0);
+  const [forgotMode, setForgotMode] = useState(false);
+  const [forgotEmail, setForgotEmail] = useState('');
+  const [forgotLoading, setForgotLoading] = useState(false);
+  const [forgotSent, setForgotSent] = useState(false);
 
   // Typing animation
   useEffect(() => {
@@ -76,6 +80,24 @@ function LoginContent() {
   const { register, handleSubmit, formState: { errors } } = useForm<LoginFormData>({
     resolver: zodResolver(loginSchema),
   });
+
+  const onForgotSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!forgotEmail) return;
+    setForgotLoading(true);
+    try {
+      await fetch('/api/v1/auth/forgot-password', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: forgotEmail }),
+      });
+      setForgotSent(true);
+    } catch {
+      toast({ title: 'Error', description: 'Something went wrong. Please try again.', variant: 'error' });
+    } finally {
+      setForgotLoading(false);
+    }
+  };
 
   const onSubmit = async (data: LoginFormData) => {
     setLoading(true);
@@ -150,6 +172,68 @@ function LoginContent() {
             </p>
           </div>
 
+          {forgotMode ? (
+            <div className="space-y-5">
+              {forgotSent ? (
+                <div className="space-y-4">
+                  <p className="text-sm" style={{ color: d ? '#888' : '#6b7280' }}>
+                    If <span style={{ color: d ? '#e8e8e8' : '#111' }}>{forgotEmail}</span> is registered,
+                    you&apos;ll receive a reset link shortly. Check your inbox.
+                  </p>
+                  <button
+                    type="button"
+                    className="text-sm font-medium underline"
+                    style={{ color: d ? '#ffffff' : '#0a0a0a' }}
+                    onClick={() => { setForgotMode(false); setForgotSent(false); setForgotEmail(''); }}
+                  >
+                    Back to sign in
+                  </button>
+                </div>
+              ) : (
+                <form onSubmit={onForgotSubmit} className="space-y-5">
+                  <p className="text-sm" style={{ color: d ? '#888' : '#6b7280' }}>
+                    Enter your email and we&apos;ll send you a reset link.
+                  </p>
+                  <div>
+                    <Label className="text-sm" style={{ color: d ? '#888' : '#374151' }}>Email</Label>
+                    <Input
+                      type="email"
+                      value={forgotEmail}
+                      onChange={e => setForgotEmail(e.target.value)}
+                      placeholder="you@example.com"
+                      required
+                      className={`mt-2 focus:outline-none focus:ring-0 ${
+                        d ? '!bg-[#0f0f0f] !border-[#242424] !text-[#e8e8e8] placeholder:!text-[#444] focus:!border-white' : 'focus:!border-black'
+                      }`}
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={forgotLoading}
+                    className="w-full h-10 rounded text-sm font-medium transition-opacity duration-150"
+                    style={{
+                      backgroundColor: d ? '#ffffff' : '#0a0a0a',
+                      color: d ? '#000000' : '#ffffff',
+                      opacity: forgotLoading ? 0.5 : 1,
+                      cursor: forgotLoading ? 'not-allowed' : 'pointer',
+                    }}
+                  >
+                    {forgotLoading ? 'Sending…' : 'Send reset link'}
+                  </button>
+                  <p className="text-center text-sm" style={{ color: d ? '#555' : '#6b7280' }}>
+                    <button
+                      type="button"
+                      className="font-medium underline"
+                      style={{ color: d ? '#ffffff' : '#0a0a0a' }}
+                      onClick={() => setForgotMode(false)}
+                    >
+                      Back to sign in
+                    </button>
+                  </p>
+                </form>
+              )}
+            </div>
+          ) : (
           <form method="POST" action="" onSubmit={handleSubmit(onSubmit)} className="space-y-5">
             <div className="space-y-4">
               <div>
@@ -171,6 +255,7 @@ function LoginContent() {
                     type="button"
                     className="text-xs"
                     style={{ color: d ? '#444' : '#9ca3af' }}
+                    onClick={() => setForgotMode(true)}
                   >
                     Forgot password?
                   </button>
@@ -223,6 +308,7 @@ function LoginContent() {
               </Link>
             </p>
           </form>
+          )}
         </div>
       </div>
     </div>

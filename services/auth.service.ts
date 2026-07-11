@@ -22,6 +22,22 @@ export const authService = {
     return apiClient.get<User>('/api/v1/auth/me');
   },
 
+  async updateProfile(data: { full_name?: string; email?: string }): Promise<User> {
+    return apiClient.patch<User>('/api/v1/auth/me', data);
+  },
+
+  async changePassword(data: { current_password: string; new_password: string }): Promise<void> {
+    await apiClient.post('/api/v1/auth/change-password', data);
+  },
+
+  async forgotPassword(email: string): Promise<void> {
+    await apiClient.post('/api/v1/auth/forgot-password', { email });
+  },
+
+  async resetPassword(token: string, new_password: string): Promise<void> {
+    await apiClient.post('/api/v1/auth/reset-password', { token, new_password });
+  },
+
   logout(): void {
     apiClient.clearToken();
     if (typeof window !== 'undefined') {

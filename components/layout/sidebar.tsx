@@ -1,25 +1,22 @@
 'use client';
 
 import Link from 'next/link';
-import { usePathname } from 'next/navigation';
-import { useState } from 'react';
+import { usePathname, useRouter } from 'next/navigation';
+import { useState, useEffect } from 'react';
 import {
-  LayoutDashboard,
   FileText,
   FileCheck,
+  LayoutGrid,
   PlayCircle,
   BarChart3,
-  ChevronLeft,
-  ChevronRight,
   Edit,
   Settings,
   Loader2,
-  Activity,
-  MessageSquare,
   PanelLeft,
   PanelLeftClose,
   CheckSquare2,
   Shield,
+  DollarSign,
 } from 'lucide-react';
 import { Logo } from '@/components/ui/logo';
 import { cn } from '@/lib/utils';
@@ -33,7 +30,6 @@ interface NavigationItem {
   href: string;
   icon: LucideIcon;
   badge?: string;
-  /** Permission required to show this item. Admin/owner always see it. */
   permission?: string;
 }
 
@@ -43,6 +39,12 @@ interface NavigationSection {
 }
 
 const navigationSections: NavigationSection[] = [
+  {
+    title: 'Workspace',
+    items: [
+      { name: 'Projects', href: '/projects', icon: LayoutGrid },
+    ],
+  },
   {
     title: 'Data Management',
     items: [
@@ -54,7 +56,7 @@ const navigationSections: NavigationSection[] = [
     title: 'Extraction',
     items: [
       { name: 'Run Extraction', href: '/extractions', icon: PlayCircle, permission: 'can_view_results' },
-      { name: 'Manual Extract', href: '/manual-extraction', icon: Edit, permission: 'can_view_results' },
+      { name: 'Manual Extract', href: '/manual-extraction', icon: Edit, permission: 'can_run_extractions' },
       { name: 'Consensus', href: '/consensus', icon: CheckSquare2, permission: 'can_adjudicate' },
       { name: 'Results', href: '/results', icon: BarChart3, permission: 'can_view_results' },
     ],
@@ -63,6 +65,7 @@ const navigationSections: NavigationSection[] = [
     title: 'Monitoring',
     items: [
       { name: 'Jobs', href: '/jobs', icon: Loader2, permission: 'can_view_results' },
+      { name: 'Usage', href: '/usage', icon: DollarSign },
     ],
   },
   {
@@ -73,39 +76,59 @@ const navigationSections: NavigationSection[] = [
   },
 ];
 
-const ROLE_BADGE_STYLES: Record<string, { bg: string; text: string }> = {
-  admin:   { bg: 'bg-purple-100 dark:bg-purple-400/15', text: 'text-purple-600 dark:text-purple-400' },
-  owner:   { bg: 'bg-amber-100 dark:bg-amber-400/15', text: 'text-amber-600 dark:text-amber-400' },
-  manager: { bg: 'bg-blue-100 dark:bg-blue-400/15', text: 'text-blue-600 dark:text-blue-400' },
-  member:  { bg: 'bg-gray-100 dark:bg-gray-400/15', text: 'text-gray-600 dark:text-gray-400' },
-  viewer:  { bg: 'bg-green-100 dark:bg-green-400/15', text: 'text-green-600 dark:text-green-400' },
-};
-
-const ROLE_LABELS: Record<string, string> = {
-  admin: 'Admin', owner: 'Owner', manager: 'Manager', member: 'Member', viewer: 'Viewer',
-};
+function NavTooltip({ label, side = 'right' }: { label: string; side?: 'right' | 'bottom' }) {
+  return (
+    <span
+      role="tooltip"
+      className={cn(
+        'pointer-events-none absolute z-50 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-xs font-medium text-white opacity-0 shadow-md transition-opacity duration-150 delay-300 group-hover:opacity-100 dark:bg-white dark:text-gray-900',
+        side === 'right' && 'left-full top-1/2 ml-2 -translate-y-1/2',
+        side === 'bottom' && 'left-1/2 top-full mt-1.5 -translate-x-1/2',
+      )}
+    >
+      {label}
+    </span>
+  );
+}
 
 export function Sidebar() {
   const pathname = usePathname();
-  const [collapsed, setCollapsed] = useState(true);
+  const router = useRouter();
+  const [collapsed, setCollapsed] = useState<boolean>(() => {
+    if (typeof window === 'undefined') return true;
+    const v = window.localStorage.getItem('evistream:sidebar-collapsed');
+    return v === null ? true : v === '1';
+  });
   const { isAdmin } = useAuth();
   const perms = useProjectPermissions();
 
-  // Determine effective role for display
-  const effectiveRole = isAdmin ? 'admin' : perms.role || 'member';
-  const roleStyle = ROLE_BADGE_STYLES[effectiveRole] || ROLE_BADGE_STYLES.member;
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem('evistream:sidebar-collapsed', collapsed ? '1' : '0');
+  }, [collapsed]);
 
-  // Filter nav items based on permissions
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== '\\' || !(e.metaKey || e.ctrlKey)) return;
+      const t = e.target as HTMLElement | null;
+      if (t && /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName)) return;
+      if (t?.isContentEditable) return;
+      e.preventDefault();
+      setCollapsed((c) => !c);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
   const filteredSections = navigationSections.map(section => ({
     ...section,
     items: section.items.filter(item => {
-      if (!item.permission) return true; // No permission required
-      if (isAdmin || perms.isOwner) return true; // Admin/owner see everything
+      if (!item.permission) return true;
+      if (isAdmin || perms.isOwner) return true;
       return !!(perms as Record<string, unknown>)[item.permission];
     }),
   })).filter(section => section.items.length > 0);
 
-  // Add admin section
   const allSections = [
     ...filteredSections,
     ...(isAdmin ? [{
@@ -117,63 +140,86 @@ export function Sidebar() {
   return (
     <div
       className={cn(
-        'sticky top-0 flex h-screen flex-col border-r border-gray-200 bg-gray-50 transition-[width] duration-200 flex-shrink-0 overflow-y-auto dark:bg-[#0a0a0a] dark:border-[#1a1a1a]',
+        'sticky top-0 flex h-screen flex-col border-r border-gray-200 bg-gray-50 transition-[width] duration-200 ease-out flex-shrink-0 overflow-y-auto overflow-x-hidden dark:bg-[#0a0a0a] dark:border-[#1a1a1a]',
         collapsed ? 'w-16' : 'w-56'
       )}
     >
-      <div className="flex h-16 items-center justify-between px-3">
-        <Link href="/dashboard" className={cn("flex items-center space-x-3", collapsed && "mx-auto")}>
-          <Logo size={28} />
-          {!collapsed && (
-            <div className="flex flex-col">
-              <span className="text-base font-bold leading-none dark:text-white">eviStreams</span>
-              <span className="text-xs text-gray-500 leading-none mt-0.5 dark:text-[#888888]">Medical AI</span>
+      {/* Header — unified DOM; brand text + close button fade via opacity + max-width */}
+      <div className="flex h-16 items-center px-3 gap-3">
+        {/* Logo button: collapsed → opens sidebar; expanded → navigates to /dashboard */}
+        <button
+          onClick={() => collapsed ? setCollapsed(false) : router.push('/dashboard')}
+          aria-label={collapsed ? 'Open sidebar' : 'Go to dashboard'}
+          className="group relative flex-shrink-0 w-7 h-7 rounded-md"
+        >
+          <Logo
+            size={28}
+            className={cn(
+              'absolute inset-0 transition-opacity duration-150',
+              collapsed && 'group-hover:opacity-0'
+            )}
+          />
+          {collapsed && (
+            <div className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 opacity-0 group-hover:opacity-100">
+              <PanelLeft className="h-5 w-5 text-gray-600 dark:text-zinc-400" />
             </div>
           )}
+        </button>
+
+        {/* Brand text — link, fades in/out symmetric to width animation */}
+        <Link
+          href="/dashboard"
+          className={cn(
+            'flex flex-col min-w-0 overflow-hidden whitespace-nowrap transition-all duration-200 ease-out',
+            collapsed
+              ? 'opacity-0 max-w-0 pointer-events-none delay-0'
+              : 'opacity-100 max-w-[140px] delay-100'
+          )}
+        >
+          <span className="text-base font-bold leading-none dark:text-white">eviStreams</span>
+          <span className="text-xs text-gray-500 leading-none mt-0.5 dark:text-[#888888]">Medical AI</span>
         </Link>
-        {!collapsed && (
-          <button
-            onClick={() => setCollapsed(!collapsed)}
-            className="flex items-center justify-center rounded-lg p-1.5 transition-colors hover:bg-gray-100 text-gray-600 flex-shrink-0 dark:text-zinc-400 dark:hover:bg-[#1a1a1a]"
-            title="Collapse sidebar"
-          >
-            <PanelLeftClose className="h-5 w-5" />
-          </button>
-        )}
+
+        <div className="flex-1" />
+
+        {/* Close button — visible only when expanded */}
+        <button
+          onClick={() => setCollapsed(true)}
+          aria-label="Close sidebar"
+          className={cn(
+            'flex-shrink-0 flex items-center justify-center rounded-lg overflow-hidden text-gray-600 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-[#1a1a1a] transition-all duration-200 ease-out',
+            collapsed
+              ? 'opacity-0 max-w-0 p-0 pointer-events-none delay-0'
+              : 'opacity-100 max-w-[36px] p-1.5 delay-100'
+          )}
+        >
+          <PanelLeftClose className="h-5 w-5" />
+        </button>
       </div>
 
-      {/* Expand button when collapsed */}
-      {collapsed && (
-        <div className="px-2 mb-2">
-          <button
-            onClick={() => setCollapsed(!collapsed)}
-            className="w-full flex items-center justify-center rounded-lg p-2 transition-colors hover:bg-gray-100 text-gray-600 dark:text-zinc-400 dark:hover:bg-[#1a1a1a]"
-            title="Expand sidebar"
-          >
-            <PanelLeft className="h-5 w-5" />
-          </button>
-        </div>
-      )}
-
-      {/* Role badge */}
-      {!collapsed && (
-        <div className="px-3 mb-2">
-          <span className={cn('text-[10px] font-semibold px-2 py-0.5 rounded-full uppercase tracking-wider', roleStyle.bg, roleStyle.text)}>
-            {ROLE_LABELS[effectiveRole] || effectiveRole}
-          </span>
-        </div>
-      )}
-
-      <nav className="flex-1 overflow-y-auto p-2">
+      <nav className="flex-1 overflow-y-auto overflow-x-hidden p-2">
         {allSections.map((section, sectionIndex) => (
           <div key={section.title} className={sectionIndex > 0 ? 'mt-6' : ''}>
-            {!collapsed && (
-              <h3 className={cn(typography.nav.section, 'px-3 mb-2')}>
-                {section.title}
-              </h3>
-            )}
-            {collapsed && sectionIndex > 0 && (
-              <div className="h-px bg-gray-100 my-2 mx-2 dark:bg-[#2a2a2a]" />
+            <h3
+              className={cn(
+                typography.nav.section,
+                'px-3 overflow-hidden whitespace-nowrap transition-all duration-200 ease-out',
+                collapsed
+                  ? 'opacity-0 max-h-0 mb-0 delay-0'
+                  : 'opacity-100 max-h-6 mb-2 delay-100'
+              )}
+            >
+              {section.title}
+            </h3>
+            {sectionIndex > 0 && (
+              <div
+                className={cn(
+                  'h-px bg-gray-100 mx-2 overflow-hidden dark:bg-[#2a2a2a] transition-all duration-200 ease-out',
+                  collapsed
+                    ? 'opacity-100 my-2 max-h-px delay-100'
+                    : 'opacity-0 my-0 max-h-0 delay-0'
+                )}
+              />
             )}
             <div className="space-y-1">
               {section.items.map((item) => {
@@ -184,16 +230,25 @@ export function Sidebar() {
                     key={item.name}
                     href={item.href}
                     className={cn(
-                      'flex items-center gap-3 rounded px-3 py-2 transition-colors',
-                      isActive ? cn(typography.nav.itemActive, 'bg-gray-100 dark:bg-[#1a1a1a] dark:text-white') : cn(typography.nav.item, 'hover:bg-gray-50 dark:text-zinc-400 dark:hover:bg-[#141414]'),
+                      'group relative flex items-center rounded px-3 py-2 transition-colors',
+                      isActive
+                        ? cn(typography.nav.itemActive, 'bg-gray-100 dark:bg-[#1a1a1a] dark:text-white')
+                        : cn(typography.nav.item, 'hover:bg-gray-50 dark:text-zinc-400 dark:hover:bg-[#141414]'),
                       collapsed && 'justify-center'
                     )}
-                    title={collapsed ? item.name : undefined}
                   >
                     <Icon className="h-4 w-4 flex-shrink-0" />
-                    {!collapsed && (
-                      <span className="flex-1">{item.name}</span>
-                    )}
+                    <span
+                      className={cn(
+                        'truncate overflow-hidden transition-all duration-200 ease-out',
+                        collapsed
+                          ? 'opacity-0 max-w-0 ml-0 delay-0'
+                          : 'opacity-100 max-w-[180px] ml-3 delay-100'
+                      )}
+                    >
+                      {item.name}
+                    </span>
+                    {collapsed && <NavTooltip label={item.name} side="right" />}
                   </Link>
                 );
               })}
@@ -201,7 +256,6 @@ export function Sidebar() {
           </div>
         ))}
       </nav>
-
     </div>
   );
 }

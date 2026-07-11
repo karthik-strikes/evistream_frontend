@@ -1178,6 +1178,47 @@ html.dark .menu-item:hover { background: #1a1a1a !important; }
 .trow:hover { background: #f9fafb; }
 html.dark .trow:hover { background: #111111; }
 
+/* Custom document-list checkbox — matches dark theme (#1a1a1a bg, #3a3a3a border) */
+.doc-checkbox {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1rem;
+  height: 1rem;
+  border-radius: 4px;
+  border: 1px solid #d1d5db;
+  background: #ffffff;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: 70%;
+  flex-shrink: 0;
+}
+html.dark .doc-checkbox {
+  border-color: #3a3a3a;
+  background: #1a1a1a;
+}
+.doc-checkbox:checked {
+  background-color: #111111;
+  border-color: #111111;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M3.5 8l3 3 6-6' stroke='%23fff' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
+html.dark .doc-checkbox:checked {
+  background-color: #e8e8e8;
+  border-color: #e8e8e8;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M3.5 8l3 3 6-6' stroke='%23111' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C%2Fsvg%3E");
+}
+.doc-checkbox:indeterminate {
+  background-color: #111111;
+  border-color: #111111;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 8h8' stroke='%23fff' stroke-width='1.5' stroke-linecap='round'/%3E%3C/svg%3E");
+}
+html.dark .doc-checkbox:indeterminate {
+  background-color: #e8e8e8;
+  border-color: #e8e8e8;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none'%3E%3Cpath d='M4 8h8' stroke='%23111' stroke-width='1.5' stroke-linecap='round'/%3E%3C%2Fsvg%3E");
+}
+
 /* Reduced Motion Support */
 @media (prefers-reduced-motion: reduce) {
   *,
@@ -1264,4 +1305,54 @@ html.dark .trow:hover { background: #111111; }
 }
 .stats-shimmer-v-delay {
   animation: stats-shimmer-v 3s ease-in-out 1.5s infinite;
+}
+
+@keyframes glow-sweep {
+  0%   { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+.glow-sweep {
+  animation: glow-sweep 2s ease-in-out infinite;
+}
+
+/* Per-model diamond toggle (Results → All runs) — rotated squares that gently bob */
+@keyframes model-dia-float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-6px); }
+}
+.model-dia-float { animation: model-dia-float 3.4s ease-in-out infinite; }
+.model-dia-float.d1 { animation-delay: -0.9s; }
+.model-dia-float.d2 { animation-delay: -1.7s; }
+.model-dia-float.d3 { animation-delay: -2.5s; }
+.model-dia {
+  width: 44px; height: 44px; border: none; cursor: pointer;
+  border-radius: 11px; transform: rotate(45deg);
+  display: flex; align-items: center; justify-content: center;
+  transition: transform .2s ease, background-color .2s ease, box-shadow .2s ease, opacity .2s ease;
+}
+.model-dia .inner {
+  transform: rotate(-45deg);
+  display: inline-flex; align-items: center; justify-content: center;
+  font-size: 10px; font-weight: 700; letter-spacing: .03em; white-space: nowrap;
+}
+.model-dia:hover { transform: rotate(45deg) scale(1.1); }
+.model-dia:active { transform: rotate(45deg) scale(.93); }
+.model-dia.is-inactive { opacity: .42; }
+.model-dia.is-inactive:hover { opacity: .8; }
+.model-dia.is-active { box-shadow: 0 0 0 2px rgba(0,0,0,.16) inset; }
+
+.model-dia--gpt    { background:#9FE1CB; color:#085041; }
+.model-dia--gpt:hover    { background:#5DCAA5; }
+.model-dia--claude { background:#F5C4B3; color:#712B13; }
+.model-dia--claude:hover { background:#F0997B; }
+.model-dia--gemini { background:#AAD2F5; color:#0B3A66; }
+.model-dia--gemini:hover { background:#7DB7EE; }
+.model-dia--other  { background:#D8D4CA; color:#4A463E; }
+.model-dia--other:hover  { background:#C6C1B6; }
+.model-dia--all    { background:#E7E4DD; color:#55514A; }
+.model-dia--all:hover    { background:#D7D3CA; }
+
+@media (prefers-reduced-motion: reduce) {
+  .model-dia-float { animation: none; }
+  .model-dia, .model-dia:hover, .model-dia:active { transform: rotate(45deg); }
 }

@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
-    "format": "prettier --write \"**/*.{ts,tsx,md}\""
+    "format": "prettier --write \"**/*.{ts,tsx,md}\"",
+    "postinstall": "node -e \"const fs=require('fs');const p='node_modules/pdfjs-dist/build/pdf.worker.min.mjs';if(fs.existsSync(p)){fs.copyFileSync(p,'public/pdf.worker.min.mjs');console.log('Copied pdfjs worker to public/')}\""
   },
   "dependencies": {
     "@hookform/resolvers": "^3.3.4",
@@ -23,13 +24,17 @@
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.0",
     "date-fns": "^3.2.0",
+    "jszip": "^3.10.1",
     "lucide-react": "^0.300.0",
     "next": "^15.5.12",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "react-dropzone": "^14.2.3",
     "react-hook-form": "^7.49.3",
+    "react-markdown": "^10.1.0",
+    "react-pdf": "^10.4.1",
     "react-resizable-panels": "^4.6.2",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^2.2.0",
     "typescript": "^5.3.3",
     "zod": "^3.22.4",

@@ -104,8 +104,14 @@ export function RunExtractionDialog({
       toast({ title: 'Success', description: 'Extraction started successfully', variant: 'success' });
       onClose();
       queryClient.invalidateQueries({ queryKey });
+      queryClient.invalidateQueries({ queryKey: ['results'] });
+      queryClient.invalidateQueries({ queryKey: ['results-by-form'] });
+      queryClient.invalidateQueries({ queryKey: ['extractions-with-forms'] });
       // Second invalidation after a short delay to catch backend state update
-      setTimeout(() => queryClient.invalidateQueries({ queryKey }), 2000);
+      setTimeout(() => {
+        queryClient.invalidateQueries({ queryKey });
+        queryClient.invalidateQueries({ queryKey: ['extractions-with-forms'] });
+      }, 2000);
     } catch (error: any) {
       toast({
         title: 'Error',

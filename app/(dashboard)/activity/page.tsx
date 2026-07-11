@@ -4,6 +4,7 @@ import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { Card, Button, EmptyState } from '@/components/ui';
+import { PermissionGate } from '@/components/ui/permission-gate';
 import { Activity as ActivityIcon, Loader2, ChevronLeft, ChevronRight } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { activityService } from '@/services';
@@ -64,6 +65,7 @@ export default function ActivityPage() {
       title="Activity Log"
       description="Track what has happened across your projects"
     >
+      <PermissionGate permission="can_view_docs">
       <div className="space-y-6">
         <ActivityStatsPanel activities={activities} />
 
@@ -152,6 +154,7 @@ export default function ActivityPage() {
           )}
         </Card>
       </div>
+      </PermissionGate>
     </DashboardLayout>
   );
 }

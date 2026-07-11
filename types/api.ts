@@ -28,6 +28,8 @@ export interface User {
   is_active: boolean;
   role: 'admin' | 'user';
   created_at: string;
+  last_seen_at?: string | null;
+  project_count?: number;
 }
 
 export interface AdminUserUpdate {
@@ -39,6 +41,34 @@ export interface AdminStats {
   total_users: number;
   total_projects: number;
   total_extractions: number;
+  total_admins: number;
+  total_active_users: number;
+  total_memberships: number;
+  total_documents: number;
+  total_storage_bytes: number;
+}
+
+export interface AdminAuditLogEntry {
+  id: string;
+  project_id: string | null;
+  actor_id: string | null;
+  target_user_id: string | null;
+  action: string;
+  old_values: Record<string, unknown> | null;
+  new_values: Record<string, unknown> | null;
+  created_at: string;
+  actor_name: string | null;
+  actor_email: string;
+  target_name: string | null;
+  target_email: string;
+  project_name: string;
+}
+
+export interface AdminAuditLogResponse {
+  entries: AdminAuditLogEntry[];
+  total: number;
+  page: number;
+  page_size: number;
 }
 
 export interface AdminUsersResponse {
@@ -87,16 +117,72 @@ export interface DocumentUploadResponse {
 }
 
 // Forms
+export interface ReviewNote {
+  target_type: 'field' | 'group' | 'stage' | 'pipeline';
+  target_ref: string;
+  comment: string;
+}
+
+export interface FieldExample {
+  value: any;
+  source_text?: string;
+  note?: string;
+}
+
 export interface FormField {
   field_name: string;
+  display_name?: string;
   field_type: string;
   field_description: string;
   field_control_type?: string;
   options?: string[];
   multiple?: boolean;
+  required?: boolean;
   example?: string;
   extraction_hints?: string;
   subform_fields?: FormField[];
+  // HITL review-time calibration — merged into DSPy desc at runtime, never in signatures.py
+  examples?: FieldExample[];
+  hints?: string[];
+  rules?: string[];
+  // Table extraction strategy (only meaningful on array fields).
+  // Mirrors schema_def.output_fields[].extraction_strategy / .anchor_columns.
+  extraction_strategy?: 'single_call' | 'row_then_columns';
+  anchor_columns?: string[];
+}
+
+export interface FieldEditUpdate {
+  field_name: string;
+  description?: string;
+  examples?: FieldExample[];
+  hints?: string[];
+  rules?: string[];
+  options?: string[];
+  extraction_strategy?: 'single_call' | 'row_then_columns';
+  anchor_columns?: string[];
+}
+
+export interface FieldEditsResponse {
+  form_id: string;
+  updated_fields: string[];
+  warnings: Array<{ field: string; level: string; message: string }>;
+  field_edits_version: number;
+  signatures_rewritten?: boolean;
+  extraction_warning?: string;
+}
+
+export interface FieldPrompt {
+  signature: string;
+  description: string;
+  hints: string[];
+  rules: string[];
+  examples: Array<{ value: string; source_text?: string; note?: string } | string>;
+  subform_fields?: Array<{ field_name: string; field_type: string; field_description?: string; hints?: string[]; rules?: string[]; examples?: any[] }>;
+}
+
+export interface FieldPromptsResponse {
+  form_id: string;
+  field_prompts: Record<string, FieldPrompt>;
 }
 
 export interface Form {
@@ -107,7 +193,6 @@ export interface Form {
   fields: FormField[];
   status: 'draft' | 'generating' | 'awaiting_review' | 'regenerating' | 'active' | 'failed';
   schema_name: string | null;
-  task_dir: string | null;
   statistics: any | null;
   error: string | null;
   metadata?: any | null; // Workflow state for human review (thread_id, decomposition)
@@ -184,6 +269,12 @@ export interface CreateFormRequest {
   save_as_draft?: boolean;  // Optional, defaults to false — skips code generation
 }
 
+export interface DuplicateFormRequest {
+  form_name: string;
+  target_project_id?: string;  // defaults to source form's project
+  form_description?: string;   // defaults to source form's description
+}
+
 // Extractions
 export interface Extraction {
   id: string;
@@ -214,6 +305,7 @@ export interface ExtractionResult {
   evaluation_metrics: any | null;
   extracted_by: string | null;
   reviewer_role: string | null;
+  model_name?: string | null;
   created_at: string;
 }
 
@@ -303,6 +395,7 @@ export interface ProjectMemberPermissions {
   can_upload_docs: boolean;
   can_create_forms: boolean;
   can_run_extractions: boolean;
+  can_run_manual_extractions: boolean;
   can_view_results: boolean;
   can_adjudicate: boolean;
   can_qa_review: boolean;
@@ -321,13 +414,62 @@ export interface ProjectMember {
   can_upload_docs: boolean;
   can_create_forms: boolean;
   can_run_extractions: boolean;
+  can_run_manual_extractions: boolean;
   can_view_results: boolean;
   can_adjudicate: boolean;
   can_qa_review: boolean;
   can_manage_assignments: boolean;
   can_manage_members: boolean;
   invited_by: string | null;
+  created_at: string | null;
+  last_seen_at: string | null;
+}
+
+export interface ProjectInvitation {
+  id: string;
+  project_id: string;
+  email: string;
+  role: ProjectRole;
+  can_view_docs: boolean;
+  can_upload_docs: boolean;
+  can_create_forms: boolean;
+  can_run_extractions: boolean;
+  can_run_manual_extractions: boolean;
+  can_view_results: boolean;
+  can_adjudicate: boolean;
+  can_qa_review: boolean;
+  can_manage_assignments: boolean;
+  can_manage_members: boolean;
+  invited_by: string | null;
+  invited_by_name: string | null;
+  expires_at: string;
+  accepted_at: string | null;
+  revoked_at: string | null;
   created_at: string;
+  accept_url: string | null;
+}
+
+export interface ProjectInvitationCreate {
+  email: string;
+  role: ProjectRole;
+  can_view_docs: boolean;
+  can_upload_docs: boolean;
+  can_create_forms: boolean;
+  can_run_extractions: boolean;
+  can_run_manual_extractions: boolean;
+  can_view_results: boolean;
+  can_adjudicate: boolean;
+  can_qa_review: boolean;
+  can_manage_assignments: boolean;
+  can_manage_members: boolean;
+}
+
+export interface InvitationPreview {
+  project_id: string;
+  project_name: string;
+  role: ProjectRole;
+  invited_by_name: string | null;
+  expires_at: string;
 }
 
 export interface ProjectMemberInvite {
@@ -337,6 +479,7 @@ export interface ProjectMemberInvite {
   can_upload_docs: boolean;
   can_create_forms: boolean;
   can_run_extractions: boolean;
+  can_run_manual_extractions: boolean;
   can_view_results: boolean;
   can_adjudicate: boolean;
   can_qa_review: boolean;
@@ -350,6 +493,7 @@ export interface ProjectMemberUpdate {
   can_upload_docs?: boolean;
   can_create_forms?: boolean;
   can_run_extractions?: boolean;
+  can_run_manual_extractions?: boolean;
   can_view_results?: boolean;
   can_adjudicate?: boolean;
   can_qa_review?: boolean;
@@ -365,6 +509,7 @@ export interface MyPermissionsResponse {
   can_upload_docs: boolean;
   can_create_forms: boolean;
   can_run_extractions: boolean;
+  can_run_manual_extractions: boolean;
   can_view_results: boolean;
   can_adjudicate: boolean;
   can_qa_review: boolean;
@@ -374,6 +519,7 @@ export interface MyPermissionsResponse {
 
 export interface OwnershipTransferRequest {
   new_owner_id: string;
+  previous_owner_role?: 'manager' | 'member' | 'viewer' | 'none';
 }
 
 export interface PermissionAuditLog {

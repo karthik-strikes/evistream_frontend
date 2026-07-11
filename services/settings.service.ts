@@ -12,11 +12,18 @@ export interface UserSettings {
   notify_extraction_completed: boolean;
   notify_extraction_failed: boolean;
   notify_code_generation: boolean;
+  extraction_model: string | null;
   created_at: string;
   updated_at: string;
 }
 
 export type UserSettingsUpdate = Partial<Omit<UserSettings, 'id' | 'user_id' | 'created_at' | 'updated_at'>>;
+
+export interface AvailableModel {
+  id: string;
+  label: string;
+  provider: string;
+}
 
 class SettingsService {
   async getSettings(): Promise<UserSettings> {
@@ -25,6 +32,10 @@ class SettingsService {
 
   async updateSettings(data: UserSettingsUpdate): Promise<UserSettings> {
     return apiClient.patch<UserSettings>('/api/v1/settings', data);
+  }
+
+  async listModels(): Promise<AvailableModel[]> {
+    return apiClient.get<AvailableModel[]>('/api/v1/settings/models');
   }
 }
 

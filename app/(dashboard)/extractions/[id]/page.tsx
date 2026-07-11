@@ -21,6 +21,7 @@ import { extractionsService, jobsService, resultsService, formsService, document
 import { useQueryClient } from '@tanstack/react-query';
 import { useProject } from '@/contexts/ProjectContext';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
+import { PermissionGate } from '@/components/ui/permission-gate';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate, cn, getErrorMessage } from '@/lib/utils';
 import type { ExtractionResult } from '@/types/api';
@@ -29,6 +30,28 @@ import { JobLogsWebSocket, type LogMessage } from '@/services/jobLogsWebSocket';
 import { apiClient } from '@/lib/api';
 
 type TabType = 'papers' | 'logs' | 'export';
+
+type StatusCounts = { reported: number; not_reported: number; missing: number; error: number };
+
+// Walk an extracted_data object and tally per-cell extraction status. Each cell
+// carries a `status`: "reported"/"not_reported" are genuine results, while
+// "missing"/"error" are extraction failures that masquerade as NR and are worth
+// retrying. Cells are leaves — we don't recurse into a cell's own value.
+function countCellStatuses(data: any, acc?: StatusCounts): StatusCounts {
+  const a = acc ?? { reported: 0, not_reported: 0, missing: 0, error: 0 };
+  if (data == null || typeof data !== 'object') return a;
+  if (Array.isArray(data)) {
+    data.forEach((item) => countCellStatuses(item, a));
+    return a;
+  }
+  const status = (data as any).status as keyof StatusCounts | undefined;
+  if (status === 'reported' || status === 'not_reported' || status === 'missing' || status === 'error') {
+    a[status] += 1;
+    return a;
+  }
+  Object.values(data).forEach((v) => countCellStatuses(v, a));
+  return a;
+}
 
 function formatDuration(startAt: string | null, endAt?: string | null): string {
   if (!startAt) return '—';
@@ -46,7 +69,7 @@ export default function ExtractionDetailPage() {
   const params = useParams();
   const router = useRouter();
   const { selectedProject } = useProject();
-  const { can_run_extractions } = useProjectPermissions();
+  const { can_run_extractions, can_view_results } = useProjectPermissions();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const extractionId = params.id as string;
@@ -56,6 +79,7 @@ export default function ExtractionDetailPage() {
   const [isExportingCSV, setIsExportingCSV] = useState(false);
   const [isExportingJSON, setIsExportingJSON] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [isRetryingFields, setIsRetryingFields] = useState(false);
   const [expandedResults, setExpandedResults] = useState<Set<string>>(new Set());
   const logsEndRef = useRef<HTMLDivElement>(null);
   const wsRef = useRef<JobLogsWebSocket | null>(null);
@@ -210,6 +234,37 @@ export default function ExtractionDetailPage() {
   const resultsByDoc = new Map<string, ExtractionResult>();
   results.forEach((r) => resultsByDoc.set(r.document_id, r));
 
+  // Per-study cell-status breakdown: separates genuinely "not reported" fields
+  // from fields that failed to extract (missing/error) and are worth retrying.
+  const fieldStatusByResult = new Map<string, StatusCounts>();
+  results.forEach((r) => fieldStatusByResult.set(r.id, countCellStatuses(r.extracted_data)));
+
+  const docIdsWithFailedFields = results
+    .filter((r) => {
+      const c = fieldStatusByResult.get(r.id);
+      return c ? c.missing + c.error > 0 : false;
+    })
+    .map((r) => r.document_id);
+
+  const handleRetryFailedFields = async () => {
+    if (docIdsWithFailedFields.length === 0) return;
+    try {
+      setIsRetryingFields(true);
+      await extractionsService.retryFailed(extractionId, docIdsWithFailedFields);
+      toast({
+        title: 'Retrying',
+        description: `${docIdsWithFailedFields.length} ${docIdsWithFailedFields.length === 1 ? 'study' : 'studies'} with failed fields queued for re-extraction.`,
+      });
+      queryClient.invalidateQueries({ queryKey: ['extraction', extractionId] });
+      queryClient.invalidateQueries({ queryKey: ['results', extractionId] });
+      queryClient.invalidateQueries({ queryKey: ['extractions'] });
+    } catch (error: any) {
+      toast({ title: 'Retry Failed', description: getErrorMessage(error, 'Could not retry studies'), variant: 'error' });
+    } finally {
+      setIsRetryingFields(false);
+    }
+  };
+
   const logLevelCls = (level?: string) => {
     switch (level) {
       case 'success': return 'text-green-600 dark:text-green-400';
@@ -244,6 +299,7 @@ export default function ExtractionDetailPage() {
       title={`Extraction: ${formName}`}
       description={`ID: ${extractionId.slice(0, 8)}...`}
     >
+      <PermissionGate permission="can_view_results">
       <div className="space-y-6">
         {/* Back button */}
         <button
@@ -370,12 +426,33 @@ export default function ExtractionDetailPage() {
                     {/* Successful results */}
                     {results.length > 0 && (
                       <div className="space-y-1.5">
-                        <p className="text-[10px] uppercase tracking-wider text-gray-400 dark:text-zinc-600 font-medium mb-2">
-                          Extracted — {results.length}
-                        </p>
+                        <div className="flex items-center justify-between mb-2">
+                          <p className="text-[10px] uppercase tracking-wider text-gray-400 dark:text-zinc-600 font-medium">
+                            Extracted — {results.length}
+                          </p>
+                          {docIdsWithFailedFields.length > 0 && canRunExtractions && (
+                            <button
+                              onClick={handleRetryFailedFields}
+                              disabled={isRetryingFields}
+                              className="inline-flex items-center gap-1 text-[11px] font-medium text-amber-600 dark:text-amber-400 px-2 py-1 rounded-md border border-amber-200 dark:border-amber-400/30 bg-amber-50 dark:bg-amber-400/10 cursor-pointer hover:bg-amber-100 dark:hover:bg-amber-400/20 transition-colors disabled:opacity-50"
+                            >
+                              {isRetryingFields ? (
+                                <Loader2 className="w-3 h-3 animate-spin" />
+                              ) : (
+                                <RotateCcw className="w-3 h-3" />
+                              )}
+                              {isRetryingFields
+                                ? 'Retrying...'
+                                : `Retry ${docIdsWithFailedFields.length} with failed fields`}
+                            </button>
+                          )}
+                        </div>
                         {results.map((result) => {
                           const isExpanded = expandedResults.has(result.id);
                           const fields = Object.entries(result.extracted_data);
+                          const statusCounts = fieldStatusByResult.get(result.id);
+                          const failedFields = statusCounts ? statusCounts.missing + statusCounts.error : 0;
+                          const nrFields = statusCounts ? statusCounts.not_reported : 0;
                           return (
                             <div key={result.id}>
                               <button
@@ -388,6 +465,16 @@ export default function ExtractionDetailPage() {
                                     {docNamesMap.get(result.document_id) ?? result.document_id}
                                   </p>
                                 </div>
+                                {failedFields > 0 && (
+                                  <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400 flex-shrink-0">
+                                    {failedFields} failed
+                                  </span>
+                                )}
+                                {nrFields > 0 && (
+                                  <span className="text-[11px] text-gray-400 dark:text-zinc-600 flex-shrink-0">
+                                    {nrFields} NR
+                                  </span>
+                                )}
                                 <span className="text-xs text-gray-400 flex-shrink-0">
                                   {fields.length} fields
                                 </span>
@@ -401,16 +488,33 @@ export default function ExtractionDetailPage() {
                               {isExpanded && fields.length > 0 && (
                                 <div className="ml-7 mt-1 mb-2 px-3.5 py-3 rounded-lg bg-gray-100/60 dark:bg-[#0d0d0d] border border-gray-100 dark:border-[#1f1f1f]">
                                   <div className="grid grid-cols-1 gap-2">
-                                    {fields.map(([key, value]) => (
-                                      <div key={key} className="flex items-start gap-3">
-                                        <span className="text-[11px] font-medium text-gray-400 dark:text-zinc-500 min-w-[120px] flex-shrink-0 pt-0.5 truncate">
-                                          {key}
-                                        </span>
-                                        <span className="text-xs text-gray-700 dark:text-zinc-300 break-words leading-relaxed">
-                                          {typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value ?? '—')}
-                                        </span>
-                                      </div>
-                                    ))}
+                                    {fields.map(([key, value]) => {
+                                      const cellStatus =
+                                        value && typeof value === 'object' && !Array.isArray(value)
+                                          ? (value as any).status
+                                          : undefined;
+                                      const fieldFailed = cellStatus === 'missing' || cellStatus === 'error';
+                                      return (
+                                        <div key={key} className="flex items-start gap-3">
+                                          <span className="text-[11px] font-medium text-gray-400 dark:text-zinc-500 min-w-[120px] flex-shrink-0 pt-0.5 truncate">
+                                            {key}
+                                          </span>
+                                          <span
+                                            className={cn(
+                                              'text-xs break-words leading-relaxed',
+                                              fieldFailed
+                                                ? 'text-amber-600 dark:text-amber-400'
+                                                : 'text-gray-700 dark:text-zinc-300',
+                                            )}
+                                          >
+                                            {typeof value === 'object' ? JSON.stringify(value, null, 2) : String(value ?? '—')}
+                                            {fieldFailed && (
+                                              <span className="ml-1.5 text-[10px] uppercase tracking-wider">· {cellStatus}</span>
+                                            )}
+                                          </span>
+                                        </div>
+                                      );
+                                    })}
                                   </div>
                                 </div>
                               )}
@@ -548,6 +652,7 @@ export default function ExtractionDetailPage() {
           </div>
         </Card>
       </div>
+      </PermissionGate>
     </DashboardLayout>
   );
 }

@@ -5,16 +5,22 @@ import { ChevronDown, Plus } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { cn } from '@/lib/utils';
+import { createPortal } from 'react-dom';
 
 export function ProjectSelector() {
   const { projects, selectedProject, setSelectedProject } = useProject();
   const [isOpen, setIsOpen] = useState(false);
+  const [dropdownPos, setDropdownPos] = useState({ top: 0, right: 0 });
+  const buttonRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target as Node)) {
+      if (
+        buttonRef.current && !buttonRef.current.contains(event.target as Node) &&
+        dropdownRef.current && !dropdownRef.current.contains(event.target as Node)
+      ) {
         setIsOpen(false);
       }
     }
@@ -22,6 +28,17 @@ export function ProjectSelector() {
     document.addEventListener('mousedown', handleClickOutside);
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
+
+  const handleToggle = () => {
+    if (!isOpen && buttonRef.current) {
+      const rect = buttonRef.current.getBoundingClientRect();
+      setDropdownPos({
+        top: rect.bottom + 6,
+        right: window.innerWidth - rect.right,
+      });
+    }
+    setIsOpen(prev => !prev);
+  };
 
   if (projects.length === 0) {
     return (
@@ -35,10 +52,50 @@ export function ProjectSelector() {
     );
   }
 
-  return (
-    <div className="relative" ref={dropdownRef}>
+  const dropdown = isOpen ? (
+    <div
+      ref={dropdownRef}
+      style={{ top: dropdownPos.top, right: dropdownPos.right }}
+      className="fixed w-[200px] bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#2a2a2a] rounded-lg shadow-lg z-[9999] max-h-[240px] overflow-y-auto py-1"
+    >
+      {projects.map((project) => {
+        const isActive = selectedProject?.id === project.id;
+        return (
+          <button
+            key={project.id}
+            onClick={() => {
+              setSelectedProject(project);
+              router.push(`/projects/${project.id}`);
+              setIsOpen(false);
+            }}
+            className={cn(
+              "w-full px-3 py-1.5 text-left transition-colors flex items-center gap-2",
+              isActive
+                ? "bg-gray-50 dark:bg-white/[0.04]"
+                : "hover:bg-gray-50 dark:hover:bg-white/[0.03]"
+            )}
+          >
+            <span className={cn("text-xs truncate flex-1", isActive ? "font-semibold text-gray-900 dark:text-white" : "font-medium text-gray-600 dark:text-zinc-300")}>{project.name}</span>
+            {isActive && <div className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />}
+          </button>
+        );
+      })}
+      <div className="h-px bg-gray-100 dark:bg-[#1f1f1f] my-1" />
       <button
-        onClick={() => setIsOpen(!isOpen)}
+        onClick={() => { router.push('/projects'); setIsOpen(false); }}
+        className="w-full px-3 py-1.5 text-left hover:bg-gray-50 dark:hover:bg-white/[0.03] transition-colors flex items-center gap-2"
+      >
+        <Plus className="h-3 w-3 text-gray-400 dark:text-zinc-500" />
+        <span className="text-xs font-medium text-gray-400 dark:text-zinc-500">Manage Projects</span>
+      </button>
+    </div>
+  ) : null;
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        onClick={handleToggle}
         className="flex items-center gap-1.5 px-2 py-1.5 rounded-md hover:bg-gray-100/80 dark:hover:bg-white/5 transition-colors max-w-[180px]"
       >
         <span className="text-xs font-medium text-gray-600 dark:text-zinc-300 truncate">
@@ -47,39 +104,7 @@ export function ProjectSelector() {
         <ChevronDown className={cn("h-3 w-3 text-gray-400 dark:text-zinc-500 transition-transform shrink-0", isOpen && "rotate-180")} />
       </button>
 
-      {isOpen && (
-        <div className="absolute right-0 top-full mt-1.5 w-[200px] bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#2a2a2a] rounded-lg shadow-lg z-50 max-h-[240px] overflow-y-auto py-1">
-          {projects.map((project) => {
-            const isActive = selectedProject?.id === project.id;
-            return (
-              <button
-                key={project.id}
-                onClick={() => {
-                  setSelectedProject(project);
-                  setIsOpen(false);
-                }}
-                className={cn(
-                  "w-full px-3 py-1.5 text-left transition-colors flex items-center gap-2",
-                  isActive
-                    ? "bg-gray-50 dark:bg-white/[0.04]"
-                    : "hover:bg-gray-50 dark:hover:bg-white/[0.03]"
-                )}
-              >
-                <span className={cn("text-xs truncate flex-1", isActive ? "font-semibold text-gray-900 dark:text-white" : "font-medium text-gray-600 dark:text-zinc-300")}>{project.name}</span>
-                {isActive && <div className="w-1.5 h-1.5 rounded-full bg-amber-400 shrink-0" />}
-              </button>
-            );
-          })}
-          <div className="h-px bg-gray-100 dark:bg-[#1f1f1f] my-1" />
-          <button
-            onClick={() => { router.push('/projects'); setIsOpen(false); }}
-            className="w-full px-3 py-1.5 text-left hover:bg-gray-50 dark:hover:bg-white/[0.03] transition-colors flex items-center gap-2"
-          >
-            <Plus className="h-3 w-3 text-gray-400 dark:text-zinc-500" />
-            <span className="text-xs font-medium text-gray-400 dark:text-zinc-500">Manage Projects</span>
-          </button>
-        </div>
-      )}
-    </div>
+      {typeof window !== 'undefined' && createPortal(dropdown, document.body)}
+    </>
   );
 }

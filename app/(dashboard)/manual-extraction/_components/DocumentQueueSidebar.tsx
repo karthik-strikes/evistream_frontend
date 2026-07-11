@@ -5,33 +5,36 @@ import { cn } from '@/lib/utils';
 import type { Document } from '@/types/api';
 import { getDraftStatus } from '../_hooks/useDraftAutoSave';
 
-type DocStatus = 'done' | 'draft' | 'todo';
+type DocStatus = 'done' | 'partial' | 'draft' | 'todo';
 
 interface DocumentQueueSidebarProps {
   documents: Document[];
   currentDocId: string;
   doneDocs: Set<string>;
+  partialDocs: Set<string>;
   formId: string;
   onSelectDoc: (doc: Document) => void;
 }
 
-function getDocStatus(doc: Document, doneDocs: Set<string>, formId: string): DocStatus {
+function getDocStatus(doc: Document, doneDocs: Set<string>, partialDocs: Set<string>, formId: string): DocStatus {
   if (doneDocs.has(doc.id)) return 'done';
+  if (partialDocs.has(doc.id)) return 'partial';
   if (getDraftStatus(formId, doc.id)) return 'draft';
   return 'todo';
 }
 
-const statusOrder: Record<DocStatus, number> = { todo: 0, draft: 1, done: 2 };
+const statusOrder: Record<DocStatus, number> = { todo: 0, draft: 1, partial: 2, done: 3 };
 
 const statusBadge: Record<DocStatus, { label: string; cls: string }> = {
   done: { label: 'Done', cls: 'text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800/40' },
+  partial: { label: 'Partial', cls: 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800/40' },
   draft: { label: 'Draft', cls: 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800/40' },
   todo: { label: 'Todo', cls: 'text-gray-500 dark:text-zinc-500 bg-gray-50 dark:bg-[#1a1a1a] border-gray-200 dark:border-[#2a2a2a]' },
 };
 
-export function DocumentQueueSidebar({ documents, currentDocId, doneDocs, formId, onSelectDoc }: DocumentQueueSidebarProps) {
+export function DocumentQueueSidebar({ documents, currentDocId, doneDocs, partialDocs, formId, onSelectDoc }: DocumentQueueSidebarProps) {
   const docsWithStatus = documents
-    .map(d => ({ doc: d, status: getDocStatus(d, doneDocs, formId) }))
+    .map(d => ({ doc: d, status: getDocStatus(d, doneDocs, partialDocs, formId) }))
     .sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
 
   const doneCount = docsWithStatus.filter(d => d.status === 'done').length;

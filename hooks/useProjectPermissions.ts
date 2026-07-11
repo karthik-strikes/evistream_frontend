@@ -11,6 +11,7 @@ export function useProjectPermissions() {
     can_upload_docs: myPermissions?.can_upload_docs ?? false,
     can_create_forms: myPermissions?.can_create_forms ?? false,
     can_run_extractions: myPermissions?.can_run_extractions ?? false,
+    can_run_manual_extractions: myPermissions?.can_run_manual_extractions ?? false,
     can_view_results: myPermissions?.can_view_results ?? true,
     can_adjudicate: myPermissions?.can_adjudicate ?? false,
     can_qa_review: myPermissions?.can_qa_review ?? false,

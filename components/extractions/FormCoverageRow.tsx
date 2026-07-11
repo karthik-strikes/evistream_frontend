@@ -14,6 +14,7 @@ interface FormCoverageRowProps {
   docNamesMap: Map<string, string>;
   canRunExtractions: boolean;
   onRetryFailed: (formId: string) => void;
+  onViewFlagged: (formId: string) => void;
   onRunRemaining: (formId: string) => void;
   onCancel: (extractionId: string) => void;
   onViewResults: (formId: string) => void;
@@ -127,10 +128,10 @@ function RunningCard({
   const jobDone = liveProgress?.done || runningJob?.papers_done || 0;
   const jobTotal = liveProgress?.total || runningJob?.papers_total || 0;
 
-  // Overall progress = prior completions + current job progress
-  const overallDone = extracted_count + jobDone;
-  const overallTotal = total_project_documents;
-  const progressPct = overallTotal > 0 ? Math.round((overallDone / overallTotal) * 100) : 0;
+  // Progress reflects the CURRENT run only — jobDone/jobTotal — never cumulative
+  // historical coverage, which double-counts prior runs when re-running a form.
+  // null = total not yet known (just-started / queued) → render indeterminate.
+  const progressPct = jobTotal > 0 ? Math.round((jobDone / jobTotal) * 100) : null;
   const hasJobProgress = jobDone > 0;
 
   // ETA tracking
@@ -173,24 +174,35 @@ function RunningCard({
   const isQueued = !runningJob && !!queuedJob;
 
   return (
-    <div className="border border-blue-200 dark:border-[#1e2030] rounded-xl bg-white dark:bg-[#141416] overflow-hidden transition-all duration-200 flex shadow-[0_4px_20px_-4px_rgba(59,130,246,0.08)] dark:shadow-[0_4px_24px_-4px_rgba(59,130,246,0.06)]">
+    <div className="border border-violet-200 dark:border-[#1e2030] rounded-xl bg-white dark:bg-[#141416] overflow-hidden transition-all duration-200 flex shadow-[0_4px_20px_-4px_rgba(139,92,246,0.08)] dark:shadow-[0_4px_24px_-4px_rgba(139,92,246,0.06)]">
+      <div className="contents">
       {/* Left sidebar — matches IdleCard layout */}
-      <div className="flex flex-col items-center justify-center w-[110px] flex-shrink-0 border-r border-blue-100 dark:border-[#1e2030] py-4 px-2 bg-[#f0f4ff] dark:bg-[#161a2a]">
-        <span className="text-[10px] font-semibold tracking-widest uppercase mb-2 text-blue-500 dark:text-blue-400">
+      <div className="flex flex-col items-center justify-center w-[110px] flex-shrink-0 border-r border-violet-100 dark:border-[#1e2030] py-4 px-2 bg-[#f7f5ff] dark:bg-[#17151f]">
+        <span className="text-[10px] font-semibold tracking-widest uppercase mb-2 text-violet-400 dark:text-violet-400">
           {isQueued ? 'QUEUED' : 'LIVE'}
         </span>
-        <span className="text-3xl font-bold tabular-nums leading-none text-blue-600 dark:text-blue-300">
-          {progressPct}%
-        </span>
-        <span className="text-[10px] mt-1.5 text-blue-400 dark:text-blue-500">
-          {overallDone} of {overallTotal} docs
-        </span>
-        {/* Mini progress bar */}
-        <div className="w-12 h-1 rounded-full bg-blue-100 dark:bg-[#1e2538] mt-2 overflow-hidden">
-          <div
-            className="h-full bg-blue-500 rounded-full transition-all duration-500 ease-out"
-            style={{ width: `${progressPct}%` }}
-          />
+        {isQueued || progressPct === null ? (
+          <>
+            <span className="text-2xl font-bold tabular-nums leading-none text-violet-400 dark:text-violet-300/80">
+              ···
+            </span>
+            <span className="text-[10px] mt-1.5 text-violet-400 dark:text-violet-500">
+              {isQueued ? 'Queued' : 'Starting…'}
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="text-3xl font-bold tabular-nums leading-none text-violet-500 dark:text-violet-300">
+              {progressPct}%
+            </span>
+            <span className="text-[10px] mt-1.5 text-violet-400 dark:text-violet-500">
+              {jobDone} of {jobTotal} docs
+            </span>
+          </>
+        )}
+        {/* Flowing glow line */}
+        <div className="w-[72px] h-[3px] mt-2.5 rounded-full overflow-hidden bg-violet-200/50 dark:bg-violet-800/20">
+          <div className="h-full w-full bg-gradient-to-r from-transparent via-violet-500 to-transparent glow-sweep" />
         </div>
       </div>
 
@@ -202,10 +214,10 @@ function RunningCard({
             <h3 className="text-sm font-semibold text-gray-900 dark:text-white truncate">
               {form_name}
             </h3>
-            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-medium bg-blue-50 dark:bg-blue-950/30 text-blue-600 dark:text-blue-400 flex-shrink-0">
+            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-medium bg-violet-50 dark:bg-violet-950/30 text-violet-500 dark:text-violet-400 flex-shrink-0">
               <span className="relative flex h-1.5 w-1.5">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75" />
-                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-blue-500" />
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-violet-400 opacity-75" />
+                <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-violet-500" />
               </span>
               {isQueued ? 'Queued' : 'Running'}
             </span>
@@ -235,7 +247,7 @@ function RunningCard({
         {!isQueued && currentDocName && (
           <div className="bg-gray-50 dark:bg-[#0f1018] rounded-lg px-3.5 py-2 mt-0.5">
             <div className="flex items-center gap-2">
-              <Loader2 className="h-3.5 w-3.5 text-blue-500 animate-spin flex-shrink-0" />
+              <Loader2 className="h-3.5 w-3.5 text-violet-500 animate-spin flex-shrink-0" />
               <span className="text-xs text-gray-700 dark:text-zinc-300 truncate font-medium">
                 {currentDocName}
               </span>
@@ -258,8 +270,8 @@ function RunningCard({
             </span>
           )}
           {processingCount > 0 && (
-            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-blue-50 dark:bg-blue-950/20 text-blue-600 dark:text-blue-400">
-              <span className="h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
+            <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-[11px] font-medium bg-violet-50 dark:bg-violet-950/20 text-violet-600 dark:text-violet-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-violet-500 animate-pulse" />
               {processingCount} processing
             </span>
           )}
@@ -271,6 +283,7 @@ function RunningCard({
           )}
         </div>
       </div>
+      </div>
     </div>
   );
 }
@@ -281,6 +294,7 @@ function IdleCard({
   coverage,
   canRunExtractions,
   onRetryFailed,
+  onViewFlagged,
   onRunRemaining,
   onViewResults,
   onClick,
@@ -288,6 +302,7 @@ function IdleCard({
   coverage: FormCoverage;
   canRunExtractions: boolean;
   onRetryFailed: (formId: string) => void;
+  onViewFlagged: (formId: string) => void;
   onRunRemaining: (formId: string) => void;
   onViewResults: (formId: string) => void;
   onClick: (formId: string) => void;
@@ -301,6 +316,7 @@ function IdleCard({
     not_run_count,
     total_runs,
     last_run_at,
+    flagged_count,
   } = coverage;
 
   const status = getCardStatus(coverage);
@@ -411,12 +427,21 @@ function IdleCard({
             {' · '}
             <span className="text-gray-600 dark:text-zinc-300 font-medium">{not_run_count}</span> pending
             {' · '}
-            <span className={cn('font-medium', failed_count > 0 ? 'text-red-600 dark:text-red-400' : 'text-gray-600 dark:text-zinc-300')}>{failed_count}</span>
-            {' '}<span className={failed_count > 0 ? 'text-red-500 dark:text-red-400' : undefined}>errors</span>
+            {flagged_count > 0 ? (
+              <button
+                onClick={(e) => { e.stopPropagation(); onViewFlagged(form_id); }}
+                className="font-medium text-amber-600 dark:text-amber-400 underline-offset-2 hover:underline cursor-pointer bg-transparent border-none p-0"
+                title="Studies with more than half their fields empty — click to view & retry on the Results page"
+              >
+                {flagged_count} flagged
+              </button>
+            ) : (
+              <><span className="text-gray-600 dark:text-zinc-300 font-medium">0</span> flagged</>
+            )}
           </p>
 
           <span className="text-[11px] text-gray-400 dark:text-zinc-500 flex-shrink-0">
-            {isComplete ? '100% success rate' : null}
+            {isComplete && flagged_count === 0 ? '100% success rate' : null}
           </span>
         </div>
       </div>
@@ -432,6 +457,7 @@ export function FormCoverageRow({
   docNamesMap,
   canRunExtractions,
   onRetryFailed,
+  onViewFlagged,
   onRunRemaining,
   onCancel,
   onViewResults,
@@ -455,6 +481,7 @@ export function FormCoverageRow({
       coverage={coverage}
       canRunExtractions={canRunExtractions}
       onRetryFailed={onRetryFailed}
+      onViewFlagged={onViewFlagged}
       onRunRemaining={onRunRemaining}
       onViewResults={onViewResults}
       onClick={onClick}

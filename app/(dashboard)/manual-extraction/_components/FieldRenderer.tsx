@@ -12,9 +12,10 @@ interface FieldRendererProps {
   index: number;
   isAiPrefilled?: boolean;
   id?: string;
+  compact?: boolean;
 }
 
-export function FieldRenderer({ field, value, onChange, index, isAiPrefilled, id }: FieldRendererProps) {
+export function FieldRenderer({ field, value, onChange, index, isAiPrefilled, id, compact }: FieldRendererProps) {
   const val = value ?? '';
   const isEmpty = !val.toString().trim();
   const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => onChange(e.target.value);
@@ -61,11 +62,15 @@ export function FieldRenderer({ field, value, onChange, index, isAiPrefilled, id
         type={field.field_type === 'number' || field.field_type === 'integer' ? 'number' : 'text'}
         value={val}
         onChange={handleChange}
-        placeholder={field.example || `Enter ${field.field_name}`}
+        placeholder={field.example || ''}
         className={cn(inputCls, isAiPrefilled && "bg-blue-50/30 dark:bg-blue-900/10")}
       />
     );
   };
+
+  if (compact) {
+    return <div id={id}>{renderInput()}</div>;
+  }
 
   return (
     <div id={id} className={cn(isEmpty && "border-l-2 border-amber-300 dark:border-amber-600 pl-3", !isEmpty && "pl-[14px]")}>

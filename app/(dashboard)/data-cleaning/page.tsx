@@ -8,6 +8,7 @@ import { dataCleaningService, formsService } from '@/services';
 import type { Form, DataCleaningRow, ValidationRule } from '@/types/api';
 import { Loader2, Download, AlertTriangle, CheckCircle2, Sparkles, Settings } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { PermissionGate } from '@/components/ui/permission-gate';
 
 export default function DataCleaningPage() {
   const { selectedProject } = useProject();
@@ -112,6 +113,7 @@ export default function DataCleaningPage() {
 
   return (
     <DashboardLayout>
+      <PermissionGate permission="can_adjudicate">
       <div className="p-6 max-w-full mx-auto">
         <div className="flex items-center justify-between mb-6">
           <div>
@@ -221,6 +223,7 @@ export default function DataCleaningPage() {
           </div>
         )}
       </div>
+      </PermissionGate>
     </DashboardLayout>
   );
 }

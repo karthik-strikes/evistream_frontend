@@ -24,11 +24,15 @@ export interface FormCoverage {
   active_jobs: FormCoverageActiveJob[];
   extracted_document_ids: string[];
   failed_document_ids: string[];
+  // Studies whose latest result has more than half its fields empty
+  // (NR / not-reported / missing / error / blank) — likely under-extracted.
+  flagged_count: number;
+  flagged_document_ids: string[];
 }
 
 export const extractionsService = {
   async getAll(projectId: string): Promise<Extraction[]> {
-    return apiClient.get<Extraction[]>(`/api/v1/extractions/?project_id=${encodeURIComponent(projectId)}`);
+    return apiClient.get<Extraction[]>(`/api/v1/extractions/?project_id=${encodeURIComponent(projectId)}&limit=500`);
   },
 
   async getCoverage(projectId: string): Promise<FormCoverage[]> {
@@ -55,7 +59,13 @@ export const extractionsService = {
     return apiClient.get<Extraction>(`/api/v1/extractions/${id}`);
   },
 
-  async retryFailed(id: string): Promise<{ job_id: string; retrying_count: number }> {
-    return apiClient.post<{ job_id: string; retrying_count: number }>(`/api/v1/extractions/${id}/retry-failed`);
+  async retryFailed(
+    id: string,
+    documentIds?: string[],
+  ): Promise<{ job_id: string; extraction_id: string; retrying_count: number | string }> {
+    return apiClient.post<{ job_id: string; extraction_id: string; retrying_count: number | string }>(
+      `/api/v1/extractions/${id}/retry-failed`,
+      documentIds && documentIds.length ? { document_ids: documentIds } : undefined,
+    );
   },
 };

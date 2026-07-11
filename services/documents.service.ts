@@ -100,7 +100,7 @@ async function uploadToS3(
 
 export const documentsService = {
   async getAll(projectId: string, search?: string): Promise<Document[]> {
-    let url = `/api/v1/documents?project_id=${encodeURIComponent(projectId)}`;
+    let url = `/api/v1/documents?project_id=${encodeURIComponent(projectId)}&limit=500`;
     if (search && search.trim()) {
       url += `&search=${encodeURIComponent(search.trim())}`;
     }
@@ -176,6 +176,29 @@ export const documentsService = {
 
   async downloadMarkdown(id: string): Promise<string> {
     return apiClient.get<string>(`/api/v1/documents/${id}/markdown`);
+  },
+
+  async downloadBlocks(id: string): Promise<unknown | null> {
+    // Returns the Datalab block-level JSON ({children: [...pages], metadata}),
+    // OR null when the document is a legacy one without a bbox sidecar (the
+    // backend returns 200 with {"unavailable": true} for that case so it
+    // doesn't paint a red 404 in browser devtools).
+    const data: any = await apiClient.get<unknown>(`/api/v1/documents/${id}/blocks`);
+    if (data && typeof data === 'object' && data.unavailable === true) {
+      return null;
+    }
+    return data;
+  },
+
+  async downloadPdfBlob(id: string): Promise<Blob> {
+    // Streams the raw PDF through the backend (same-origin → no S3 CORS).
+    // Caller is responsible for URL.revokeObjectURL on any blob URL it creates.
+    // _skipGlobalToast: the viewer renders its own inline error UI; a toast
+    // would duplicate it.
+    return apiClient.get<Blob>(`/api/v1/documents/${id}/file`, {
+      responseType: 'blob',
+      _skipGlobalToast: true,
+    } as any);
   },
 
   async getDownloadUrl(id: string): Promise<string> {

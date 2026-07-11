@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
-import { AlertCircle, Loader2, Play, Search } from 'lucide-react';
+import { AlertCircle, FolderOpen, Loader2, Play, Search } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { apiClient } from '@/lib/api';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
@@ -131,6 +131,10 @@ export default function ExtractionsPage() {
               });
             } else if (msg.type === 'complete') {
               queryClient.invalidateQueries({ queryKey: coverageQueryKeyRef.current });
+              // Also refresh the Results page caches so finished rows show without a manual reload
+              queryClient.invalidateQueries({ queryKey: ['results'] });
+              queryClient.invalidateQueries({ queryKey: ['results-by-form'] });
+              queryClient.invalidateQueries({ queryKey: ['extractions-with-forms'] });
             }
           } catch { /* ignore */ }
         };
@@ -160,7 +164,32 @@ export default function ExtractionsPage() {
     };
   }, []);
 
+  // Aggregate failure state
+  const formsWithFailures = coverageData.filter(
+    (c) => c.failed_count > 0 && c.latest_failed_extraction_id
+  );
+  const totalFailedPapers = formsWithFailures.reduce((s, c) => s + c.failed_count, 0);
+
   // Actions
+  const handleRetryAllFailed = async () => {
+    if (!formsWithFailures.length) return;
+    try {
+      await Promise.all(
+        formsWithFailures.map((c) =>
+          extractionsService.retryFailed(c.latest_failed_extraction_id!)
+        )
+      );
+      toast({
+        title: 'Retrying',
+        description: `Retry started for ${totalFailedPapers} paper${totalFailedPapers === 1 ? '' : 's'} across ${formsWithFailures.length} form${formsWithFailures.length === 1 ? '' : 's'}`,
+        variant: 'success',
+      });
+      queryClient.invalidateQueries({ queryKey: coverageQueryKey });
+    } catch (error: any) {
+      toast({ title: 'Error', description: getErrorMessage(error, 'Failed to start retry'), variant: 'error' });
+    }
+  };
+
   const handleRetryFailed = async (formId: string) => {
     const form = coverageData.find((c) => c.form_id === formId);
     if (!form?.latest_failed_extraction_id) return;
@@ -171,6 +200,10 @@ export default function ExtractionsPage() {
     } catch (error: any) {
       toast({ title: 'Error', description: getErrorMessage(error, 'Failed to start retry'), variant: 'error' });
     }
+  };
+
+  const handleViewFlagged = (formId: string) => {
+    router.push(`/results?form_id=${formId}&flagged=1`);
   };
 
   const handleCancel = async (extractionId: string) => {
@@ -225,7 +258,18 @@ export default function ExtractionsPage() {
     c.form_name.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
-  if (!selectedProject) return null;
+  if (!selectedProject) {
+    return (
+      <DashboardLayout title="Extractions" description="Extract data from papers using your forms">
+        <EmptyState
+          icon={FolderOpen}
+          title="No project selected"
+          description="Create or open a project to run extractions."
+          action={{ label: 'Go to projects', onClick: () => router.push('/projects') }}
+        />
+      </DashboardLayout>
+    );
+  }
 
   if (!can_view_results) {
     return (
@@ -260,6 +304,28 @@ export default function ExtractionsPage() {
         <div className="space-y-6">
           {/* Active status line */}
           <ActiveStatusLine coverageData={coverageData} />
+
+          {/* Aggregate failure banner */}
+          {totalFailedPapers > 0 && (
+            <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/40">
+              <div className="flex flex-col">
+                <span className="text-sm text-amber-700 dark:text-amber-400">
+                  ⚠ {totalFailedPapers} paper{totalFailedPapers !== 1 ? 's' : ''} failed to extract{formsWithFailures.length > 1 ? ` across ${formsWithFailures.length} forms` : ''}.
+                </span>
+                <span className="text-[11px] text-amber-600/80 dark:text-amber-500/70 mt-0.5">
+                  Often a temporary model rate limit — retry now, or wait a few minutes and try again.
+                </span>
+              </div>
+              {can_run_extractions && (
+                <button
+                  onClick={handleRetryAllFailed}
+                  className="text-xs font-semibold text-amber-700 dark:text-amber-400 bg-amber-100 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 px-3 py-1.5 rounded-lg cursor-pointer transition-colors hover:bg-amber-200 dark:hover:bg-amber-900/40 whitespace-nowrap"
+                >
+                  Retry all failed
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Search + Run button */}
           <div className="flex items-center gap-3">
@@ -311,6 +377,7 @@ export default function ExtractionsPage() {
                   docNamesMap={docNamesMap}
                   canRunExtractions={can_run_extractions}
                   onRetryFailed={handleRetryFailed}
+                  onViewFlagged={handleViewFlagged}
                   onRunRemaining={handleRunRemaining}
                   onCancel={handleCancel}
                   onViewResults={handleViewResults}

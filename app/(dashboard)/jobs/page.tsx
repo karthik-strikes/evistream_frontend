@@ -4,7 +4,7 @@ import { useState, useMemo } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { EmptyState, PermissionGate } from '@/components/ui';
-import { Loader2, PlayCircle } from 'lucide-react';
+import { FolderOpen, Loader2, PlayCircle } from 'lucide-react';
 import { useProject } from '@/contexts/ProjectContext';
 import { jobsService, formsService } from '@/services';
 import { useJobWebSocket } from '@/hooks/useJobWebSocket';
@@ -116,7 +116,18 @@ export default function JobsPage() {
     setActiveFilter(filter as JobFilterType);
   };
 
-  if (!selectedProject) return null;
+  if (!selectedProject) {
+    return (
+      <DashboardLayout title="Jobs" description="Track document processing, code generation, and extractions">
+        <EmptyState
+          icon={FolderOpen}
+          title="No project selected"
+          description="Create or open a project to view background jobs."
+          action={{ label: 'Go to projects', onClick: () => router.push('/projects') }}
+        />
+      </DashboardLayout>
+    );
+  }
 
   const SectionHeader = ({
     label,

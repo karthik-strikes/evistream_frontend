@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, use } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
 import { formsService, documentsService, extractionsService, assignmentsService, vocabulariesService } from '@/services';
@@ -22,8 +22,10 @@ import {
   ClipboardList,
   BookOpen,
 } from 'lucide-react';
+import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 import { ProjectMembersModal } from '@/components/project/ProjectMembersModal';
 import { ProjectHubCard } from '@/components/project/ProjectHubCard';
+import { ProjectCostSummary } from '@/components/project/ProjectCostSummary';
 import { DocumentsSection } from '@/components/project/sections/DocumentsSection';
 import { FormsSection } from '@/components/project/sections/FormsSection';
 import { ExtractionsSection } from '@/components/project/sections/ExtractionsSection';
@@ -37,6 +39,13 @@ import { VocabulariesSection } from '@/components/project/sections/VocabulariesS
 
 type Section = 'documents' | 'forms' | 'extractions' | 'members' | 'assignments' | 'vocabularies' | null;
 
+const VALID_SECTIONS = ['documents', 'forms', 'extractions', 'members', 'assignments', 'vocabularies'] as const;
+
+function parseSection(value: string | null): Section {
+  if (value && (VALID_SECTIONS as readonly string[]).includes(value)) return value as Section;
+  return null;
+}
+
 // ============================================================================
 // Main page
 // ============================================================================
@@ -44,8 +53,11 @@ type Section = 'documents' | 'forms' | 'extractions' | 'members' | 'assignments'
 export default function ProjectDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = use(params);
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
   const { toast } = useToast();
-  const { projects, selectedProject, setSelectedProject, updateProject, deleteProject } = useProject();
+  const { projects, selectedProject, setSelectedProject, updateProject, deleteProject, refreshProjects } = useProject();
+  const perms = useProjectPermissions();
 
   const proj = projects.find((p: any) => p.id === id) || null;
 
@@ -57,7 +69,15 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const [vocabularies, setVocabularies] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const [activeSection, setActiveSection] = useState<Section>(null);
+  const activeSection: Section = parseSection(searchParams.get('tab'));
+
+  const setActiveSection = (next: Section) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next) params.set('tab', next);
+    else params.delete('tab');
+    const qs = params.toString();
+    router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
 
   const [showEdit, setShowEdit] = useState(false);
   const [editData, setEditData] = useState({ name: '', description: '' });
@@ -75,7 +95,9 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           formsService.getAll(id),
           documentsService.getAll(id),
           extractionsService.getAll(id),
-          projectMembersService.listMembers(id).catch(() => []),
+          perms.can_manage_members
+            ? projectMembersService.listMembers(id).catch(() => [])
+            : Promise.resolve([]),
           vocabulariesService.list(id).catch(() => []),
         ]);
         setForms(f);
@@ -99,7 +121,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
       }
     };
     fetchAll();
-  }, [id]);
+  }, [id, perms.can_manage_members]);
 
   // Derived stats for card breakdown lines
   const activeForms = forms.filter((f: any) => f.status === 'active').length;
@@ -216,20 +238,26 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                   Set Active
                 </button>
               )}
-              <button
-                onClick={handleOpenEdit}
-                disabled={submitting}
-                className="flex items-center justify-center w-8 h-8 rounded-lg border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors disabled:opacity-40"
-              >
-                <Edit2 size={14} />
-              </button>
-              <button
-                onClick={handleDelete}
-                disabled={submitting}
-                className="flex items-center justify-center w-8 h-8 rounded-lg border border-red-200 dark:border-red-900/40 bg-white dark:bg-[#111111] text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 transition-colors disabled:opacity-40"
-              >
-                <Trash2 size={14} />
-              </button>
+              {activeSection === null && (perms.isOwner || perms.isAdmin) && (
+                <>
+                  <button
+                    onClick={handleOpenEdit}
+                    disabled={submitting}
+                    title="Rename project"
+                    className="flex items-center justify-center w-8 h-8 rounded-lg border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] hover:text-gray-700 dark:hover:text-zinc-200 transition-colors disabled:opacity-40"
+                  >
+                    <Edit2 size={14} />
+                  </button>
+                  <button
+                    onClick={handleDelete}
+                    disabled={submitting}
+                    title="Delete project"
+                    className="flex items-center justify-center w-8 h-8 rounded-lg border border-red-200 dark:border-red-900/40 bg-white dark:bg-[#111111] text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 transition-colors disabled:opacity-40"
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </>
+              )}
             </div>
           </div>
         </div>
@@ -244,7 +272,9 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           /* ============================================================ */
           /* Hub Card Grid                                                 */
           /* ============================================================ */
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          <>
+            {(perms.isOwner || perms.isAdmin) && <ProjectCostSummary projectId={id} />}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <ProjectHubCard
               icon={FileCheck}
               title="Documents"
@@ -302,9 +332,9 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
               accentColor="bg-teal-500"
               breakdownLines={[]}
               badge="Beta"
-              onClick={() => setActiveSection('vocabularies')}
             />
-          </div>
+            </div>
+          </>
         ) : (
           /* ============================================================ */
           /* Drilled-in section                                            */
@@ -335,7 +365,9 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                     members={members}
                     onMembersChange={setMembers}
                     onInvite={() => setShowMembers(true)}
+                    onOwnerTransferred={refreshProjects}
                     ownerId={proj?.user_id}
+                    projectName={proj?.name}
                   />
                 )}
                 {activeSection === 'assignments' && (

@@ -5,14 +5,14 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import {
   User, Lock, Download, Bell, Save, Loader2,
-  AlertCircle, Key,
+  AlertCircle, Key, Sparkles,
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { authService, settingsService } from '@/services';
 import type { UserSettingsUpdate } from '@/services/settings.service';
 import { cn } from '@/lib/utils';
 
-type Section = 'profile' | 'security' | 'export' | 'notifications';
+type Section = 'profile' | 'security' | 'export' | 'notifications' | 'aiModel';
 
 const NAV_GROUPS = [
   {
@@ -26,6 +26,7 @@ const NAV_GROUPS = [
   {
     label: 'Preferences',
     items: [
+      { id: 'aiModel' as Section, label: 'AI Model', icon: Sparkles, beta: true },
       { id: 'notifications' as Section, label: 'Notifications', icon: Bell },
     ],
   },
@@ -102,15 +103,24 @@ export default function SettingsPage() {
   const [profile, setProfile] = useState({ fullName: '', email: '', currentPassword: '', newPassword: '', confirmPassword: '' });
   const [notificationSettings, setNotificationSettings] = useState({ email: true, browser: true, extractionComplete: true, extractionFailed: true, codeGeneration: true });
   const [exportSettings, setExportSettings] = useState({ format: 'csv', dateFormat: 'ISO', includeMetadata: true, includeConfidence: true });
+  const [extractionModel, setExtractionModel] = useState<string>('');
 
-  const { isLoading: loading } = useQuery({
-    queryKey: ['currentUser'],
-    queryFn: async () => {
-      const user = await authService.getCurrentUser();
-      setProfile(prev => ({ ...prev, fullName: user.full_name, email: user.email }));
-      return user;
-    },
+  const { data: availableModels } = useQuery({
+    queryKey: ['availableModels'],
+    queryFn: () => settingsService.listModels(),
+    staleTime: 1000 * 60 * 30,
   });
+
+  const { data: currentUser, isLoading: loading } = useQuery({
+    queryKey: ['currentUser'],
+    queryFn: () => authService.getCurrentUser(),
+  });
+
+  useEffect(() => {
+    if (currentUser) {
+      setProfile(prev => ({ ...prev, fullName: currentUser.full_name ?? '', email: currentUser.email ?? '' }));
+    }
+  }, [currentUser]);
 
   // Load persisted settings from API
   const { data: savedSettings, isLoading: settingsLoading } = useQuery({
@@ -134,6 +144,7 @@ export default function SettingsPage() {
         extractionFailed: savedSettings.notify_extraction_failed,
         codeGeneration: savedSettings.notify_code_generation,
       });
+      setExtractionModel(savedSettings.extraction_model ?? '');
     }
   }, [savedSettings]);
 
@@ -181,6 +192,13 @@ export default function SettingsPage() {
       });
     });
 
+  const saveAiModel = () =>
+    save(async () => {
+      await settingsMutation.mutateAsync({
+        extraction_model: extractionModel || null,
+      });
+    });
+
   const validateAndSavePassword = async () => {
     const errors: string[] = [];
     if (!profile.currentPassword) errors.push('Current password is required');
@@ -189,7 +207,10 @@ export default function SettingsPage() {
     setPasswordErrors(errors);
     if (errors.length > 0) return;
     await save(async () => {
-      await new Promise(r => setTimeout(r, 700));
+      await authService.changePassword({
+        current_password: profile.currentPassword,
+        new_password: profile.newPassword,
+      });
       setProfile(prev => ({ ...prev, currentPassword: '', newPassword: '', confirmPassword: '' }));
       setPasswordErrors([]);
     });
@@ -201,6 +222,7 @@ export default function SettingsPage() {
     security: 'Security',
     export: 'Export',
     notifications: 'Notifications',
+    aiModel: 'AI Model',
   };
 
   return (
@@ -224,6 +246,7 @@ export default function SettingsPage() {
               {group.items.map(item => {
                 const Icon = item.icon;
                 const isActive = active === item.id;
+                const isBeta = (item as { beta?: boolean }).beta;
                 return (
                   <button
                     key={item.id}
@@ -236,7 +259,12 @@ export default function SettingsPage() {
                     )}
                   >
                     <Icon className="w-3.5 h-3.5 flex-shrink-0" />
-                    {item.label}
+                    <span className="flex-1 truncate">{item.label}</span>
+                    {isBeta && (
+                      <span className="text-[9px] font-semibold tracking-wider uppercase px-1.5 py-0.5 rounded-md bg-indigo-50 text-indigo-600 dark:bg-indigo-500/10 dark:text-indigo-300">
+                        Beta
+                      </span>
+                    )}
                   </button>
                 );
               })}
@@ -272,7 +300,13 @@ export default function SettingsPage() {
 
                   <div className="flex justify-end">
                     <button
-                      onClick={() => save()}
+                      onClick={() => save(async () => {
+                        const updated = await authService.updateProfile({
+                          full_name: profile.fullName,
+                          email: profile.email,
+                        });
+                        queryClient.setQueryData(['currentUser'], updated);
+                      })}
                       disabled={saving}
                       className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 transition-colors"
                     >
@@ -382,6 +416,42 @@ export default function SettingsPage() {
 
                   <div className="flex justify-end">
                     <button onClick={saveNotifications} disabled={saving} className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 transition-colors">
+                      {saving ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Saving…</> : <><Save className="w-3.5 h-3.5" />Save changes</>}
+                    </button>
+                  </div>
+                </>
+              )}
+
+              {/* ── AI Model (Beta) ── */}
+              {active === 'aiModel' && (
+                <>
+                  <div className="flex gap-2.5 px-4 py-3 mb-5 rounded-lg border border-indigo-100 dark:border-indigo-900/40 bg-indigo-50/60 dark:bg-indigo-500/5">
+                    <Sparkles className="w-4 h-4 text-indigo-500 shrink-0 mt-0.5" />
+                    <div className="space-y-0.5">
+                      <p className="text-xs font-medium text-indigo-700 dark:text-indigo-300">Beta — model selection lives in Settings for now</p>
+                      <p className="text-[11px] text-indigo-600/70 dark:text-indigo-300/60 leading-relaxed">
+                        Your choice applies to every extraction you start. When this graduates, the picker will move into the extraction launch dialog so you can pick per run.
+                      </p>
+                    </div>
+                  </div>
+
+                  <SectionCard title="Extraction Model" description="The LLM used when running AI extractions on your documents">
+                    <SettingRow label="Preferred model" description="Falls back automatically if the model is rate-limited" last>
+                      <select
+                        value={extractionModel}
+                        onChange={e => setExtractionModel(e.target.value)}
+                        className={selectCls}
+                      >
+                        <option value="">System default</option>
+                        {(availableModels ?? []).map(m => (
+                          <option key={m.id} value={m.id}>{m.label}</option>
+                        ))}
+                      </select>
+                    </SettingRow>
+                  </SectionCard>
+
+                  <div className="flex justify-end">
+                    <button onClick={saveAiModel} disabled={saving} className="inline-flex items-center gap-2 px-4 py-2 text-sm font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-100 rounded-lg hover:bg-gray-700 dark:hover:bg-white disabled:opacity-40 transition-colors">
                       {saving ? <><Loader2 className="w-3.5 h-3.5 animate-spin" />Saving…</> : <><Save className="w-3.5 h-3.5" />Save changes</>}
                     </button>
                   </div>

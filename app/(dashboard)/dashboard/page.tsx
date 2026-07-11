@@ -8,6 +8,7 @@ import { useTheme } from '@/contexts/ThemeContext';
 import { dashboardService } from '@/services/dashboard.service';
 import { extractionsService } from '@/services/extractions.service';
 import { useToast } from '@/hooks/use-toast';
+import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 import Link from 'next/link';
 import { statusColor } from '@/lib/colors';
 import { cn } from '@/lib/utils';
@@ -123,6 +124,7 @@ export default function DashboardPage() {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
   const { toast } = useToast();
+  const { can_run_extractions } = useProjectPermissions();
 
   const T = makeTokens(isDark);
 
@@ -536,7 +538,7 @@ export default function DashboardPage() {
                           <span style={{ fontSize: 11, fontWeight: 600, color: isDark ? T.textMuted : T.accentBlue, border: `1px solid ${isDark ? T.glassBorder : T.accentBlue + '40'}`, borderRadius: 6, padding: '3px 10px', cursor: 'pointer' }}>View</span>
                         </Link>
                       )}
-                      {(doc.status === 'failed' || isPartial) && (
+                      {(doc.status === 'failed' || isPartial) && can_run_extractions && (
                         <span
                           onClick={() => !isPartial && handleRetry(doc.id)}
                           style={{ fontSize: 11, fontWeight: 600, color: '#fff', background: isPartial ? T.accentAmber : T.accent, borderRadius: 6, padding: '3px 10px', cursor: 'pointer' }}
