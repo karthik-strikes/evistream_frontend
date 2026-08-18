@@ -4,6 +4,8 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
+import { useAuth } from '@/contexts/AuthContext';
+import { useConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { dashboardService } from '@/services';
 import { useToast } from '@/hooks/use-toast';
 import { C } from '@/lib/colors';
@@ -47,19 +49,14 @@ function projectColor(name: string): string {
   return PROJECT_PALETTE[Math.abs(h) % PROJECT_PALETTE.length];
 }
 
-// Step 5 — heuristic status from available counts
-type ProjectStatus = 'Empty' | 'Setup' | 'Active';
-function projectStatus(forms: number, docs: number): ProjectStatus {
-  if (forms === 0 && docs === 0) return 'Empty';
-  if (forms === 0 || docs === 0) return 'Setup';
-  return 'Active';
-}
-
 export default function ProjectsPage() {
   const { toast } = useToast();
   const router = useRouter();
-  const { projects: contextProjects, selectedProject: contextProject, setSelectedProject, createProject, updateProject, deleteProject } = useProject();
+  const { currentUser, isAdmin } = useAuth();
+  const { confirm, dialog } = useConfirmationDialog();
+  const { projects: contextProjects, archivedProjects, selectedProject: contextProject, setSelectedProject, createProject, updateProject, deleteProject, archiveProject, unarchiveProject } = useProject();
 
+  const [tab, setTab] = useState<'active' | 'archived'>('active');
   const [showCreate, setShowCreate] = useState(false);
   const [createData, setCreateData] = useState({ name: '', description: '' });
   const [submitting, setSubmitting] = useState(false);
@@ -123,7 +120,14 @@ export default function ProjectsPage() {
   };
 
   const handleDelete = async (id: string, name: string) => {
-    if (!confirm(`Delete "${name}"? This action cannot be undone.`)) return;
+    const confirmed = await confirm({
+      title: 'Delete project',
+      description: `Delete "${name}"? This action cannot be undone.`,
+      confirmLabel: 'Delete',
+      variant: 'destructive',
+      onConfirm: () => {},
+    });
+    if (!confirmed) return;
     setSubmitting(true);
     try {
       await deleteProject(id);
@@ -133,10 +137,46 @@ export default function ProjectsPage() {
     } finally { setSubmitting(false); }
   };
 
+  const handleArchive = async (id: string, name: string) => {
+    const confirmed = await confirm({
+      title: 'Archive project',
+      description: `Archive "${name}"? It will be hidden from the project selector and become read-only. Results stay viewable, and you can restore it anytime.`,
+      confirmLabel: 'Archive',
+      onConfirm: () => {},
+    });
+    if (!confirmed) return;
+    setSubmitting(true);
+    try {
+      await archiveProject(id);
+      toast({ title: 'Project archived', variant: 'success' });
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message, variant: 'error' });
+    } finally { setSubmitting(false); }
+  };
+
+  const handleRestore = async (id: string) => {
+    setSubmitting(true);
+    try {
+      await unarchiveProject(id);
+      toast({ title: 'Project restored', variant: 'success' });
+      setTab('active');
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message, variant: 'error' });
+    } finally { setSubmitting(false); }
+  };
+
+  // Rename/archive: owner, manager, admin, or the original creator.
+  // Delete stays narrower — owners and admins only.
+  const canManage = (proj: any) =>
+    isAdmin || proj.user_id === currentUser?.id || proj.my_role === 'owner' || proj.my_role === 'manager';
+  const canDelete = (proj: any) =>
+    isAdmin || proj.user_id === currentUser?.id || proj.my_role === 'owner';
+
   const projects = contextProjects || [];
+  const archived = archivedProjects || [];
 
   const filteredProjects = useMemo(() => {
-    let list = projects;
+    let list = tab === 'archived' ? archived : projects;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       list = list.filter((p: any) =>
@@ -144,7 +184,7 @@ export default function ProjectsPage() {
       );
     }
     return list;
-  }, [projects, searchQuery]);
+  }, [tab, projects, archived, searchQuery]);
 
   return (
     <DashboardLayout>
@@ -156,6 +196,7 @@ export default function ProjectsPage() {
             <h1 className="text-2xl font-semibold text-gray-900 dark:text-white tracking-tight m-0">Projects</h1>
             <p className="text-sm text-gray-400 mt-1 font-normal">
               {projects.length} {projects.length === 1 ? 'project' : 'projects'}
+              {archived.length > 0 && ` · ${archived.length} archived`}
             </p>
           </div>
           <div className="flex items-center gap-2">
@@ -180,6 +221,29 @@ export default function ProjectsPage() {
             </button>
           </div>
         </div>
+
+        {/* -- Active / Archived tabs (only once something is archived) -- */}
+        {archived.length > 0 && (
+          <div className="flex items-center gap-1.5 pb-5 animate-dashboard-fadeIn">
+            {([
+              { key: 'active' as const, label: 'Active', count: projects.length },
+              { key: 'archived' as const, label: 'Archived', count: archived.length },
+            ]).map(({ key, label, count }) => (
+              <button
+                key={key}
+                onClick={() => setTab(key)}
+                className={cn(
+                  "font-inherit text-xs font-semibold px-3 py-1.5 rounded-lg border cursor-pointer transition-colors",
+                  tab === key
+                    ? "bg-gray-900 text-white border-gray-900 dark:bg-white dark:text-black dark:border-white"
+                    : "bg-transparent text-gray-500 dark:text-gray-400 border-gray-200 dark:border-[#1f1f1f] hover:text-gray-700 dark:hover:text-gray-200"
+                )}
+              >
+                {label} ({count})
+              </button>
+            ))}
+          </div>
+        )}
 
         {/* -- Inline create form -- */}
         {showCreate && (
@@ -222,7 +286,7 @@ export default function ProjectsPage() {
         )}
 
         {/* -- Empty state -- */}
-        {projects.length === 0 && (
+        {tab === 'active' && projects.length === 0 && (
           <div className="text-center py-20 animate-dashboard-fadeIn">
             <div className="w-12 h-12 rounded-xl bg-gray-100 flex items-center justify-center mx-auto mb-4">
               <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#bbb" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
@@ -239,7 +303,7 @@ export default function ProjectsPage() {
         )}
 
         {/* -- No search results -- */}
-        {projects.length > 0 && filteredProjects.length === 0 && (
+        {(tab === 'archived' ? archived.length : projects.length) > 0 && filteredProjects.length === 0 && (
           <div className="text-center py-16 animate-dashboard-fadeIn">
             <div className="text-sm text-gray-400 mb-1">No matching projects</div>
             <div className="text-sm text-gray-300">Try a different search term</div>
@@ -251,11 +315,11 @@ export default function ProjectsPage() {
           {filteredProjects.map((proj: any, i: number) => {
             const isActive = proj.id === contextProject?.id;
             const isEditing = editingId === proj.id;
+            const isProjArchived = !!proj.archived_at;
             const stats = projectStats[proj.id];
             const totalForms = stats?.forms ?? 0;
             const totalDocs = stats?.documents ?? 0;
-            const color = projectColor(proj.name);
-            const status = projectStatus(totalForms, totalDocs);
+            const color = isProjArchived ? '#9ca3af' : projectColor(proj.name);
 
             return (
               <div
@@ -266,7 +330,9 @@ export default function ProjectsPage() {
                   // Step 6: quiet active state — just a colored left border, no loud gradient
                   isActive
                     ? "border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111]"
-                    : "border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111]"
+                    : "border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111]",
+                  // Archived cards read as dormant: muted, and no ambient glow
+                  isProjArchived && "opacity-60 hover:opacity-95"
                 )}
                 onClick={() => { if (!isEditing) router.push(`/projects/${proj.id}`); }}
                 style={{
@@ -276,7 +342,7 @@ export default function ProjectsPage() {
                 }}
               >
                 {/* Hybrid: static asymmetric glows (anchor) + barely-perceptible slow rotation (flow) + hover scan (futuristic reward) */}
-                {!isEditing && (
+                {!isEditing && !isProjArchived && (
                   <div className="absolute inset-0 overflow-hidden rounded-xl pointer-events-none">
                     {/* Layer 1 — undertone: very faint slow-rotating conic, gives "alive" feeling without distraction */}
                     <div
@@ -370,7 +436,8 @@ export default function ProjectsPage() {
                         )}>{proj.name}</span>
                       </div>
 
-                      {/* Step 6: menu button hidden until hover */}
+                      {/* Menu button hidden until hover; owner, manager, admin, or creator */}
+                      {canManage(proj) && (
                       <div
                         className="relative shrink-0 opacity-0 group-hover:opacity-100 transition-opacity duration-150"
                         ref={menuOpenId === proj.id ? menuRef : undefined}
@@ -378,17 +445,21 @@ export default function ProjectsPage() {
                       >
                         <button
                           onClick={() => setMenuOpenId(menuOpenId === proj.id ? null : proj.id)}
+                          aria-label="Project options"
                           className="font-inherit text-base text-gray-400 bg-transparent border border-transparent rounded-md px-1.5 py-0.5 cursor-pointer leading-none hover:bg-gray-100 dark:hover:bg-[#1a1a1a] hover:border-gray-200"
                         >...</button>
                         {menuOpenId === proj.id && (
                           <div className="absolute right-0 top-full mt-1 bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#1f1f1f] rounded-lg shadow-dropdown z-50 min-w-[130px] overflow-hidden animate-dashboard-fadeIn">
-                            <button
-                              className="menu-item font-inherit text-sm text-gray-700 dark:text-[#c0c0c0] bg-transparent border-none py-2 px-3.5 cursor-pointer flex items-center gap-2 w-full text-left"
-                              onClick={() => { setEditingId(proj.id); setEditData({ name: proj.name, description: proj.description || '' }); setMenuOpenId(null); }}
-                            >
-                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                              Edit
-                            </button>
+                            {/* Renaming an archived project is blocked server-side (409), so hide Edit */}
+                            {!isProjArchived && (
+                              <button
+                                className="menu-item font-inherit text-sm text-gray-700 dark:text-[#c0c0c0] bg-transparent border-none py-2 px-3.5 cursor-pointer flex items-center gap-2 w-full text-left"
+                                onClick={() => { setEditingId(proj.id); setEditData({ name: proj.name, description: proj.description || '' }); setMenuOpenId(null); }}
+                              >
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+                                Edit
+                              </button>
+                            )}
                             <button
                               className="menu-item font-inherit text-sm text-gray-700 dark:text-[#c0c0c0] bg-transparent border-none py-2 px-3.5 cursor-pointer flex items-center gap-2 w-full text-left"
                               onClick={() => { setMembersModalProject({ id: proj.id, name: proj.name }); setMenuOpenId(null); }}
@@ -396,23 +467,49 @@ export default function ProjectsPage() {
                               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
                               Members
                             </button>
-                            <div className="h-px bg-gray-100 dark:bg-[#1a1a1a]" />
-                            <button
-                              className="menu-item font-inherit text-sm bg-transparent border-none py-2 px-3.5 cursor-pointer flex items-center gap-2 w-full text-left"
-                              style={{ color: C.red }}
-                              onClick={() => { handleDelete(proj.id, proj.name); setMenuOpenId(null); }}
-                            >
-                              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
-                              Delete
-                            </button>
+                            {isProjArchived ? (
+                              <button
+                                className="menu-item font-inherit text-sm text-gray-700 dark:text-[#c0c0c0] bg-transparent border-none py-2 px-3.5 cursor-pointer flex items-center gap-2 w-full text-left"
+                                onClick={() => { handleRestore(proj.id); setMenuOpenId(null); }}
+                              >
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 12a9 9 0 109-9 9 9 0 00-6.36 2.64L3 8"/><path d="M3 3v5h5"/></svg>
+                                Restore
+                              </button>
+                            ) : (
+                              <button
+                                className="menu-item font-inherit text-sm text-gray-700 dark:text-[#c0c0c0] bg-transparent border-none py-2 px-3.5 cursor-pointer flex items-center gap-2 w-full text-left"
+                                onClick={() => { handleArchive(proj.id, proj.name); setMenuOpenId(null); }}
+                              >
+                                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="5" rx="1"/><path d="M4 8v11a2 2 0 002 2h12a2 2 0 002-2V8"/><path d="M10 12h4"/></svg>
+                                Archive
+                              </button>
+                            )}
+                            {/* Delete stays narrower than archive: owners and admins only */}
+                            {canDelete(proj) && (
+                              <>
+                                <div className="h-px bg-gray-100 dark:bg-[#1a1a1a]" />
+                                <button
+                                  className="menu-item font-inherit text-sm bg-transparent border-none py-2 px-3.5 cursor-pointer flex items-center gap-2 w-full text-left"
+                                  style={{ color: C.red }}
+                                  onClick={() => { handleDelete(proj.id, proj.name); setMenuOpenId(null); }}
+                                >
+                                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2"/></svg>
+                                  Delete
+                                </button>
+                              </>
+                            )}
                           </div>
                         )}
                       </div>
+                      )}
                     </div>
 
                     {/* Recency stamp */}
                     <div className="text-[11px] text-gray-400 dark:text-gray-600 mb-2 pl-[38px]">
-                      {relativeTime(proj.updated_at || proj.created_at)}
+                      {/* created_at, not updated_at — the list is ordered by
+                          creation date, so showing "last updated" here made a
+                          correctly-sorted list look shuffled. */}
+                      {relativeTime(proj.created_at)}
                     </div>
 
                     {/* Description only if present */}
@@ -425,21 +522,25 @@ export default function ProjectsPage() {
                     {/* Bottom row: status pill (only when actionable) + counts + set active */}
                     <div className="flex items-center justify-between mt-3 pl-[38px]">
                       <div className="flex items-center gap-2">
-                        {/* Status pill — only shown when project needs setup */}
-                        {status === 'Setup' && (
-                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full text-blue-600 bg-blue-50 dark:text-blue-400 dark:bg-blue-400/10">
-                            Setup
+                        {isProjArchived && (
+                          <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full text-gray-600 bg-gray-100 dark:text-gray-400 dark:bg-gray-400/10">
+                            Archived
                           </span>
                         )}
 
-                        {/* Counts — always visible */}
+                        {/* Counts come from the dashboard stats call, which excludes
+                            archived projects — so show the archive stamp instead of
+                            a misleading "0 forms · 0 docs". */}
                         <span className="text-[11px] text-gray-400 dark:text-gray-600">
-                          {totalForms} {totalForms === 1 ? 'form' : 'forms'} · {totalDocs} {totalDocs === 1 ? 'doc' : 'docs'}
+                          {isProjArchived
+                            ? `Archived ${relativeTime(proj.archived_at)}`
+                            : `${totalForms} ${totalForms === 1 ? 'form' : 'forms'} · ${totalDocs} ${totalDocs === 1 ? 'doc' : 'docs'}`}
                         </span>
                       </div>
 
-                      {/* Step 6: set active hidden until hover */}
-                      {!isActive && (
+                      {/* Step 6: set active hidden until hover. Archived projects
+                          can't be made active — they're hidden from the selector. */}
+                      {!isActive && !isProjArchived && (
                         <button
                           onClick={(e) => { e.stopPropagation(); setSelectedProject(proj); }}
                           className="font-inherit text-xs font-semibold text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 cursor-pointer bg-transparent border-none transition-colors opacity-0 group-hover:opacity-100 duration-150"
@@ -455,7 +556,8 @@ export default function ProjectsPage() {
             );
           })}
 
-          {/* New project tile */}
+          {/* New project tile — active tab only */}
+          {tab === 'active' && (
           <button
             onClick={() => setShowCreate(true)}
             className="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-200 dark:border-[#1f1f1f]/60 p-4 cursor-pointer hover:border-gray-400 dark:hover:border-gray-500 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]/40 transition-all duration-150 min-h-[110px] bg-transparent"
@@ -465,6 +567,7 @@ export default function ProjectsPage() {
             </svg>
             <span className="text-xs font-medium text-gray-400 dark:text-gray-500">New Project</span>
           </button>
+          )}
         </div>
       </div>
 
@@ -475,6 +578,7 @@ export default function ProjectsPage() {
         isOpen={!!membersModalProject}
         onClose={() => setMembersModalProject(null)}
       />
+      {dialog}
 
     </DashboardLayout>
   );

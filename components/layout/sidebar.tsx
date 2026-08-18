@@ -19,16 +19,20 @@ import {
   DollarSign,
 } from 'lucide-react';
 import { Logo } from '@/components/ui/logo';
+import { ForestPlotIcon } from '@/components/ui/forest-plot-icon';
 import { cn } from '@/lib/utils';
 import { typography } from '@/lib/typography';
 import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 
+/** Lucide icons, plus any local SVG component taking the same className prop. */
+type NavIcon = LucideIcon | React.ComponentType<{ className?: string }>;
+
 interface NavigationItem {
   name: string;
   href: string;
-  icon: LucideIcon;
+  icon: NavIcon;
   badge?: string;
   permission?: string;
 }
@@ -57,8 +61,10 @@ const navigationSections: NavigationSection[] = [
     items: [
       { name: 'Run Extraction', href: '/extractions', icon: PlayCircle, permission: 'can_view_results' },
       { name: 'Manual Extract', href: '/manual-extraction', icon: Edit, permission: 'can_run_extractions' },
+      { name: 'Risk of Bias', href: '/risk-of-bias', icon: Shield, badge: 'New', permission: 'can_adjudicate' },
       { name: 'Consensus', href: '/consensus', icon: CheckSquare2, permission: 'can_adjudicate' },
       { name: 'Results', href: '/results', icon: BarChart3, permission: 'can_view_results' },
+      { name: 'Synthesis', href: '/synthesis', icon: ForestPlotIcon, badge: 'New', permission: 'can_view_results' },
     ],
   },
   {
@@ -248,6 +254,20 @@ export function Sidebar() {
                     >
                       {item.name}
                     </span>
+                    {/* Badge rides the same fade as the label — a lone pill next
+                        to an icon in the collapsed rail reads as an error. */}
+                    {item.badge && (
+                      <span
+                        className={cn(
+                          'overflow-hidden whitespace-nowrap rounded-full bg-gray-200 px-1.5 text-[10px] font-semibold leading-4 text-gray-600 transition-all duration-200 ease-out dark:bg-[#2a2a2a] dark:text-zinc-400',
+                          collapsed
+                            ? 'ml-0 max-w-0 px-0 opacity-0 delay-0'
+                            : 'ml-auto max-w-[48px] opacity-100 delay-100',
+                        )}
+                      >
+                        {item.badge}
+                      </span>
+                    )}
                     {collapsed && <NavTooltip label={item.name} side="right" />}
                   </Link>
                 );

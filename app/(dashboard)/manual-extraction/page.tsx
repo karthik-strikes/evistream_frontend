@@ -1,5 +1,7 @@
 'use client';
 
+import { isFailure } from '@/lib/absence';
+
 import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
 import { DashboardLayout } from '@/components/layout';
 import { useRouter, useSearchParams } from 'next/navigation';
@@ -30,6 +32,11 @@ function normalizeAiData(raw: Record<string, any>): Record<string, any> {
     } else if (typeof val === 'object' && val !== null) {
       if ('value' in val && Array.isArray((val as any).value)) {
         out[cleanKey] = (val as any).value;
+      } else if (isFailure((val as any)?.status)) {
+        // A cell the pipeline failed on must NOT prefill as "NR": the reviewer
+        // would be signing their name to an assertion that the paper is silent.
+        // Leave it blank so it reads as unanswered.
+        out[cleanKey] = '';
       } else {
         const extracted = (val as any)?.final_value ?? (val as any)?.value;
         if (extracted == null) {

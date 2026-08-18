@@ -1,5 +1,7 @@
 'use client';
 
+import { normalizeStatus } from '@/lib/absence';
+
 import { useState, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { useQuery } from '@tanstack/react-query';
@@ -31,24 +33,33 @@ import { apiClient } from '@/lib/api';
 
 type TabType = 'papers' | 'logs' | 'export';
 
-type StatusCounts = { reported: number; not_reported: number; missing: number; error: number };
+type StatusCounts = {
+  reported: number; not_reported: number; not_applicable: number;
+  missing: number; error: number; partial: number;
+};
 
 // Walk an extracted_data object and tally per-cell extraction status. Each cell
 // carries a `status`: "reported"/"not_reported" are genuine results, while
 // "missing"/"error" are extraction failures that masquerade as NR and are worth
 // retrying. Cells are leaves — we don't recurse into a cell's own value.
 function countCellStatuses(data: any, acc?: StatusCounts): StatusCounts {
-  const a = acc ?? { reported: 0, not_reported: 0, missing: 0, error: 0 };
+  const a = acc ?? {
+    reported: 0, not_reported: 0, not_applicable: 0, missing: 0, error: 0, partial: 0,
+  };
   if (data == null || typeof data !== 'object') return a;
   if (Array.isArray(data)) {
     data.forEach((item) => countCellStatuses(item, a));
     return a;
   }
-  const status = (data as any).status as keyof StatusCounts | undefined;
-  if (status === 'reported' || status === 'not_reported' || status === 'missing' || status === 'error') {
+  const status = normalizeStatus((data as any).status);
+  if (status !== null) {
     a[status] += 1;
     return a;
   }
+  // An envelope with no recognizable status is still a leaf. Recursing into its
+  // value would walk a table's row array and re-tally the cells inside it,
+  // which is what the unrecognized-status fallthrough used to do.
+  if ('value' in data) return a;
   Object.values(data).forEach((v) => countCellStatuses(v, a));
   return a;
 }
@@ -453,6 +464,7 @@ export default function ExtractionDetailPage() {
                           const statusCounts = fieldStatusByResult.get(result.id);
                           const failedFields = statusCounts ? statusCounts.missing + statusCounts.error : 0;
                           const nrFields = statusCounts ? statusCounts.not_reported : 0;
+                          const naFields = statusCounts ? statusCounts.not_applicable : 0;
                           return (
                             <div key={result.id}>
                               <button
@@ -471,8 +483,19 @@ export default function ExtractionDetailPage() {
                                   </span>
                                 )}
                                 {nrFields > 0 && (
-                                  <span className="text-[11px] text-gray-400 dark:text-zinc-600 flex-shrink-0">
+                                  <span
+                                    className="text-[11px] text-gray-400 dark:text-zinc-600 flex-shrink-0"
+                                    title="Not reported — the paper is silent on these fields"
+                                  >
                                     {nrFields} NR
+                                  </span>
+                                )}
+                                {naFields > 0 && (
+                                  <span
+                                    className="text-[11px] text-gray-400 dark:text-zinc-600 flex-shrink-0"
+                                    title="Not applicable — these fields cannot apply to this study"
+                                  >
+                                    {naFields} NA
                                   </span>
                                 )}
                                 <span className="text-xs text-gray-400 flex-shrink-0">

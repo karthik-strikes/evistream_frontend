@@ -617,7 +617,7 @@ footer { border-top: 1px solid var(--zinc-200); padding: 48px 24px 20px; backgro
       {/* HERO */}
       <section className="hero">
         <div className="hero-left">
-          <h1 className="hero-h1">The <em>fastest</em> way to<br/>extract data from<br/>research papers.</h1>
+          <h1 className="hero-h1">The <em>right</em> way to<br/>extract data from<br/>research papers.</h1>
           <p className="hero-sub">eviStreams automatically generates AI pipelines that extract structured data from hundreds of research papers — in minutes, not months.</p>
           <a href="/register" className="btn-cta">Start extracting →</a>
         </div>

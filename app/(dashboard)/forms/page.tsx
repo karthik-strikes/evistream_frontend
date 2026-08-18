@@ -4,7 +4,9 @@ import { DashboardLayout } from '@/components/layout';
 import { useRouter } from 'next/navigation';
 import { useProject } from '@/contexts/ProjectContext';
 import { formsService, documentsService } from '@/services';
-import { Form, CreateFormRequest, FormField, ReviewNote } from '@/types/api';
+import { settingsService } from '@/services/settings.service';
+import { isTableField } from '@/app/(dashboard)/manual-extraction/_lib/fieldKinds';
+import { Form, FormField, ReviewNote, TableFieldExtractionStrategy } from '@/types/api';
 import { useEffect, useState, useRef, useMemo } from 'react';
 import { useQuery, useQueryClient, keepPreviousData } from '@tanstack/react-query';
 import { useToast } from '@/hooks/use-toast';
@@ -32,7 +34,7 @@ import {
   FieldEditorPane,
   AutoTextarea,
   humanizeFieldName,
-  autoDetectAnchors,
+  TABLE_MODE_META,
   type UEFCalField,
   type UEFEditableField,
 } from '@/components/forms/FieldEditorPane';
@@ -47,7 +49,6 @@ export default function FormsPage() {
   const { can_create_forms, can_view_docs, can_run_extractions } = useProjectPermissions();
   const { toast } = useToast();
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [openForm, setOpenForm] = useState<Form | null>(null);
   const [reviewForm, setReviewForm] = useState<Form | null>(null);
   const [pilotForm, setPilotForm] = useState<Form | null>(null);
   const [refineForm, setRefineForm] = useState<Form | null>(null);
@@ -205,15 +206,6 @@ export default function FormsPage() {
     }
   };
 
-  const handleUpdateForm = async (formId: string, data: Partial<CreateFormRequest>) => {
-    await formsService.update(formId, data);
-    try {
-      await queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id], exact: false });
-    } catch (err) {
-      console.error('Failed to refresh forms list after update:', err);
-    }
-  };
-
   if (!selectedProject) {
     return (
       <DashboardLayout title="Forms" description="Create and manage extraction forms">
@@ -327,10 +319,10 @@ export default function FormsPage() {
                           form={form}
                           onGenerateCode={handleGenerateCode}
                           onDelete={handleDeleteForm}
-                          onClick={() => setOpenForm(form)}
+                          onClick={() => { if (can_create_forms) setEditUnifiedForm(form); }}
                           onReview={(form) => setReviewForm(form)}
                           onApprove={handleApproveDecomposition}
-                          onEdit={(form) => setOpenForm(form)}
+                          onEdit={(form) => setEditUnifiedForm(form)}
                           onPilot={(form) => setPilotForm(form)}
                           onRefine={(form) => setRefineForm(form)}
                           onEditUnified={(form) => setEditUnifiedForm(form)}
@@ -365,10 +357,10 @@ export default function FormsPage() {
                           form={form}
                           onGenerateCode={handleGenerateCode}
                           onDelete={handleDeleteForm}
-                          onClick={() => setOpenForm(form)}
+                          onClick={() => { if (can_create_forms) setEditUnifiedForm(form); }}
                           onReview={(form) => setReviewForm(form)}
                           onApprove={handleApproveDecomposition}
-                          onEdit={(form) => setOpenForm(form)}
+                          onEdit={(form) => setEditUnifiedForm(form)}
                           onPilot={(form) => setPilotForm(form)}
                           onRefine={(form) => setRefineForm(form)}
                           onEditUnified={(form) => setEditUnifiedForm(form)}
@@ -403,10 +395,10 @@ export default function FormsPage() {
                           form={form}
                           onGenerateCode={handleGenerateCode}
                           onDelete={handleDeleteForm}
-                          onClick={() => setOpenForm(form)}
+                          onClick={() => { if (can_create_forms) setEditUnifiedForm(form); }}
                           onReview={(form) => setReviewForm(form)}
                           onApprove={handleApproveDecomposition}
-                          onEdit={(form) => setOpenForm(form)}
+                          onEdit={(form) => setEditUnifiedForm(form)}
                           onPilot={(form) => setPilotForm(form)}
                           onRefine={(form) => setRefineForm(form)}
                           onEditUnified={(form) => setEditUnifiedForm(form)}
@@ -441,10 +433,10 @@ export default function FormsPage() {
                           form={form}
                           onGenerateCode={handleGenerateCode}
                           onDelete={handleDeleteForm}
-                          onClick={() => setOpenForm(form)}
+                          onClick={() => { if (can_create_forms) setEditUnifiedForm(form); }}
                           onReview={(form) => setReviewForm(form)}
                           onApprove={handleApproveDecomposition}
-                          onEdit={(form) => setOpenForm(form)}
+                          onEdit={(form) => setEditUnifiedForm(form)}
                           onPilot={(form) => setPilotForm(form)}
                           onRefine={(form) => setRefineForm(form)}
                           onEditUnified={(form) => setEditUnifiedForm(form)}
@@ -485,23 +477,6 @@ export default function FormsPage() {
             setShowCreateDialog(false);
             queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id], exact: false });
           }}
-        />
-      )}
-
-      {openForm && (
-        <FormDialog
-          form={openForm}
-          existingForms={forms}
-          canManage={can_create_forms}
-          onClose={() => setOpenForm(null)}
-          onSuccess={() => {
-            setOpenForm(null);
-            queryClient.invalidateQueries({ queryKey: ['forms', selectedProject?.id], exact: false });
-          }}
-          onUpdate={handleUpdateForm}
-          onGenerateCode={handleGenerateCode}
-          onDelete={handleDeleteForm}
-          onOpenInstructions={(f) => { setOpenForm(null); setRefineForm(f); }}
         />
       )}
 
@@ -839,11 +814,14 @@ function FormCard({
             ? "The extraction schema couldn't be built for some field groups. This usually happens when field descriptions are too vague for structured output."
             : 'Something went wrong during code generation. You can retry or edit your form and try again.';
 
+        // Only offered when the error text actually identifies a cause. The old
+        // fallback ("sometimes a simple retry resolves transient issues") was a
+        // shrug rendered as a diagnosis, complete with a green tick.
         const suggestedFix = isTimeout
           ? { title: 'Simplify and retry', desc: 'Reduce the number of fields or split into multiple forms, then retry' }
           : isFieldFailure
             ? { title: 'Improve field descriptions', desc: `Open the form, add more specific descriptions for vague fields, then retry generation` }
-            : { title: 'Retry generation', desc: 'Sometimes a simple retry resolves transient issues' };
+            : null;
 
         return (
           <div className="px-[22px] pb-3.5" onClick={e => e.stopPropagation()}>
@@ -873,16 +851,18 @@ function FormCard({
             )}
 
             {/* Suggested fix */}
-            <div className="mb-3">
-              <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-1.5">Suggested fix</div>
-              <div className="flex items-start gap-2 p-2.5 rounded-lg">
-                <Check className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-xs font-semibold text-gray-700 dark:text-zinc-300">{suggestedFix.title}</p>
-                  <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-0.5 leading-relaxed">{suggestedFix.desc}</p>
+            {suggestedFix && (
+              <div className="mb-3">
+                <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-1.5">Suggested fix</div>
+                <div className="flex items-start gap-2 p-2.5 rounded-lg">
+                  <div className="w-1.5 h-1.5 rounded-full bg-gray-300 dark:bg-zinc-600 shrink-0 mt-[7px]" />
+                  <div>
+                    <p className="text-xs font-semibold text-gray-700 dark:text-zinc-300">{suggestedFix.title}</p>
+                    <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-0.5 leading-relaxed">{suggestedFix.desc}</p>
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
 
             {/* Collapsible raw log */}
             <button
@@ -901,7 +881,7 @@ function FormCard({
             {/* Action buttons */}
             {canManage && (
               <div className="flex items-center gap-2">
-                <Button size="sm" onClick={() => onGenerateCode(form.id)}>Retry</Button>
+                <Button size="sm" onClick={() => onGenerateCode(form.id, form.enable_review ?? false)}>Retry</Button>
                 {onEdit && (
                   <Button variant="ghost" size="sm" onClick={() => onEdit(form)}>Edit form</Button>
                 )}
@@ -951,14 +931,17 @@ function FormCard({
                 </div>
               </div>
 
-              {/* Pipeline info */}
-              <div className="flex items-start gap-2.5 p-2.5 rounded-lg">
-                <div className="w-3.5 h-3.5 rounded-full border border-gray-300 dark:border-zinc-600 shrink-0 mt-0.5" />
-                <div>
-                  <p className="text-xs font-semibold text-gray-700 dark:text-zinc-300">{decomp.pipeline?.length || 1} execution {(decomp.pipeline?.length || 1) === 1 ? 'stage' : 'stages'} planned</p>
-                  <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-0.5 leading-relaxed">Groups will run {decomp.pipeline?.length === 1 ? 'in parallel' : 'across stages'} — check the order makes sense for your data</p>
+              {/* Pipeline info — only when a pipeline is actually present; `|| 1`
+                  used to print "1 stage planned" for a decomposition that had none. */}
+              {(decomp.pipeline?.length ?? 0) > 0 && (
+                <div className="flex items-start gap-2.5 p-2.5 rounded-lg">
+                  <div className="w-3.5 h-3.5 rounded-full border border-gray-300 dark:border-zinc-600 shrink-0 mt-0.5" />
+                  <div>
+                    <p className="text-xs font-semibold text-gray-700 dark:text-zinc-300">{decomp.pipeline.length} execution {decomp.pipeline.length === 1 ? 'stage' : 'stages'} planned</p>
+                    <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-0.5 leading-relaxed">Groups will run {decomp.pipeline.length === 1 ? 'in parallel' : 'across stages'} — check the order makes sense for your data</p>
+                  </div>
                 </div>
-              </div>
+              )}
             </div>
 
             {/* Action buttons */}
@@ -991,8 +974,32 @@ function FormCard({
       {/* Active form — context-aware card */}
       {form.status === 'active' && (() => {
         const totalExamples = pilot?.field_examples ? Object.values(pilot.field_examples as Record<string, any[]>).reduce((s: number, arr: any[]) => s + arr.length, 0) : 0;
-        const fieldsCalibrated = pilot?.field_examples ? Object.keys(pilot.field_examples).length : 0;
+        const exampleKeys = pilot?.field_examples ? Object.keys(pilot.field_examples) : [];
+        const fieldsWithExamples = exampleKeys.filter(k => !k.includes('.')).length;
+        const columnsWithExamples = exampleKeys.length - fieldsWithExamples;
         const fieldNames = form.fields.map((f: FormField) => f.field_name.replace(/_/g, ' ')).filter(Boolean);
+        // What the form IS — true for its whole life, unlike pilot state, which is
+        // a one-off event. Deliberately NOT showing each table's extraction mode:
+        // form.fields is only a mirror of schema_def, and trusting that mirror is
+        // what once displayed "Fast" for tables actually running the keyed pipeline.
+        const fieldChips = form.fields
+          .map((f: FormField) => ({
+            label: (f as any).display_name || f.field_name.replace(/_/g, ' '),
+            isTable: f.field_type === 'array',
+          }))
+          .filter((c: { label: string }) => !!c.label);
+        const tableCount = form.fields.filter((f: FormField) => f.field_type === 'array').length;
+        const stats: any = typeof form.statistics === 'string'
+          ? (() => { try { return JSON.parse(form.statistics as any); } catch { return null; } })()
+          : form.statistics;
+        const groupCount: number | null = stats?.signatures ?? meta?.decomposition?.signatures?.length ?? null;
+        const stageCount: number | null = stats?.pipeline_stages ?? meta?.decomposition?.pipeline?.length ?? null;
+        const shape = [
+          `${form.fields.length} field${form.fields.length === 1 ? '' : 's'}`,
+          tableCount > 0 ? `${tableCount} table${tableCount === 1 ? '' : 's'}` : null,
+          groupCount != null ? `${groupCount} group${groupCount === 1 ? '' : 's'}` : null,
+          stageCount != null ? `${stageCount} stage${stageCount === 1 ? '' : 's'}` : null,
+        ].filter(Boolean).join(' · ');
 
         // Pilot in progress
         if (pilotStatus === 'running' || pilotStatus === 'reviewing') {
@@ -1092,90 +1099,63 @@ function FormCard({
           );
         }
 
-        // Pilot completed — calibrated form
-        if (pilotStatus === 'completed') {
-          return (
-            <div className="px-[22px] pb-3.5" onClick={e => e.stopPropagation()}>
-              <div className="h-px bg-gray-100 dark:bg-[#1a1a1a] mb-3.5" />
-
-              {/* Stats row */}
-              <div className="flex gap-2 mb-3.5">
-                <div className="flex-1 rounded-lg bg-gray-50 dark:bg-[#141414] p-3 text-center">
-                  <div className="text-base font-bold text-blue-600 dark:text-blue-400">{totalExamples}</div>
-                  <div className="text-[10px] text-gray-400 dark:text-zinc-500 mt-0.5">Examples</div>
-                </div>
-                <div className="flex-1 rounded-lg bg-gray-50 dark:bg-[#141414] p-3 text-center">
-                  <div className="text-base font-bold text-gray-700 dark:text-zinc-200">{fieldsCalibrated}</div>
-                  <div className="text-[10px] text-gray-400 dark:text-zinc-500 mt-0.5">Fields calibrated</div>
-                </div>
-                <div className="flex-1 rounded-lg bg-gray-50 dark:bg-[#141414] p-3 text-center">
-                  <div className="text-base font-bold text-gray-700 dark:text-zinc-200">{form.fields.length}</div>
-                  <div className="text-[10px] text-gray-400 dark:text-zinc-500 mt-0.5">Total fields</div>
-                </div>
-              </div>
-
-              {/* Nudge if not all fields calibrated */}
-              {fieldsCalibrated < form.fields.length && (
-                <div className="flex items-start gap-2 p-2.5 rounded-lg bg-amber-50/50 dark:bg-amber-900/5 mb-3.5">
-                  <AlertCircle className="w-3 h-3 text-amber-500 shrink-0 mt-0.5" />
-                  <p className="text-[11px] text-amber-700/80 dark:text-amber-400/60 leading-relaxed">
-                    {form.fields.length - fieldsCalibrated} fields not yet calibrated — add more examples to improve accuracy
-                  </p>
-                </div>
-              )}
-
-              {/* Actions */}
-              {(canManage || canPilot) && (
-              <div className="flex items-center gap-2">
-                {onPilot && (
-                  <Button size="sm" onClick={() => onPilot(form)}>Review results</Button>
-                )}
-                {canManage && onEditUnified && (
-                  <Button variant="ghost" size="sm" onClick={() => onEditUnified(form)}>Edit form</Button>
-                )}
-                {canManage && (
-                  <Button variant="ghost" size="sm" className="ml-auto h-8 w-8 p-0 text-gray-400 hover:text-red-500 dark:text-zinc-500 dark:hover:text-red-400" onClick={e => { e.stopPropagation(); onDelete(form.id); }}>
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </Button>
-                )}
-              </div>
-              )}
-            </div>
-          );
-        }
-
-        // No pilot yet — guide the researcher
+        // Both remaining states — piloted or not — show the same thing: what the
+        // form extracts. Pilot state is a footnote, not the headline: calibration
+        // examples are one way to write per-field prompt content that Edit form can
+        // change at any time, so "pilot complete" gates nothing.
+        const piloted = pilotStatus === 'completed';
         return (
           <div className="px-[22px] pb-3.5" onClick={e => e.stopPropagation()}>
             <div className="h-px bg-gray-100 dark:bg-[#1a1a1a] mb-3.5" />
 
-            {/* Next step guidance */}
-            <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-2.5">Next step</div>
-            <div className="flex items-start gap-2.5 p-2.5 rounded-lg bg-[#edeee7] dark:bg-[#1e2a1e] mb-3.5">
-              <Plus className="w-3.5 h-3.5 text-gray-500 dark:text-zinc-400 shrink-0 mt-0.5" />
-              <div>
-                <p className="text-xs font-semibold text-gray-800 dark:text-zinc-200">Run a pilot study</p>
-                <p className="text-[11px] text-gray-500 dark:text-zinc-500 mt-0.5 leading-relaxed">Test extraction on a few papers and provide feedback to calibrate your fields</p>
-              </div>
-            </div>
+            <div className="text-[10px] font-semibold tracking-widest text-gray-400 dark:text-zinc-500 uppercase mb-2.5">Extracts</div>
 
-            {/* Field tags */}
-            {fieldNames.length > 0 && (
-              <div className="flex flex-wrap gap-1.5 mb-3.5">
-                {fieldNames.slice(0, 5).map((name: string, i: number) => (
-                  <span key={i} className="text-[11px] text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] px-2 py-0.5 rounded-full">{name}</span>
+            {fieldChips.length > 0 && (
+              <div className="flex flex-wrap gap-1.5 mb-2.5">
+                {fieldChips.slice(0, 5).map((c: { label: string; isTable: boolean }, i: number) => (
+                  <span
+                    key={i}
+                    className={cn(
+                      "text-[11px] px-2 py-0.5 rounded-full inline-flex items-center gap-1",
+                      c.isTable
+                        ? "text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30"
+                        : "text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a]",
+                    )}
+                  >
+                    {c.isTable && <span className="text-[10px] leading-none">▦</span>}
+                    {c.label}
+                  </span>
                 ))}
-                {fieldNames.length > 5 && (
-                  <span className="text-[11px] text-gray-400 dark:text-zinc-500 py-0.5">+{fieldNames.length - 5} more</span>
+                {fieldChips.length > 5 && (
+                  <span className="text-[11px] text-gray-400 dark:text-zinc-500 py-0.5">+{fieldChips.length - 5} more</span>
                 )}
               </div>
             )}
+
+            <p className="text-[11px] text-gray-400 dark:text-zinc-500 mb-3">{shape}</p>
+
+            {/* Pilot footnote — only when it has something to say. */}
+            {totalExamples > 0 ? (
+              <div className="flex items-center gap-2 mb-3.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                <p className="text-[11px] text-gray-500 dark:text-zinc-400 leading-relaxed">
+                  {`${totalExamples} calibration example${totalExamples === 1 ? '' : 's'} across ${fieldsWithExamples} field${fieldsWithExamples === 1 ? '' : 's'}${columnsWithExamples > 0 ? ` and ${columnsWithExamples} table column${columnsWithExamples === 1 ? '' : 's'}` : ''}`}
+                </p>
+              </div>
+            ) : !piloted ? (
+              <div className="flex items-center gap-2 mb-3.5">
+                <div className="w-1.5 h-1.5 rounded-full bg-gray-300 dark:bg-zinc-600 shrink-0" />
+                <p className="text-[11px] text-gray-400 dark:text-zinc-500 leading-relaxed">
+                  Optional: pilot it on a few papers to check the wording before a full run
+                </p>
+              </div>
+            ) : <div className="mb-1" />}
 
             {/* Actions */}
             {(canManage || canPilot) && (
             <div className="flex items-center gap-2">
               {onPilot && (
-                <Button size="sm" onClick={() => onPilot(form)}>Run pilot</Button>
+                <Button size="sm" onClick={() => onPilot(form)}>{piloted ? 'Review results' : 'Run pilot'}</Button>
               )}
               {canManage && onEditUnified && (
                 <Button variant="ghost" size="sm" onClick={() => onEditUnified(form)}>Edit form</Button>
@@ -1196,11 +1176,14 @@ function FormCard({
 }
 
 // Pipeline step definitions
+// One entry per stage the backend actually broadcasts (generation_tasks.py),
+// in order. Adding a label with no stage behind it is what made the tail of
+// this list lie: 'Validating rules' lit up while the backend said finalizing,
+// and 'Finalizing' only ever appeared already-done.
 const PIPELINE_STEPS_DIRECT = [
   'Analyzing your form',
   'Grouping related fields',
   'Building extraction rules',
-  'Validating rules',
   'Finalizing',
 ];
 const PIPELINE_STEPS_REVIEW = [
@@ -1208,7 +1191,6 @@ const PIPELINE_STEPS_REVIEW = [
   'Grouping related fields',
   'Waiting for your review',
   'Building extraction rules',
-  'Validating rules',
   'Finalizing',
 ];
 
@@ -1219,7 +1201,7 @@ const STAGE_TO_STEP_DIRECT: Record<string, number> = {
   generating_signatures: 2,
   generating_modules: 2,
   finalizing: 3,
-  completed: 4,
+  completed: 3,
 };
 const STAGE_TO_STEP_REVIEW: Record<string, number> = {
   initializing: 0,
@@ -1228,7 +1210,7 @@ const STAGE_TO_STEP_REVIEW: Record<string, number> = {
   generating_signatures: 3,
   generating_modules: 3,
   finalizing: 4,
-  completed: 5,
+  completed: 4,
 };
 
 interface FieldEntry { name: string; fields: string[]; status: 'pending' | 'active' | 'done' }
@@ -1240,7 +1222,12 @@ function GeneratingProgress({ jobId, form, elapsedLabel }: { jobId?: string; for
   const [currentStep, setCurrentStep] = useState(0);
   const [progress, setProgress] = useState(0);
   const [fieldEntries, setFieldEntries] = useState<FieldEntry[]>([]);
-  const [isReviewFlow, setIsReviewFlow] = useState(false);
+  // Seeded from persisted state, not only from the live WS message: after a
+  // refresh mid-generation that message is gone, and the shorter no-review step
+  // list was rendered for a run that does pause for review.
+  const [isReviewFlow, setIsReviewFlow] = useState(
+    form.status === 'awaiting_review' || form.enable_review === true,
+  );
   const [completed, setCompleted] = useState(false);
 
   // Use refs so WebSocket callbacks always see the latest values (no stale closures)
@@ -1410,22 +1397,6 @@ function GeneratingProgress({ jobId, form, elapsedLabel }: { jobId?: string; for
   );
 }
 
-const TYPE_LABELS: Record<string, string> = {
-  text:     "Text",
-  number:   "Number",
-  select:   "Select",
-  boolean:  "Yes / No",
-  array:    "Table",
-};
-
-const FIELD_TYPE_COLORS: Record<string, { bg: string; border: string; text: string; sidebar: string }> = {
-  text:    { bg: "#f0f3f8", border: "#d0d8e8", text: "#4a6085", sidebar: "#c4d0e4" },
-  number:  { bg: "#f0f5f0", border: "#c8dcc8", text: "#3d6b4e", sidebar: "#b8d4be" },
-  select:  { bg: "#f3f0f8", border: "#d4cce8", text: "#605085", sidebar: "#c4b8dc" },
-  boolean: { bg: "#f8f0f3", border: "#e8c8d4", text: "#854a60", sidebar: "#d8b0c0" },
-  array:   { bg: "#f5f3ee", border: "#dcd4c0", text: "#6b5a3d", sidebar: "#ccc4a8" },
-};
-
 const TYPE_ALIASES: Record<string, string> = {
   // canonical types
   "text":             "text",
@@ -1466,6 +1437,21 @@ const aliasFieldTypeRec = (f: FormField): FormField => ({
   field_type: aliasFieldType(f.field_type),
   ...(Array.isArray(f.subform_fields) ? { subform_fields: f.subform_fields.map(aliasFieldTypeRec) } : {}),
 });
+
+const EXAMPLE_IMPORT_JSON = JSON.stringify({
+  form_name: "Baseline Study Characteristics",
+  form_description: "Extract study design and outcome details from clinical trial PDFs.",
+  fields: [
+    { field_name: "first_author", field_type: "text", field_description: "Last name of the first author", example: "Malmstrom" },
+    { field_name: "year", field_type: "number", field_description: "Publication year", example: "2006" },
+    { field_name: "design", field_type: "select", field_description: "Study design type", options: ["Parallel group", "Split mouth", "Crossover"] },
+    { field_name: "arms", field_type: "array", field_description: "One row per treatment arm",
+      subform_fields: [
+        { field_name: "arm_name", field_type: "text", field_description: "Name of the treatment arm" },
+        { field_name: "n", field_type: "number", field_description: "Number of participants" },
+      ] },
+  ],
+}, null, 2);
 
 const importJsonFieldRec = (f: any): FormField => {
   const rawType = (f.field_type || f.type || '').toString().toLowerCase().trim();
@@ -1539,543 +1525,6 @@ const serializeFieldForCopy = (f: FormField): any => ({
     ? { subform_fields: (f.subform_fields || []).map(serializeFieldForCopy) }
     : (f.subform_fields?.length ? { subform_fields: f.subform_fields.map(serializeFieldForCopy) } : {})),
 });
-
-// Unified Form Dialog Component
-function FormDialog({
-  form,
-  existingForms,
-  canManage,
-  onClose,
-  onSuccess,
-  onUpdate,
-  onGenerateCode,
-  onDelete,
-  onOpenInstructions,
-}: {
-  form: Form;
-  existingForms: Form[];
-  canManage: boolean;
-  onClose: () => void;
-  onSuccess: () => void;
-  onUpdate: (formId: string, data: Partial<CreateFormRequest>) => Promise<void>;
-  onGenerateCode: (formId: string, enableReview?: boolean) => void;
-  onDelete: (formId: string) => void;
-  onOpenInstructions?: (form: Form) => void;
-}) {
-  const { toast } = useToast();
-
-  // Local editable state
-  const [formName, setFormName] = useState(form.form_name);
-  const [formDescription, setFormDescription] = useState(form.form_description || '');
-  const [fields, setFields] = useState<FormField[]>(form.fields.map(aliasFieldTypeRec));
-  const [enableReview, setEnableReview] = useState<boolean>(form.metadata?.enable_review ?? false);
-  const [saving, setSaving] = useState(false);
-  const [jsonCopied, setJsonCopied] = useState(false);
-
-  // Inline editing
-  const [editingName, setEditingName] = useState(false);
-  const [editingDescription, setEditingDescription] = useState(false);
-
-  // View switching
-  const metadata = useMemo(() => typeof form.metadata === 'string' ? JSON.parse(form.metadata) : form.metadata, [form.metadata]);
-  const pipeline = useMemo(() => metadata?.decomposition?.pipeline || [], [metadata]);
-  const signatures = metadata?.decomposition?.signatures || [];
-  // Fields view state
-  const [openSet, setOpenSet] = useState<Set<number>>(new Set());
-  const [focusIndex, setFocusIndex] = useState(0);
-  const [fieldSearch, setFieldSearch] = useState('');
-  const rowRefs = useRef<(HTMLDivElement | null)[]>([]);
-
-  const isStatusEditable = form.status === 'draft' || form.status === 'active' || form.status === 'failed';
-  const isEditable = isStatusEditable && canManage;
-
-  const hasChanges = () => {
-    return formName !== form.form_name ||
-      formDescription !== (form.form_description || '') ||
-      JSON.stringify(fields) !== JSON.stringify(form.fields.map(aliasFieldTypeRec)) ||
-      enableReview !== (form.metadata?.enable_review ?? false);
-  };
-
-  const hasFieldChanges = () => JSON.stringify(fields) !== JSON.stringify(form.fields.map(aliasFieldTypeRec));
-
-  // Field helpers
-  const toggle = (i: number) => {
-    setOpenSet(prev => { const next = new Set(prev); next.has(i) ? next.delete(i) : next.add(i); return next; });
-  };
-  const toggleAll = () => {
-    if (openSet.size === fields.length) setOpenSet(new Set());
-    else setOpenSet(new Set(fields.map((_, i) => i)));
-  };
-  const addField = () => {
-    const newFields = [...fields, { field_name: '', field_type: 'text', field_description: '', example: '' }];
-    setFields(newFields);
-    setOpenSet(new Set([...openSet, newFields.length - 1]));
-    setTimeout(() => setFocusIndex(newFields.length - 1), 100);
-  };
-  const removeField = (index: number) => setFields(fields.filter((_, i) => i !== index));
-  const updateField = (index: number, updates: Partial<FormField>) => {
-    const updatedField = { ...fields[index], ...updates };
-    if (updates.field_type === 'select' && !updatedField.options) updatedField.options = [''];
-    if (updates.field_type && updates.field_type !== 'select') delete updatedField.options;
-    setFields(fields.map((field, i) => (i === index ? updatedField : field)));
-  };
-  const addOption = (fi: number) => updateField(fi, { options: [...(fields[fi].options || []), ''] });
-  const removeOption = (fi: number, oi: number) => updateField(fi, { options: (fields[fi].options || []).filter((_, i) => i !== oi) });
-  const updateOption = (fi: number, oi: number, value: string) => {
-    const opts = [...(fields[fi].options || [])]; opts[oi] = value; updateField(fi, { options: opts });
-  };
-  const sanitizeFieldName = (name: string) => name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').replace(/_{2,}/g, '_').replace(/^(\d)/, '_$1');
-  const addSubfield = (fi: number) => updateField(fi, { subform_fields: [...(fields[fi].subform_fields || []), { field_name: '', field_type: 'text', field_description: '' }] });
-  const removeSubfield = (fi: number, si: number) => updateField(fi, { subform_fields: (fields[fi].subform_fields || []).filter((_: any, i: number) => i !== si) });
-  const updateSubfield = (fi: number, si: number, updates: Partial<FormField>) => {
-    const subs = [...(fields[fi].subform_fields || [])];
-    subs[si] = { ...subs[si], ...updates };
-    updateField(fi, { subform_fields: subs });
-  };
-
-  const handleClose = () => {
-    if (canManage && hasChanges() && !confirm('You have unsaved changes. Discard?')) return;
-    onClose();
-  };
-
-  const handleDelete = () => {
-    if (confirm(`Are you sure you want to delete "${form.form_name}"?`)) { onDelete(form.id); onClose(); }
-  };
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!formName.trim()) { toast({ title: 'Validation', description: 'Please enter a form name', variant: 'error' }); return; }
-    const duplicate = existingForms.some(f => f.id !== form.id && f.form_name.trim().toLowerCase() === formName.trim().toLowerCase());
-    if (duplicate) { toast({ title: 'Duplicate name', description: `A form named "${formName.trim()}" already exists.`, variant: 'error' }); return; }
-    if (!formDescription.trim()) { toast({ title: 'Validation', description: 'Please enter a form description', variant: 'error' }); return; }
-    if (formDescription.length < 10) { toast({ title: 'Validation', description: 'Description must be at least 10 characters', variant: 'error' }); return; }
-    if (fields.length === 0) { toast({ title: 'Validation', description: 'Please add at least one field', variant: 'error' }); return; }
-    for (const field of fields) {
-      const err = validateFieldRec(field);
-      if (err) { toast({ title: 'Validation', description: err, variant: 'error' }); return; }
-    }
-    setSaving(true);
-    try {
-      const sanitizedFields = fields.map(sanitizeFieldDeep);
-      await onUpdate(form.id, { form_name: formName, form_description: formDescription, fields: sanitizedFields, enable_review: enableReview });
-      if (hasFieldChanges() && form.status === 'active') {
-        await onGenerateCode(form.id, enableReview);
-        toast({ title: 'Regenerating', description: 'Fields changed — code regeneration started.', variant: 'success' });
-      } else {
-        toast({ title: 'Success', description: 'Form updated successfully', variant: 'success' });
-      }
-      onSuccess();
-    } catch (err: any) {
-      toast({ title: 'Error', description: getErrorMessage(err, 'Failed to update form'), variant: 'error' });
-    } finally { setSaving(false); }
-  };
-
-  // Keyboard navigation
-  useEffect(() => {
-    const handleKey = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName;
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || (e.target as HTMLElement).isContentEditable) return;
-      if (e.key === 'ArrowDown' || e.key === 'j') { e.preventDefault(); setFocusIndex(p => Math.min(p + 1, fields.length - 1)); }
-      else if (e.key === 'ArrowUp' || e.key === 'k') { e.preventDefault(); setFocusIndex(p => Math.max(p - 1, 0)); }
-      else if ((e.key === 'Enter' || e.key === ' ') && tag !== 'BUTTON') { e.preventDefault(); toggle(focusIndex); }
-      else if (e.key === 'Escape') { handleClose(); }
-    };
-    window.addEventListener('keydown', handleKey);
-    return () => window.removeEventListener('keydown', handleKey);
-  }, [focusIndex, fields.length]);
-
-  useEffect(() => { rowRefs.current[focusIndex]?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); }, [focusIndex]);
-
-  const statusBadgeVariant: Record<string, string> = {
-    draft: 'default', generating: 'processing', awaiting_review: 'warning',
-    regenerating: 'processing', active: 'success', failed: 'error',
-  };
-
-  return (
-    <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={handleClose}>
-      <div className="bg-white dark:bg-[#111111] rounded-2xl border border-gray-200 dark:border-[#1f1f1f] w-full max-w-3xl max-h-[90vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
-
-        {/* Header */}
-        <div className="px-6 pt-5 pb-4 flex-shrink-0">
-          <div className="flex items-center justify-between mb-1">
-            <div className="flex items-center gap-3 flex-1 min-w-0">
-              {editingName && isEditable ? (
-                <input
-                  autoFocus
-                  value={formName}
-                  onChange={e => setFormName(e.target.value)}
-                  onBlur={() => setEditingName(false)}
-                  onKeyDown={e => e.key === 'Enter' && setEditingName(false)}
-                  className="text-base font-semibold text-gray-900 dark:text-white tracking-tight bg-transparent border-b border-gray-300 dark:border-zinc-600 outline-none py-0.5 flex-1 min-w-0"
-                />
-              ) : (
-                <h2
-                  className={cn("text-base font-semibold text-gray-900 dark:text-white tracking-tight truncate", isEditable && "cursor-pointer hover:text-gray-600 dark:hover:text-zinc-300")}
-                  onClick={() => isEditable && setEditingName(true)}
-                >{formName}</h2>
-              )}
-              <Badge variant={(statusBadgeVariant[form.status] || 'default') as any}>{form.status === 'awaiting_review' ? 'Review' : form.status.charAt(0).toUpperCase() + form.status.slice(1)}</Badge>
-            </div>
-            <Button variant="ghost" size="icon" onClick={handleClose} className="h-8 w-8 shrink-0">
-              <X className="h-4 w-4" />
-            </Button>
-          </div>
-
-          {editingDescription && isEditable ? (
-            <textarea
-              autoFocus
-              value={formDescription}
-              onChange={e => setFormDescription(e.target.value)}
-              onBlur={() => setEditingDescription(false)}
-              rows={2}
-              className="w-full text-sm text-gray-500 dark:text-zinc-400 bg-transparent border-b border-gray-300 dark:border-zinc-600 outline-none leading-relaxed resize-none mt-1"
-            />
-          ) : (
-            <p
-              className={cn("text-sm text-gray-400 dark:text-zinc-500 leading-relaxed mt-1 line-clamp-3", isEditable && "cursor-pointer hover:text-gray-600 dark:hover:text-zinc-300")}
-              onClick={() => isEditable && setEditingDescription(true)}
-              title={formDescription || undefined}
-            >{formDescription || 'No description — click to add'}</p>
-          )}
-          {formDescription.length > 0 && formDescription.length < 10 && (
-            <p className="text-[11px] text-amber-500 mt-1">{formDescription.length}/10 chars min</p>
-          )}
-          <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-1 leading-relaxed">
-            Describe what this form extracts in plain English — topic, data points to capture, and any scope limits. The AI uses this to generate fields, hints, and rules, so be specific.
-          </p>
-        </div>
-
-        {/* Metadata bar */}
-        <div className="px-6 pb-3 flex-shrink-0">
-          <div className="flex items-center gap-4 text-sm text-gray-400 dark:text-zinc-500">
-            <span><span className="font-semibold text-gray-700 dark:text-zinc-300">{fields.length}</span> field{fields.length !== 1 ? 's' : ''}</span>
-            <span className="text-gray-200 dark:text-zinc-700">·</span>
-            <span>{formatDate(form.created_at)}</span>
-            {isEditable && (
-              <>
-                <span className="text-gray-200 dark:text-zinc-700">·</span>
-                <button
-                  type="button"
-                  onClick={() => setEnableReview(!enableReview)}
-                  className={cn("text-xs bg-transparent border-none cursor-pointer p-0 transition-colors", enableReview ? "text-amber-500 font-semibold" : "text-gray-400 dark:text-zinc-500 hover:text-gray-600")}
-                >
-                  Human Review: {enableReview ? 'ON' : 'OFF'}
-                </button>
-              </>
-            )}
-            {hasChanges() && canManage && <span className="text-amber-500 text-xs font-medium ml-auto">unsaved</span>}
-          </div>
-        </div>
-
-
-
-        {/* Regen warning banner */}
-        {(form.status === 'active' || form.status === 'failed') && (
-          <div className="mx-6 mt-1 flex items-start gap-3 p-3 rounded-lg bg-red-50/70 dark:bg-red-950/20 border border-red-200 dark:border-red-900/40">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-red-500 dark:text-red-400 shrink-0 mt-0.5"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-            <div className="flex-1 min-w-0">
-              <p className="text-xs font-semibold text-red-700 dark:text-red-300">
-                {form.status === 'failed' ? 'Changes here will retry the extractor build' : 'Changes here will rebuild the extractor'}
-              </p>
-              <p className="text-[11px] text-red-700/85 dark:text-red-300/85 leading-relaxed mt-1">
-                Adding, renaming, retyping, or removing fields rebuilds the extractor from scratch (about 2 minutes). Any feedback you gave during pilot testing will be erased.
-              </p>
-            </div>
-          </div>
-        )}
-
-        {/* Error banner */}
-        {form.error && (
-          <div className="mx-6 mt-3 flex items-start gap-3 p-3 rounded-lg bg-red-50 dark:bg-red-900/10 border border-red-200 dark:border-red-800/40">
-            <div className="w-1.5 h-1.5 rounded-full bg-red-500 mt-1.5 shrink-0" />
-            <p className="text-xs text-red-600 dark:text-red-400 leading-relaxed">{form.error}</p>
-          </div>
-        )}
-
-        {/* Content area */}
-        <div className="flex-1 flex flex-col min-h-0 border-t border-gray-100 dark:border-[#1a1a1a] mt-3">
-
-          {/* === FIELDS VIEW === */}
-          <form id="edit-form-body" onSubmit={handleSubmit} className="flex flex-col flex-1 min-h-0">
-                {/* Toolbar */}
-                <div className="flex items-center gap-3 px-6 py-3 flex-shrink-0">
-                  <div className="relative flex-1">
-                    <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-300 dark:text-zinc-600 pointer-events-none"><circle cx="7" cy="7" r="5"/><path d="M12 12l-2.5-2.5"/></svg>
-                    <input
-                      type="text"
-                      placeholder={`Search ${fields.length} fields…`}
-                      value={fieldSearch}
-                      onChange={e => setFieldSearch(e.target.value)}
-                      className="w-full text-xs text-gray-700 dark:text-zinc-300 bg-transparent border-none outline-none py-1.5 pl-8 pr-3"
-                    />
-                  </div>
-                  <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">
-                    {fields.filter(f => f.field_name.trim()).length}/{fields.length} named
-                  </span>
-                  <button type="button" onClick={toggleAll} className="text-xs text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 bg-transparent border-none cursor-pointer p-0 transition-colors shrink-0">
-                    {openSet.size === fields.length ? 'Collapse all' : 'Expand all'}
-                  </button>
-                </div>
-
-                {/* Field list */}
-                <div className="flex-1 overflow-y-auto px-6 pb-3">
-                  {fields.map((field, idx) => {
-                    const isOpen = openSet.has(idx);
-                    const isFocused = focusIndex === idx;
-                    const tc = FIELD_TYPE_COLORS[field.field_type] || FIELD_TYPE_COLORS.text;
-                    const matchesSearch = !fieldSearch.trim() ||
-                      field.field_name.toLowerCase().includes(fieldSearch.toLowerCase()) ||
-                      field.field_description.toLowerCase().includes(fieldSearch.toLowerCase());
-                    if (!matchesSearch) return null;
-                    return (
-                      <div key={idx} ref={el => { rowRefs.current[idx] = el; }}>
-                        {/* Collapsed row */}
-                        <div
-                          className={cn(
-                            "flex items-center gap-3 py-2.5 px-2 cursor-pointer rounded-lg transition-colors hover:bg-black/[0.025] dark:hover:bg-white/[0.03]",
-                            isFocused && "bg-black/[0.02] dark:bg-white/[0.02]"
-                          )}
-                          onClick={() => { setFocusIndex(idx); toggle(idx); }}
-                        >
-                          <div className="w-2 h-2 rounded-full shrink-0 transition-opacity" style={{ background: tc.text, opacity: isOpen ? 0.7 : 0.3 }} />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className={cn("text-sm truncate", isOpen ? "font-semibold text-gray-900 dark:text-white" : field.field_name.trim() ? "font-medium text-gray-600 dark:text-zinc-300" : "font-medium text-gray-300 dark:text-zinc-600")}>{field.field_name.trim() || `field_${idx + 1}`}</span>
-                              <span className="text-xs font-medium py-0.5 px-2 rounded-[5px] tracking-tight shrink-0 text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a]">{TYPE_LABELS[field.field_type] ?? field.field_type}</span>
-                              {field.field_type === 'select' && field.options && field.options.filter((o: string) => o.trim()).length > 0 && (
-                                <span className="text-xs text-gray-300 dark:text-zinc-600">{field.options.filter((o: string) => o.trim()).length} opts</span>
-                              )}
-                            </div>
-                            {!isOpen && field.field_description.trim() && (
-                              <div className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5 truncate">{field.field_description}</div>
-                            )}
-                          </div>
-                          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 transition-transform duration-200 text-gray-300 dark:text-zinc-600" style={{ transform: isOpen ? "rotate(180deg)" : "rotate(0)" }}>
-                            <path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-                          </svg>
-                        </div>
-
-                        {/* Expanded content */}
-                        {isOpen && (
-                          <div className="ml-4 mb-2 pl-4 py-3 border-l-2" style={{ borderLeftColor: tc.border }}>
-                            {isEditable ? (
-                              <>
-                                <div className="flex gap-3 mb-3">
-                                  <div className="flex-1">
-                                    <label className="text-xs text-gray-400 dark:text-zinc-600 block mb-1">Name</label>
-                                    <input value={field.field_name} onChange={e => updateField(idx, { field_name: e.target.value })} placeholder="field_name" onClick={e => e.stopPropagation()} className="w-full text-sm text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-md py-2 px-3 outline-none transition-colors focus:border-gray-400 dark:focus:border-[#3f3f3f]" />
-                                  </div>
-                                  <div className="w-[130px] shrink-0">
-                                    <label className="text-xs text-gray-400 dark:text-zinc-600 block mb-1">Type</label>
-                                    <select value={field.field_type} onChange={e => updateField(idx, { field_type: e.target.value })} onClick={e => e.stopPropagation()} className="w-full text-sm font-medium rounded-md py-2 pr-7 pl-3 outline-none cursor-pointer appearance-none text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] dark:[color-scheme:dark]">
-                                      {Object.keys(FIELD_TYPE_COLORS).map(t => <option key={t} value={t}>{TYPE_LABELS[t] ?? t}</option>)}
-                                    </select>
-                                  </div>
-                                </div>
-                                {field.field_type === 'select' && (
-                                  <div className="mb-3">
-                                    <label className="text-xs text-gray-400 dark:text-zinc-600 block mb-1">Options</label>
-                                    <div className="flex flex-wrap gap-1.5">
-                                      {(field.options || ['']).map((opt: string, oi: number) => (
-                                        <div key={oi} className="flex items-center relative">
-                                          <input value={opt} onChange={e => updateOption(idx, oi, e.target.value)} placeholder={`option ${oi + 1}`} onClick={e => e.stopPropagation()} className="text-xs text-gray-600 dark:text-zinc-300 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-md py-1.5 pr-6 pl-2.5 outline-none w-[120px]" style={{ borderLeft: `2.5px solid ${tc.text}60` }} />
-                                          {(field.options?.length || 0) > 1 && (
-                                            <button type="button" onClick={e => { e.stopPropagation(); removeOption(idx, oi); }} className="absolute right-1 top-1/2 -translate-y-1/2 bg-transparent border-none cursor-pointer text-gray-300 p-0.5 hover:text-red-500 transition-colors">
-                                              <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                                            </button>
-                                          )}
-                                        </div>
-                                      ))}
-                                      <button type="button" onClick={e => { e.stopPropagation(); addOption(idx); }} className="text-xs bg-transparent rounded-md py-1.5 px-3 cursor-pointer transition-colors" style={{ color: `${tc.text}80`, border: `1px dashed ${tc.text}30` }}>+ add</button>
-                                    </div>
-                                    <label className="flex items-center gap-2 mt-2 cursor-pointer" onClick={e => e.stopPropagation()}>
-                                      <input type="checkbox" checked={field.multiple ?? false} onChange={e => updateField(idx, { multiple: e.target.checked })} className="w-3.5 h-3.5 rounded border-gray-300 dark:border-zinc-600 accent-violet-500" />
-                                      <span className="text-xs text-gray-500 dark:text-zinc-400">Allow multiple selections</span>
-                                    </label>
-                                  </div>
-                                )}
-                                <div className="mb-3">
-                                  <label className="text-xs text-gray-400 dark:text-zinc-600 block mb-1">Description</label>
-                                  <textarea value={field.field_description} onChange={e => updateField(idx, { field_description: e.target.value })} placeholder="What to extract..." rows={2} onClick={e => e.stopPropagation()} className="w-full text-sm text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-md py-2 px-3 outline-none leading-relaxed resize-none transition-colors focus:border-gray-400 dark:focus:border-[#3f3f3f]" />
-                                </div>
-                                {field.field_type === 'array' && (
-                                  <div className="mb-3">
-                                    <div className="flex items-center justify-between mb-1">
-                                      <label className="text-xs text-gray-400 dark:text-zinc-600">Subfields</label>
-                                      <button type="button" onClick={e => { e.stopPropagation(); addSubfield(idx); }} className="text-[11px] text-gray-400 hover:text-gray-600 bg-transparent border-none cursor-pointer p-0 transition-colors">+ add</button>
-                                    </div>
-                                    {(field.subform_fields || []).map((sf: FormField, si: number) => (
-                                      <div key={si} className="mb-2 group" onClick={e => e.stopPropagation()}>
-                                        <div className="flex items-center gap-1.5">
-                                          <div className="w-1 h-1 rounded-full bg-gray-300 dark:bg-zinc-700 shrink-0" />
-                                          <input value={sf.field_name} onChange={e => updateSubfield(idx, si, { field_name: e.target.value })} placeholder="name" className="flex-1 text-xs font-mono text-gray-600 dark:text-zinc-300 bg-transparent border-none outline-none py-0.5 focus:bg-gray-50 dark:focus:bg-[#0d0d0d] focus:px-1.5 focus:rounded transition-all" />
-                                          <select value={sf.field_type} onChange={e => updateSubfield(idx, si, { field_type: e.target.value })} onClick={e => e.stopPropagation()} className="text-[11px] text-gray-400 bg-transparent border-none outline-none cursor-pointer appearance-none dark:[color-scheme:dark]">
-                                            {Object.keys(FIELD_TYPE_COLORS).filter(t => t !== 'array').map(t => <option key={t} value={t}>{TYPE_LABELS[t] ?? t}</option>)}
-                                          </select>
-                                          <button type="button" onClick={e => { e.stopPropagation(); removeSubfield(idx, si); }} className="bg-transparent border-none cursor-pointer text-gray-300 dark:text-zinc-700 p-0 hover:text-red-500 transition-colors shrink-0 opacity-0 group-hover:opacity-100">
-                                            <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round"><path d="M18 6L6 18M6 6l12 12" /></svg>
-                                          </button>
-                                        </div>
-                                        <textarea value={sf.field_description} onChange={e => updateSubfield(idx, si, { field_description: e.target.value })} placeholder="Description..." rows={2} onClick={e => e.stopPropagation()} className="w-full ml-2.5 mt-0.5 text-xs text-gray-500 dark:text-zinc-400 bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-md py-1.5 px-2 outline-none resize-none leading-relaxed transition-colors focus:border-gray-400 dark:focus:border-[#3f3f3f] placeholder:text-gray-300 dark:placeholder:text-zinc-600" />
-                                      </div>
-                                    ))}
-                                    {(field.subform_fields || []).length === 0 && (
-                                      <p className="text-[11px] text-gray-300 dark:text-zinc-700">No subfields yet</p>
-                                    )}
-                                  </div>
-                                )}
-                                <div className="mb-3">
-                                  <label className="text-xs text-gray-400 dark:text-zinc-600 block mb-1">Example <span className="text-gray-300 dark:text-zinc-600">optional</span></label>
-                                  <input value={field.example || ''} onChange={e => updateField(idx, { example: e.target.value })} placeholder='"18-65 years"' onClick={e => e.stopPropagation()} className="w-full text-xs text-gray-500 dark:text-zinc-400 bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-md py-2 px-3 outline-none transition-colors focus:border-gray-400 dark:focus:border-[#3f3f3f]" />
-                                </div>
-                                {fields.length > 1 && (
-                                  <button type="button" onClick={e => { e.stopPropagation(); removeField(idx); }} className="text-xs text-gray-300 dark:text-zinc-600 bg-transparent border-none cursor-pointer py-1 flex items-center gap-1 transition-colors hover:text-red-500">
-                                    <Trash2 className="w-3 h-3" /> Remove
-                                  </button>
-                                )}
-                              </>
-                            ) : (
-                              <>
-                                <p className="text-sm text-gray-500 dark:text-zinc-400 leading-relaxed mb-3">{field.field_description}</p>
-                                {field.example && (
-                                  <div className="mb-3">
-                                    <span className="text-xs text-gray-300 dark:text-zinc-600">Example</span>
-                                    <div className="text-sm text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-[#1a1a1a] border-l-2 border-l-gray-200 dark:border-l-[#2a2a2a] rounded-md p-3 mt-1">{field.example}</div>
-                                  </div>
-                                )}
-                                {field.field_type === 'select' && field.options && field.options.length > 0 && (
-                                  <div>
-                                    <span className="text-xs text-gray-300 dark:text-zinc-600">Options ({field.options.length})</span>
-                                    <div className="flex flex-wrap gap-1.5 mt-1.5">
-                                      {field.options.map((opt: string, oi: number) => (
-                                        <span key={oi} className="text-xs text-gray-500 dark:text-zinc-400 bg-gray-50 dark:bg-[#1a1a1a] py-0.5 px-2 rounded-md">{opt}</span>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                                {field.field_type === 'array' && (field.subform_fields || []).length > 0 && (
-                                  <div>
-                                    <span className="text-xs text-gray-300 dark:text-zinc-600">Subfields ({field.subform_fields!.length})</span>
-                                    <div className="flex flex-col gap-1.5 mt-1.5">
-                                      {field.subform_fields!.map((sf: FormField, si: number) => (
-                                        <div key={si}>
-                                          <div className="flex items-center gap-2">
-                                            <div className="w-1 h-1 rounded-full bg-gray-300 dark:bg-zinc-700 shrink-0" />
-                                            <span className="text-xs font-mono text-gray-600 dark:text-zinc-300">{sf.field_name}</span>
-                                            <span className="text-[11px] text-gray-300 dark:text-zinc-600">{TYPE_LABELS[sf.field_type] ?? sf.field_type}</span>
-                                          </div>
-                                          {sf.field_description && (
-                                            <p className="text-[11px] text-gray-400 dark:text-zinc-500 ml-3 mt-0.5 leading-relaxed">{sf.field_description}</p>
-                                          )}
-                                        </div>
-                                      ))}
-                                    </div>
-                                  </div>
-                                )}
-                              </>
-                            )}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
-
-                  {/* Add field */}
-                  {isEditable && (
-                    <div onClick={addField} className="flex items-center justify-center gap-1.5 p-3 border border-dashed border-gray-200 dark:border-[#2a2a2a] rounded-lg cursor-pointer mt-2 text-gray-300 dark:text-zinc-600 text-sm transition-colors hover:border-gray-400 dark:hover:border-[#3f3f3f] hover:text-gray-500 dark:hover:text-zinc-400">
-                      <Plus className="w-3.5 h-3.5" /> Add field
-                    </div>
-                  )}
-                </div>
-          </form>
-        </div>
-
-        {/* Footer */}
-        <div className="flex items-center justify-between px-6 py-4 border-t border-gray-100 dark:border-[#1a1a1a] rounded-b-2xl flex-shrink-0">
-          <div className="flex items-center gap-1">
-            {isEditable && (
-              <Button variant="ghost" size="sm" onClick={handleDelete} className="text-gray-400 hover:text-red-500 dark:hover:text-red-400">
-                <Trash2 className="w-3.5 h-3.5 mr-1" /> Delete
-              </Button>
-            )}
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300"
-              onClick={() => {
-                const json = JSON.stringify({
-                  form_name: formName,
-                  form_description: formDescription,
-                  fields: fields.map(serializeFieldForCopy),
-                }, null, 2);
-                navigator.clipboard.writeText(json);
-                setJsonCopied(true);
-                setTimeout(() => setJsonCopied(false), 2000);
-              }}
-            >
-              {jsonCopied ? <ClipboardCheck className="w-3.5 h-3.5 mr-1" /> : <Clipboard className="w-3.5 h-3.5 mr-1" />}
-              {jsonCopied ? 'Copied!' : 'Copy JSON'}
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              className="text-gray-400 hover:text-gray-600 dark:hover:text-zinc-300"
-              onClick={() => {
-                const json = JSON.stringify({ form_name: formName, form_description: formDescription, fields: fields.map(serializeFieldForCopy) }, null, 2);
-                const blob = new Blob([json], { type: 'application/json' });
-                const url = URL.createObjectURL(blob);
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = `${formName.replace(/\s+/g, '_').toLowerCase()}.json`;
-                a.click();
-                URL.revokeObjectURL(url);
-              }}
-            >
-              <Download className="w-3.5 h-3.5 mr-1" />
-              Download JSON
-            </Button>
-          </div>
-          <div className="flex gap-2">
-            {form.status === 'draft' && (
-              <>
-                <Button variant="ghost" size="sm" onClick={handleClose} disabled={saving}>Close</Button>
-                {isEditable && hasChanges() && (
-                  <Button variant="secondary" size="sm" type="submit" form="edit-form-body" loading={saving}>Update Form</Button>
-                )}
-                {canManage && (
-                  <Button size="sm" onClick={() => { if (hasChanges()) { handleSubmit({ preventDefault: () => {} } as any).then(() => {}); } else { onGenerateCode(form.id, enableReview); onClose(); } }}>Generate Code</Button>
-                )}
-              </>
-            )}
-            {form.status === 'active' && (!hasChanges() || !canManage) && (
-              <Button variant="ghost" size="sm" onClick={handleClose}>Close</Button>
-            )}
-            {form.status === 'active' && hasChanges() && canManage && (
-              <>
-                <Button variant="ghost" size="sm" onClick={handleClose} disabled={saving}>Cancel</Button>
-                <Button size="sm" type="submit" form="edit-form-body" loading={saving}>
-                  {hasFieldChanges() ? 'Save & Generate' : 'Update Form'}
-                </Button>
-              </>
-            )}
-            {form.status === 'failed' && (
-              <>
-                <Button variant="ghost" size="sm" onClick={handleClose} disabled={saving}>Cancel</Button>
-                {hasChanges() && <Button variant="secondary" size="sm" type="submit" form="edit-form-body" loading={saving}>Save</Button>}
-                {canManage && (
-                  <Button size="sm" onClick={() => { onGenerateCode(form.id, enableReview); onClose(); }}>Retry</Button>
-                )}
-              </>
-            )}
-            {(form.status === 'generating' || form.status === 'regenerating' || form.status === 'awaiting_review') && (
-              <Button variant="ghost" size="sm" onClick={handleClose}>Close</Button>
-            )}
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 // Create Form Dialog Component
 function CreateFormDialog({
@@ -2352,7 +1801,14 @@ function CreateFormDialog({
                   <textarea value={jsonInput} onChange={e => { setJsonInput(e.target.value); setJsonError(''); }} placeholder={`{"form_name":"My Form","fields":[...]}`} rows={5}
                     className={cn("w-full text-[11px] font-mono bg-gray-50 dark:bg-[#141414] border rounded-lg p-2.5 text-gray-700 dark:text-zinc-300 resize-none focus:outline-none leading-relaxed placeholder-gray-400 dark:placeholder-zinc-500 transition-colors", jsonError ? "border-red-400 dark:border-red-600" : "border-gray-200 dark:border-[#2a2a2a] focus:border-gray-400 dark:focus:border-zinc-500")} />
                   {jsonError && <p className="text-[11px] text-red-500 mt-1 leading-snug">{jsonError}</p>}
+                  <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-1.5 leading-snug">
+                    Expected: form_name, form_description, fields[] — each field needs field_name, field_type, field_description.
+                  </p>
+                  <p className="text-[11px] text-gray-400 dark:text-zinc-500 leading-snug">
+                    Types: text · number · select (add options[]) · boolean · array (add subform_fields[]).
+                  </p>
                   <div className="flex gap-2 mt-2">
+                    <button type="button" onClick={() => { setJsonInput(EXAMPLE_IMPORT_JSON); setJsonError(''); }} className="text-[11px] text-gray-500 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] rounded-md px-2.5 py-1 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">Insert example</button>
                     <button type="button" onClick={() => fileInputRef.current?.click()} className="text-[11px] text-gray-500 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] rounded-md px-2.5 py-1 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">Upload .json</button>
                     <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={handleJsonFileUpload} className="hidden" />
                     <button type="button" onClick={handleLoadJson} disabled={!jsonInput.trim()} className="text-[11px] text-white dark:text-gray-900 bg-gray-900 dark:bg-zinc-200 rounded-md px-2.5 py-1 transition-colors disabled:opacity-40 hover:opacity-90">Load</button>
@@ -2500,7 +1956,6 @@ function DecompositionReviewDialog({
 
   const signatures = metadata?.decomposition?.signatures || [];
   const pipeline = useMemo(() => metadata?.decomposition?.pipeline || [], [metadata]);
-  const attempt: number = metadata?.decomposition?.attempt || 1;
   const reasoningTrace: string | null = metadata?.decomposition?.reasoning_trace || metadata?.decomposition_summary || null;
   const formFields: FormField[] = form.fields || [];
   const totalFields = signatures.reduce((sum: number, sig: any) =>
@@ -2720,7 +2175,7 @@ function DecompositionReviewDialog({
             </button>
           </div>
           {/* Metrics strip */}
-          <div className="grid grid-cols-3 mt-3 rounded-xl border border-gray-100 dark:border-[#1f1f1f] divide-x divide-gray-100 dark:divide-[#1f1f1f] overflow-hidden">
+          <div className="grid grid-cols-2 mt-3 rounded-xl border border-gray-100 dark:border-[#1f1f1f] divide-x divide-gray-100 dark:divide-[#1f1f1f] overflow-hidden">
             <div className="px-3 py-2">
               <p className={ml}>Fields covered</p>
               <p className={cn("text-lg font-semibold tabular-nums mt-0.5", formFields.length > 0 && totalFields >= formFields.length ? "text-emerald-600 dark:text-emerald-400" : "text-amber-600 dark:text-amber-400")}>
@@ -2734,11 +2189,6 @@ function DecompositionReviewDialog({
               <p className={ml}>Groups</p>
               <p className="text-lg font-semibold tabular-nums text-sky-600 dark:text-sky-400 mt-0.5">{signatures.length}</p>
               <p className="text-[10px] text-gray-300 dark:text-zinc-600 mt-1">across {pipeline.length} stage{pipeline.length !== 1 ? 's' : ''}</p>
-            </div>
-            <div className="px-3 py-2">
-              <p className={ml}>Revision</p>
-              <p className="text-lg font-semibold tabular-nums text-violet-600 dark:text-violet-400 mt-0.5">{attempt} <span className="text-xs text-gray-300 dark:text-zinc-600 font-normal">of 3</span></p>
-              <p className="text-[10px] text-gray-300 dark:text-zinc-600 mt-1">{Math.max(0, 3 - attempt)} regen{3 - attempt === 1 ? '' : 's'} remaining</p>
             </div>
           </div>
         </div>
@@ -2781,8 +2231,10 @@ function DecompositionReviewDialog({
               {pipeline.map((stage: any, si: number) => {
                 const isOpen = expandedStages.has(stage.stage);
                 const isLastStage = si === pipeline.length - 1;
-                const execution = (stage.execution || 'parallel').toLowerCase();
-                const isParallel = execution === 'parallel';
+                // Absent execution must not be reported as "parallel" — say nothing
+                // and only fall back for the shape of the marker.
+                const execution = (stage.execution || '').toLowerCase();
+                const isParallel = execution !== 'sequential';
                 const stageSignatures = (stage.signatures || []).map((sigName: string) => signatures.find((s: any) => s.name === sigName)).filter(Boolean);
                 const stageFieldCount = stageSignatures.reduce((s: number, sig: any) => s + Object.keys(sig.fields || {}).length, 0);
                 return (
@@ -2794,7 +2246,7 @@ function DecompositionReviewDialog({
                     <div className="flex-1 pb-4 min-w-0">
                       <div className="flex items-center gap-2 py-1.5 pr-2 pl-1 cursor-pointer rounded-lg -ml-1 transition-colors hover:bg-black/[0.025] dark:hover:bg-white/[0.03]" onClick={() => toggleStage(stage.stage)}>
                         <span className={cn("text-sm tracking-tight flex-1", isOpen ? "font-semibold text-gray-900 dark:text-white" : "font-medium text-gray-500 dark:text-zinc-400")}>Stage {stage.stage}</span>
-                        <span className="text-xs text-gray-400 dark:text-zinc-600">{execution} · {stageSignatures.length} group{stageSignatures.length !== 1 ? 's' : ''}{!isOpen ? ` · ${stageFieldCount} fields` : ''}</span>
+                        <span className="text-xs text-gray-400 dark:text-zinc-600">{execution ? `${execution} · ` : ''}{stageSignatures.length} group{stageSignatures.length !== 1 ? 's' : ''}{!isOpen ? ` · ${stageFieldCount} fields` : ''}</span>
                         <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 transition-transform duration-200 text-gray-300 dark:text-zinc-600" style={{ transform: isOpen ? 'rotate(180deg)' : 'rotate(0)' }}><path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
                       </div>
                       {isOpen && (
@@ -3055,8 +2507,14 @@ function DecompositionReviewDialog({
                   </div>
                   {selectedFieldData.field_type === 'array' && (() => {
                     const sfs: any[] = (selectedFieldData as any).subform_fields || [];
-                    const autoAnchors = autoDetectAnchors(sfs);
-                    const strategy = sfs.length > 5 ? 'row_then_columns' : 'single_call';
+                    // The mode is a stored per-field choice that survives regeneration —
+                    // read it instead of asserting "Fast", which was wrong for every
+                    // Rigorous/Agentic table reaching review a second time. An
+                    // unrecognised stored value shows itself rather than resolving to a
+                    // default: claiming the wrong mode is worse than naming none.
+                    const storedMode = (selectedFieldData as any).extraction_strategy as TableFieldExtractionStrategy | undefined
+                      || (metadata?.table_extraction_mode === 'agentic' ? 'agentic' : undefined);
+                    const modeMeta = storedMode ? TABLE_MODE_META[storedMode] : undefined;
                     return (
                       <div className="flex flex-col gap-2">
                         <div className="rounded-lg border border-amber-200 dark:border-amber-900/40 bg-amber-50/70 dark:bg-amber-950/20 p-3 flex gap-2">
@@ -3070,24 +2528,20 @@ function DecompositionReviewDialog({
                         </div>
                         {sfs.length > 0 && (
                           <div className="rounded-lg border border-blue-100 dark:border-blue-900/30 bg-blue-50/50 dark:bg-blue-950/10 px-3 py-2.5">
-                            <p className="text-[10px] font-semibold text-blue-700 dark:text-blue-400 uppercase tracking-wider mb-1.5">Extraction strategy (auto-configured)</p>
+                            <p className="text-[10px] font-semibold text-blue-700 dark:text-blue-400 uppercase tracking-wider mb-1.5">Extraction mode</p>
                             <div className="flex items-center gap-2 mb-1.5">
-                              <span className={cn("text-[11px] font-medium px-2 py-0.5 rounded-full", strategy === 'row_then_columns' ? "bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300" : "bg-gray-100 dark:bg-[#1f1f1f] text-gray-600 dark:text-zinc-400")}>
-                                {strategy === 'row_then_columns'
-                                  ? `2-stage · 1 row call + ${sfs.length - autoAnchors.length} focused calls`
-                                  : 'All-in-one (1 call)'
-                                }
+                              <span className="text-[11px] font-medium px-2 py-0.5 rounded-full bg-gray-100 dark:bg-[#1f1f1f] text-gray-600 dark:text-zinc-400">
+                                {modeMeta ? modeMeta.label : storedMode ? storedMode : 'Fast (default)'}
                               </span>
+                              {modeMeta && (
+                                <span className="text-[10px] text-blue-600/70 dark:text-blue-400/60">{modeMeta.calls}</span>
+                              )}
                             </div>
-                            {strategy === 'row_then_columns' && autoAnchors.length > 0 && (
-                              <div>
-                                <p className="text-[10px] text-blue-600/70 dark:text-blue-400/60 mb-1">Anchor columns (Stage 1 — row discovery):</p>
-                                <div className="flex flex-wrap gap-1">
-                                  {autoAnchors.map((a:string) => <span key={a} className="text-[10px] bg-blue-100 dark:bg-blue-900/40 text-blue-700 dark:text-blue-300 px-1.5 py-0.5 rounded font-mono">{a}</span>)}
-                                </div>
-                              </div>
-                            )}
-                            <p className="text-[10px] text-blue-500/60 dark:text-blue-400/40 mt-1.5">Anchors shown are a preview — the final split is classified automatically during generation.</p>
+                            <p className="text-[10px] text-blue-500/60 dark:text-blue-400/40 mt-1.5">
+                              {storedMode
+                                ? 'This is the mode saved for this field. You can change it in the field editor once the form finishes generating.'
+                                : 'No mode saved yet, so this table will run Fast. You can switch it to Rigorous or Agentic in the field editor once the form finishes generating.'}
+                            </p>
                           </div>
                         )}
                       </div>
@@ -3171,7 +2625,7 @@ function DecompositionReviewDialog({
 // One dialog for structural + calibration edits with diff-on-save routing.
 
 // UEFCalField, UEFEditableField, FieldEditorPane, AutoTextarea, humanizeFieldName,
-// and autoDetectAnchors live in '@/components/forms/FieldEditorPane' so they can be
+// and autoDetectKeyColumns live in '@/components/forms/FieldEditorPane' so they can be
 // reused outside this Next.js page (page files can't export non-page symbols).
 
 type UEFDiffKind = 'none' | 'calibration' | 'schema';
@@ -3257,7 +2711,10 @@ function EditFormDialog({
   const queryClient = useQueryClient();
   const isActive = form.status === 'active';
   const isDraftOrFailed = form.status === 'draft' || form.status === 'failed';
-  const isReadOnly = !isActive && !isDraftOrFailed;
+  // Viewers (no can_create_forms) get the same read-only rendering as a form
+  // mid-generation. This dialog is now the only place fields can be inspected,
+  // so it must be openable without the permission its save endpoints require.
+  const isReadOnly = (!isActive && !isDraftOrFailed) || !canManage;
 
   // ── Structural state ──────────────────────────────────────────────────────
   const originalFields = useMemo(() => form.fields.map(aliasFieldTypeRec), [form.fields]);
@@ -3281,6 +2738,85 @@ function EditFormDialog({
   const [origCalState, setOrigCalState] = useState<Record<string, UEFCalField>>({});
   const [calLoading, setCalLoading] = useState(isActive);
 
+  // ── Table extraction mode (per table field) ───────────────────────────────
+  // Each table field picks its own mode; single_call is the default at every
+  // width. The agentic extractor is Claude-only, so we also surface the
+  // user's model preference for the warning banner.
+  const hasTableField = useMemo(
+    () => fields.some(f => isTableField(f as unknown as FormField)),
+    [fields],
+  );
+  const [pendingFieldMode, setPendingFieldMode] = useState<{ fieldName: string; mode: TableFieldExtractionStrategy } | null>(null);
+  const [savingFieldMode, setSavingFieldMode] = useState<string | null>(null);
+  const [savingKeyColumns, setSavingKeyColumns] = useState<string | null>(null);
+
+  const { data: userSettings } = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => settingsService.getSettings(),
+    staleTime: 5 * 60 * 1000,
+    enabled: hasTableField,
+  });
+  const preferredModel = userSettings?.extraction_model || '';
+  // Empty preference means DEFAULT_MODEL, which is a Claude model.
+  const modelIsClaude = !preferredModel || preferredModel.startsWith('anthropic/');
+
+  const applyFieldMode = async (fieldName: string, mode: TableFieldExtractionStrategy) => {
+    setSavingFieldMode(fieldName);
+    try {
+      await formsService.updateFieldEdits(form.id, [{ field_name: fieldName, extraction_strategy: mode }]);
+      setFields(prev => prev.map(f => f.field_name === fieldName ? { ...f, extraction_strategy: mode } : f));
+      queryClient.invalidateQueries({ queryKey: ['forms'] });
+      toast({
+        title: `${TABLE_MODE_META[mode].label} extraction enabled`,
+        description: 'Applies to future extraction runs of this field. Existing results are unchanged.',
+      });
+    } catch (err) {
+      toast({
+        title: 'Could not change extraction mode',
+        description: getErrorMessage(err),
+        variant: 'error',
+      });
+    } finally {
+      setSavingFieldMode(null);
+      setPendingFieldMode(null);
+    }
+  };
+
+  // Reads the composite key off a field, accepting either spelling. The stored
+  // key is migrating anchor_columns → key_columns; the backend dual-writes both,
+  // so this only has to prefer the new one and never fail on the old.
+  const keyColumnsOf = (f: any): string[] | null => {
+    for (const k of ["key_columns", "anchor_columns"]) {
+      if (Array.isArray(f?.[k])) return f[k] as string[];
+    }
+    return null;  // absent (not merely empty) = this form pre-dates the editor
+  }
+
+  // Row definition (anchor_columns) — which columns start a new row. Patched
+  // through the same field-edits endpoint as extraction mode; the backend
+  // validates every name against the field's subfields and stamps
+  // extraction_role on each column, so no schema regeneration is needed.
+  const applyKeyColumns = async (fieldName: string, keyColumns: string[]) => {
+    setSavingKeyColumns(fieldName);
+    try {
+      await formsService.updateFieldEdits(form.id, [{ field_name: fieldName, anchor_columns: keyColumns }]);
+      setFields(prev => prev.map(f => f.field_name === fieldName ? { ...f, anchor_columns: keyColumns } : f));
+      queryClient.invalidateQueries({ queryKey: ['forms'] });
+      toast({
+        title: 'Row definition saved',
+        description: `A new row is created for each unique combination of ${keyColumns.join(' × ')}. Applies to future extraction runs.`,
+      });
+    } catch (err) {
+      toast({
+        title: 'Could not save the row definition',
+        description: getErrorMessage(err),
+        variant: 'error',
+      });
+    } finally {
+      setSavingKeyColumns(null);
+    }
+  };
+
   // Load field-prompts for active forms (overrides form.fields calibration data)
   useEffect(() => {
     if (!isActive) { setOrigCalState(JSON.parse(JSON.stringify(calState))); return; }
@@ -3298,11 +2834,22 @@ function EditFormDialog({
         }
         setCalState(seed);
         setOrigCalState(JSON.parse(JSON.stringify(seed)));
-        // Seed structural fields with enriched subform_fields from schema_def
+        // Seed structural fields from schema_def — subform columns, and also the
+        // extraction mode and composite key. schema_def is what the extractor
+        // compiles from, so it wins over the forms.fields mirror: reading the
+        // mode from fields alone is what made the editor show "Fast · 1 model
+        // call" for fields actually running the 3-call keyed pipeline.
         const enrichSubfields = (prev: UEFEditableField[]) => prev.map(f => {
           const fp = data.field_prompts[f.field_name];
-          if (fp?.subform_fields?.length) return { ...f, subform_fields: fp.subform_fields as any as FormField[] };
-          return f;
+          if (!fp) return f;
+          const next: UEFEditableField = { ...f };
+          if (fp.subform_fields?.length) next.subform_fields = fp.subform_fields as any as FormField[];
+          if (fp.extraction_strategy) next.extraction_strategy = fp.extraction_strategy;
+          if (fp.key_columns?.length) {
+            next.key_columns = fp.key_columns;
+            next.anchor_columns = fp.key_columns;
+          }
+          return next;
         });
         setFields(enrichSubfields);
         setOrigStructuralFields(enrichSubfields);
@@ -3331,15 +2878,69 @@ function EditFormDialog({
 
   // ── Saving ────────────────────────────────────────────────────────────────
   const [saving, setSaving] = useState(false);
-  const [showConfirm, setShowConfirm] = useState(false);
   const [jsonCopied, setJsonCopied] = useState(false);
+
+  // ── Form identity (name / description) ────────────────────────────────────
+  // The app's only rename path. Saved on its own, never alongside `fields`:
+  // forms.py clears schema_name only when the payload carries fields, so a
+  // rename can't knock an active form out of its compiled schema.
+  const [nameDraft, setNameDraft] = useState(form.form_name);
+  const [descDraft, setDescDraft] = useState(form.form_description || '');
+  const [editingName, setEditingName] = useState(false);
+  const [editingDesc, setEditingDesc] = useState(false);
+  const [savingIdentity, setSavingIdentity] = useState(false);
+
+  const saveIdentity = async () => {
+    const name = nameDraft.trim();
+    const description = descDraft.trim();
+    const nameChanged = name !== form.form_name;
+    const descChanged = description !== (form.form_description || '').trim();
+    if (!nameChanged && !descChanged) return;
+    if (!name) {
+      setNameDraft(form.form_name);
+      toast({ title: 'A form needs a name', variant: 'error' });
+      return;
+    }
+    const clash = existingForms.some(
+      f => f.id !== form.id && f.form_name.trim().toLowerCase() === name.toLowerCase(),
+    );
+    if (nameChanged && clash) {
+      setNameDraft(form.form_name);
+      toast({ title: 'Duplicate name', description: `A form named "${name}" already exists.`, variant: 'error' });
+      return;
+    }
+    setSavingIdentity(true);
+    try {
+      await formsService.update(form.id, {
+        ...(nameChanged ? { form_name: name } : {}),
+        ...(descChanged ? { form_description: description } : {}),
+      });
+      queryClient.invalidateQueries({ queryKey: ['forms'], exact: false });
+      toast({ title: nameChanged ? 'Form renamed' : 'Description saved', variant: 'success' });
+    } catch (err: any) {
+      // Revert to what the server still holds so the header never shows a value
+      // that was rejected.
+      setNameDraft(form.form_name);
+      setDescDraft(form.form_description || '');
+      toast({ title: 'Could not save', description: getErrorMessage(err), variant: 'error' });
+    } finally { setSavingIdentity(false); }
+  };
 
   const handleSave = async () => {
     if (isReadOnly) return;
     if (isDraftOrFailed) { await doStructuralSave(false); return; }
     // active form
     if (diff.kind === 'none') { onClose(); return; }
-    if (diff.kind === 'schema') { setShowConfirm(true); return; }
+    // Unreachable by construction (see above). Refuse loudly rather than
+    // fall through to doCalibrationSave, which would silently drop the change.
+    if (diff.kind === 'schema') {
+      toast({
+        title: 'Structural change not supported here',
+        description: 'Use Add field / Remove field, or clone the form.',
+        variant: 'error',
+      });
+      return;
+    }
     await doCalibrationSave();
   };
 
@@ -3388,12 +2989,11 @@ function EditFormDialog({
 
   const doStructuralSave = async (andRegen: boolean) => {
     setSaving(true);
-    setShowConfirm(false);
     try {
       const validFields = fields.filter(f => !f._isDeleted).map(({ _isNew, _isDeleted, ...f }) => sanitizeFieldDeep(f as FormField));
       await formsService.update(form.id, { form_name: form.form_name, form_description: form.form_description || '', fields: validFields });
       if (andRegen) {
-        await formsService.generateCode(form.id, form.metadata?.enable_review ?? false);
+        await formsService.generateCode(form.id, form.enable_review ?? false);
         toast({ title: 'Regenerating', description: 'Pipeline rebuild started.', variant: 'success' });
       } else {
         toast({ title: 'Saved', variant: 'success' });
@@ -3452,12 +3052,47 @@ function EditFormDialog({
 
   const handleRemoveConfirm = async () => {
     if (!removeModal) return;
+    const removedName = removeModal.fieldName;
     setRemovingField(true);
     try {
-      await formsService.removeField(form.id, removeModal.fieldName);
-      toast({ title: 'Field removed', variant: 'success' });
+      const res = await formsService.removeField(form.id, removedName);
+
+      // Field is already gone server-side — prune from both the edited and
+      // baseline copies so the diff doesn't flag it as a pending change.
+      setFields(prev => prev.filter(f => f.field_name !== removedName));
+      setOrigStructuralFields(prev => prev.filter(f => f.field_name !== removedName));
+      setCalState(prev => { const n = { ...prev }; delete n[removedName]; return n; });
+      setOrigCalState(prev => { const n = { ...prev }; delete n[removedName]; return n; });
+
+      setLiveDecomposition((prev: any) => {
+        const next = JSON.parse(JSON.stringify(prev || { pipeline: [], signatures: [] }));
+        for (const sig of next.signatures || []) delete (sig.fields || {})[removedName];
+        for (const stage of next.pipeline || []) {
+          stage.provides_fields = (stage.provides_fields || []).filter((f: string) => f !== removedName);
+        }
+        if (res.removed_signature) {
+          next.signatures = (next.signatures || []).filter((s: any) => (s.name || s.class_name) !== res.removed_signature);
+          for (const stage of next.pipeline || []) {
+            stage.signatures = (stage.signatures || []).filter((s: string) => s !== res.removed_signature);
+          }
+        }
+        if (res.removed_stage != null) {
+          next.pipeline = (next.pipeline || []).filter((s: any) => s.stage !== res.removed_stage);
+        }
+        return next;
+      });
+
+      setSelectedIdx(idx => Math.max(0, Math.min(idx, fields.length - 2)));
+
+      const extra: string[] = [];
+      if (res.removed_signature) extra.push(`signature "${res.removed_signature}" (now empty) was also removed`);
+      if (res.removed_stage != null) extra.push(`stage ${res.removed_stage} was also removed`);
+      toast({ title: 'Field removed', description: extra.join(' — ') || undefined, variant: 'success' });
+
       setRemoveModal(null);
-      onSuccess();
+      queryClient.invalidateQueries({ queryKey: ['forms', form.project_id], exact: false });
+      // Deliberately no onSuccess() here — that would unmount EditFormDialog
+      // via setEditUnifiedForm(null) in the parent. Stay on this page.
     } catch (err: any) { toast({ title: 'Error', description: getErrorMessage(err), variant: 'error' }); }
     finally { setRemovingField(false); }
   };
@@ -3484,6 +3119,12 @@ function EditFormDialog({
   const visibleFields = fields;
   const selectedField = visibleFields[selectedIdx] ?? null;
   const selectedCal = selectedField ? (calState[selectedField.field_name] ?? { description: '', hints: [], rules: [], examples: [] }) : null;
+  // Legacy agentic forms carry no per-field extraction_strategy yet — fall
+  // back to the old form-level metadata mirror so they still display agentic.
+  const selectedFieldMode: TableFieldExtractionStrategy | null = selectedField
+    ? ((selectedField.extraction_strategy as TableFieldExtractionStrategy | undefined)
+        || (form.metadata?.table_extraction_mode === 'agentic' ? 'agentic' : 'single_call'))
+    : null;
 
   // ── Cost pill ─────────────────────────────────────────────────────────────
   const activeFieldCount = fields.filter(f => !f._isDeleted).length;
@@ -3498,21 +3139,7 @@ function EditFormDialog({
         </div>
       );
     }
-    // schema
-    const changes: string[] = [];
-    diff.schemaChanges.added.forEach(n => changes.push(`Added: ${n}`));
-    diff.schemaChanges.removed.forEach(n => changes.push(`Removed: ${n}`));
-    diff.schemaChanges.typeChanged.forEach(t => changes.push(`Changed: ${t.field_name}`));
-    const preview = changes.slice(0, 2).join(' · ') + (changes.length > 2 ? ` +${changes.length - 2} more` : '');
-    return (
-      <div className="flex flex-col gap-0.5 px-3 py-2 rounded-xl border border-amber-200 dark:border-amber-800/50 bg-amber-50 dark:bg-amber-950/20">
-        <div className="flex items-center gap-2 text-xs text-amber-800 dark:text-amber-200">
-          <div className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
-          <span><strong>Schema change</strong> · regenerates pipeline · ~2–4 min · re-runs HITL review</span>
-        </div>
-        {preview && <p className="text-[11px] text-amber-600 dark:text-amber-400 pl-3.5">{preview}</p>}
-      </div>
-    );
+    return null;  // 'schema' is unreachable here — see handleSave.
   })();
 
   const saveLabel = (() => {
@@ -3520,19 +3147,68 @@ function EditFormDialog({
     if (isReadOnly) return 'Close';
     if (isDraftOrFailed) return 'Save';
     if (diff.kind === 'none') return 'Done';
-    if (diff.kind === 'schema') return 'Save →';
     return 'Save';
   })();
 
   const ml = "text-[11px] font-semibold text-gray-500 dark:text-zinc-400 uppercase tracking-wider";
 
-  // Pipeline metadata for grouped rail
-  const uefMeta = useMemo(() => {
+  // Pipeline metadata for grouped rail — kept in local state (not derived
+  // straight from the `form` prop) so a field/signature delete can patch it
+  // in place without the dialog needing a fresh prop to reflect the change.
+  const [liveDecomposition, setLiveDecomposition] = useState(() => {
     const m = typeof form.metadata === 'string' ? JSON.parse(form.metadata || '{}') : (form.metadata || {});
-    return { pipeline: m?.decomposition?.pipeline || [], signatures: m?.decomposition?.signatures || [] };
-  }, [form.metadata]);
+    return m?.decomposition || { pipeline: [], signatures: [] };
+  });
+  const uefMeta = useMemo(() => ({
+    pipeline: liveDecomposition?.pipeline || [],
+    signatures: liveDecomposition?.signatures || [],
+  }), [liveDecomposition]);
   const [uefExpandedStages, setUefExpandedStages] = useState<Set<number>>(() => new Set(uefMeta.pipeline.map((s: any) => s.stage)));
   const [uefExpandedSigs, setUefExpandedSigs] = useState<Set<string>>(new Set(uefMeta.signatures.map((s: any) => s.name)));
+  // Table fields whose column list is expanded in the left rail.
+  const [uefExpandedTables, setUefExpandedTables] = useState<Set<string>>(new Set());
+  // Focus request handed to FieldEditorPane so a rail click on a column scrolls
+  // the editor to that column's card. Nonce makes repeat clicks re-scroll.
+  const [focusSubfield, setFocusSubfield] = useState<{ name: string; nonce: number } | null>(null);
+  const focusNonce = useRef(0);
+  const subfieldsOf = (f?: UEFEditableField): any[] =>
+    f && f.field_type === 'array' && Array.isArray(f.subform_fields) ? (f.subform_fields as any[]) : [];
+  const toggleTableCols = (fname: string) => setUefExpandedTables(prev => {
+    const s = new Set(prev);
+    s.has(fname) ? s.delete(fname) : s.add(fname);
+    return s;
+  });
+  const selectSubfield = (fieldIdx: number, subName: string) => {
+    setSelectedIdx(fieldIdx);
+    focusNonce.current += 1;
+    setFocusSubfield({ name: subName, nonce: focusNonce.current });
+  };
+  // One column row in the rail — shared by the pipeline tree and the flat list.
+  const subfieldRail = (fieldIdx: number, fname: string, subs: any[]) => (
+    <div className="flex flex-col gap-px mt-1 ml-1.5 pl-2 border-l border-gray-200 dark:border-[#242424]">
+      {subs.map((sf: any, si: number) => {
+        const subName = sf.field_name || '';
+        const isFocused = focusSubfield?.name === subName && fieldIdx === selectedIdx;
+        return (
+          <button
+            key={subName || si}
+            type="button"
+            onClick={() => selectSubfield(fieldIdx, subName)}
+            title={subName}
+            className={cn(
+              "text-left text-[11px] leading-snug py-[3px] px-1.5 rounded-md truncate transition-colors",
+              isFocused
+                ? "text-sky-700 dark:text-sky-300 bg-sky-50 dark:bg-sky-950/30"
+                : "text-gray-500 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-zinc-100 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]",
+            )}
+          >
+            {sf.display_name || (subName ? humanizeFieldName(subName) : <span className="italic opacity-60">unnamed column</span>)}
+          </button>
+        );
+      })}
+      {subs.length === 0 && <p className="text-[10.5px] text-gray-400 dark:text-zinc-600 italic px-1.5 py-0.5">No columns</p>}
+    </div>
+  );
   const fieldIndexByName = useMemo(() => {
     const m: Record<string, number> = {};
     fields.forEach((f, i) => { m[f.field_name] = i; });
@@ -3548,14 +3224,51 @@ function EditFormDialog({
           <div className="flex items-start justify-between gap-3">
             <div className="flex-1 min-w-0">
               <div className="flex items-center gap-2.5 flex-wrap">
-                <h2 className="text-lg font-semibold text-gray-900 dark:text-white tracking-tight">{form.form_name}</h2>
-                <span className="text-xs px-2 py-0.5 rounded-md bg-gray-100 dark:bg-[#1f1f1f] text-gray-600 dark:text-zinc-300 border border-gray-200 dark:border-[#2a2a2a] font-medium">Edit form</span>
+                {editingName && !isReadOnly ? (
+                  <input
+                    autoFocus
+                    value={nameDraft}
+                    onChange={e => setNameDraft(e.target.value)}
+                    onBlur={() => { setEditingName(false); saveIdentity(); }}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') e.currentTarget.blur();
+                      if (e.key === 'Escape') { setNameDraft(form.form_name); setEditingName(false); }
+                    }}
+                    className="text-lg font-semibold text-gray-900 dark:text-white tracking-tight bg-transparent border-b border-gray-300 dark:border-zinc-600 outline-none py-0.5 flex-1 min-w-[12rem]"
+                  />
+                ) : (
+                  <h2
+                    className={cn("text-lg font-semibold text-gray-900 dark:text-white tracking-tight truncate", !isReadOnly && "cursor-text hover:text-gray-500 dark:hover:text-zinc-300")}
+                    title={isReadOnly ? undefined : 'Click to rename'}
+                    onClick={() => { if (!isReadOnly) setEditingName(true); }}
+                  >{nameDraft}</h2>
+                )}
+                <span className="text-xs px-2 py-0.5 rounded-md bg-gray-100 dark:bg-[#1f1f1f] text-gray-600 dark:text-zinc-300 border border-gray-200 dark:border-[#2a2a2a] font-medium shrink-0">Edit form</span>
                 {isReadOnly && (
-                  <span className="text-xs px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300 border border-amber-200/60 dark:border-amber-800/40 font-medium">Read-only while {form.status}</span>
+                  <span className="text-xs px-2 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-300 border border-amber-200/60 dark:border-amber-800/40 font-medium">{canManage ? `Read-only while ${form.status}` : 'Read-only — needs the Create Forms permission'}</span>
                 )}
               </div>
-              <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
-                {isActive ? 'Calibration edits save instantly. Use Add / Remove for structural changes.' : 'Edit fields, descriptions, hints, rules, and examples. Save when ready.'}
+              {editingDesc && !isReadOnly ? (
+                <textarea
+                  autoFocus
+                  value={descDraft}
+                  onChange={e => setDescDraft(e.target.value)}
+                  onBlur={() => { setEditingDesc(false); saveIdentity(); }}
+                  onKeyDown={e => { if (e.key === 'Escape') { setDescDraft(form.form_description || ''); setEditingDesc(false); } }}
+                  rows={2}
+                  className="w-full text-sm text-gray-600 dark:text-zinc-300 bg-transparent border-b border-gray-300 dark:border-zinc-600 outline-none leading-relaxed resize-none mt-1.5"
+                />
+              ) : (
+                <p
+                  className={cn("text-sm text-gray-500 dark:text-zinc-400 leading-relaxed mt-1.5 line-clamp-2", !isReadOnly && "cursor-text hover:text-gray-700 dark:hover:text-zinc-200")}
+                  title={descDraft || undefined}
+                  onClick={() => { if (!isReadOnly) setEditingDesc(true); }}
+                >{descDraft || (isReadOnly ? 'No description.' : 'No description — click to add')}</p>
+              )}
+              <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1.5">
+                {savingIdentity ? 'Saving…' : !canManage
+                  ? 'Viewing only — editing needs the Create Forms permission.'
+                  : isActive ? 'Calibration edits save instantly. Use Add / Remove for structural changes.' : 'Edit fields, descriptions, hints, rules, and examples. Save when ready.'}
               </p>
             </div>
             <button type="button" onClick={onClose} className="text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 transition-colors p-1 shrink-0">
@@ -3624,11 +3337,13 @@ function EditFormDialog({
                                       if (idx === undefined) return null;
                                       const f = fields[idx];
                                       const isSelected = idx === selectedIdx;
-                                      return (
+                                      const isTable = f?.field_type === 'array';
+                                      const subs = subfieldsOf(f);
+                                      const colsOpen = uefExpandedTables.has(fname);
+                                      const chip = (
                                         <button
-                                          key={fname}
                                           type="button"
-                                          onClick={() => setSelectedIdx(idx)}
+                                          onClick={() => { setSelectedIdx(idx); if (isTable) toggleTableCols(fname); }}
                                           className={cn(
                                             "text-xs py-0.5 px-2 rounded-md transition-colors",
                                             isSelected ? "bg-gray-900 dark:bg-zinc-200 text-white dark:text-gray-900" : "text-gray-600 dark:text-zinc-300 bg-gray-100 dark:bg-[#1a1a1a] hover:bg-gray-200 dark:hover:bg-[#222]",
@@ -3637,6 +3352,25 @@ function EditFormDialog({
                                         >
                                           {f?.display_name || humanizeFieldName(fname)}
                                         </button>
+                                      );
+                                      // Scalar field → plain chip. Table field → chip + expandable column list.
+                                      if (!isTable) return <div key={fname}>{chip}</div>;
+                                      return (
+                                        <div key={fname} className="w-full">
+                                          <div className="flex items-center gap-1">
+                                            {chip}
+                                            <button
+                                              type="button"
+                                              onClick={() => toggleTableCols(fname)}
+                                              title={colsOpen ? 'Hide columns' : 'Show columns'}
+                                              className="flex items-center gap-0.5 text-[10px] py-0.5 px-1 rounded-md text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-950/30 hover:bg-amber-100 dark:hover:bg-amber-950/50 transition-colors shrink-0"
+                                            >
+                                              {subs.length}
+                                              <svg width="9" height="9" viewBox="0 0 16 16" fill="none" style={{ transform: colsOpen ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.15s' }}><path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                                            </button>
+                                          </div>
+                                          {colsOpen && subfieldRail(idx, fname, subs)}
+                                        </div>
                                       );
                                     })}
                                   </div>
@@ -3670,15 +3404,27 @@ function EditFormDialog({
                     const isSelected = idx === selectedIdx;
                     const typeGlyph = f.field_type === 'array' ? '▦' : f.field_type === 'select' ? '⊙' : '⊡';
                     const displayName = f.display_name || humanizeFieldName(f.field_name);
+                    const isTable = f.field_type === 'array';
+                    const subs = subfieldsOf(f);
+                    const colsOpen = uefExpandedTables.has(f.field_name);
                     return (
-                      <button key={idx} type="button" onClick={() => setSelectedIdx(idx)}
-                        className={cn("w-full text-left px-3 py-2 rounded-lg flex items-center gap-2 text-sm transition-colors",
-                          isSelected ? "bg-gray-900 dark:bg-zinc-200 text-white dark:text-gray-900" : "text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]",
-                          f._isDeleted && "opacity-40 line-through")}>
-                        <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">{typeGlyph}</span>
-                        <span className="flex-1 truncate">{f._isNew ? <em className="not-italic text-emerald-600 dark:text-emerald-400">{displayName}</em> : displayName}</span>
-                        {f._isDeleted && <span className="text-[10px] text-red-400 shrink-0">del</span>}
-                      </button>
+                      <div key={idx}>
+                        <button type="button" onClick={() => { setSelectedIdx(idx); if (isTable) toggleTableCols(f.field_name); }}
+                          className={cn("w-full text-left px-3 py-2 rounded-lg flex items-center gap-2 text-sm transition-colors",
+                            isSelected ? "bg-gray-900 dark:bg-zinc-200 text-white dark:text-gray-900" : "text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]",
+                            f._isDeleted && "opacity-40 line-through")}>
+                          <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">{typeGlyph}</span>
+                          <span className="flex-1 truncate">{f._isNew ? <em className="not-italic text-emerald-600 dark:text-emerald-400">{displayName}</em> : displayName}</span>
+                          {isTable && (
+                            <span className={cn("flex items-center gap-0.5 text-[10px] shrink-0", isSelected ? "opacity-70" : "text-gray-400 dark:text-zinc-500")}>
+                              {subs.length}
+                              <svg width="9" height="9" viewBox="0 0 16 16" fill="none" style={{ transform: colsOpen ? 'rotate(180deg)' : 'rotate(0)', transition: 'transform 0.15s' }}><path d="M4 6l4 4 4-4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                            </span>
+                          )}
+                          {f._isDeleted && <span className="text-[10px] text-red-400 shrink-0">del</span>}
+                        </button>
+                        {isTable && colsOpen && <div className="ml-3 mb-1">{subfieldRail(idx, f.field_name, subs)}</div>}
+                      </div>
                     );
                   })}
                 </div>
@@ -3829,8 +3575,39 @@ function EditFormDialog({
                 cal={selectedCal!}
                 editable={!isReadOnly && !selectedField._isDeleted}
                 structuralEditable={!isReadOnly && !selectedField._isDeleted && !isStructurallyLocked}
+                focusSubfield={focusSubfield}
                 onFieldPatch={patch => updateField(selectedIdx, patch)}
                 onCalPatch={patch => updateCal(selectedField.field_name, patch)}
+                tableModeProps={
+                  selectedField.field_type === 'array' && selectedFieldMode
+                    ? {
+                        mode: selectedFieldMode,
+                        onChange: mode => { if (mode !== selectedFieldMode) setPendingFieldMode({ fieldName: selectedField.field_name, mode }); },
+                        disabled: !canManage || isReadOnly || selectedField._isDeleted,
+                        saving: savingFieldMode === selectedField.field_name,
+                        modelIsClaude,
+                        preferredModel,
+                      }
+                    : undefined
+                }
+                rowDefProps={
+                  selectedField.field_type === 'array'
+                  && Array.isArray(selectedField.subform_fields)
+                  && selectedField.subform_fields.length > 0
+                    ? {
+                        // Absent (not just empty) means this form pre-dates the
+                        // editor — the section says so rather than showing an
+                        // empty selection as if it were the current setting.
+                        // Either stored spelling, new key first — mirrors the
+                        // backend's field_key_columns() so a migrated and an
+                        // unmigrated form render identically.
+                        keyColumns: keyColumnsOf(selectedField),
+                        onSave: (next: string[]) => applyKeyColumns(selectedField.field_name, next),
+                        disabled: !canManage || isReadOnly || !!selectedField._isDeleted,
+                        saving: savingKeyColumns === selectedField.field_name,
+                      }
+                    : undefined
+                }
               />
             )}
           </div>
@@ -3844,8 +3621,8 @@ function EditFormDialog({
               type="button"
               onClick={() => {
                 const json = JSON.stringify({
-                  form_name: form.form_name,
-                  form_description: form.form_description,
+                  form_name: nameDraft,
+                  form_description: descDraft,
                   fields: fields.map(serializeFieldForCopy),
                 }, null, 2);
                 navigator.clipboard.writeText(json);
@@ -3872,12 +3649,12 @@ function EditFormDialog({
                     } : {}),
                   };
                 });
-                const json = JSON.stringify({ form_name: form.form_name, form_description: form.form_description, fields: mergedFields }, null, 2);
+                const json = JSON.stringify({ form_name: nameDraft, form_description: descDraft, fields: mergedFields }, null, 2);
                 const blob = new Blob([json], { type: 'application/json' });
                 const url = URL.createObjectURL(blob);
                 const a = document.createElement('a');
                 a.href = url;
-                a.download = `${form.form_name.replace(/\s+/g, '_').toLowerCase()}.json`;
+                a.download = `${nameDraft.replace(/\s+/g, '_').toLowerCase()}.json`;
                 a.click();
                 URL.revokeObjectURL(url);
               }}
@@ -3898,9 +3675,7 @@ function EditFormDialog({
                 onClick={handleSave}
                 className={cn(
                   "text-sm font-semibold px-5 py-2 rounded-lg transition-colors",
-                  diff.kind === 'schema' && isActive
-                    ? "bg-amber-500 hover:bg-amber-400 text-black border-none"
-                    : "bg-gray-900 dark:bg-white text-white dark:text-gray-900 hover:opacity-90 border-none",
+                  "bg-gray-900 dark:bg-white text-white dark:text-gray-900 hover:opacity-90 border-none",
                   saving && "opacity-40 cursor-not-allowed"
                 )}
               >
@@ -3920,30 +3695,51 @@ function EditFormDialog({
           </div>
         </div>
 
-        {/* Schema confirm modal */}
-        {showConfirm && (
+        {/* Table extraction mode confirm (per field) */}
+        {pendingFieldMode && (() => {
+          const targetField = fields.find(f => f.field_name === pendingFieldMode.fieldName);
+          const targetLabel = targetField?.display_name || humanizeFieldName(pendingFieldMode.fieldName);
+          const mode = pendingFieldMode.mode;
+          const meta = TABLE_MODE_META[mode];
+          const isSaving = savingFieldMode === pendingFieldMode.fieldName;
+          return (
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center rounded-2xl z-10">
             <div className="bg-white dark:bg-[#111111] rounded-xl border border-gray-200 dark:border-[#2a2a2a] shadow-2xl w-[480px] p-6" onClick={e => e.stopPropagation()}>
-              <h3 className="text-base font-semibold text-gray-900 dark:text-white mb-2">Regenerate extraction pipeline?</h3>
-              <p className="text-sm text-gray-500 dark:text-zinc-400 mb-4 leading-relaxed">This change rewrites the DSPy pipeline. The form will go through code generation and HITL review again.</p>
-              <div className="rounded-lg bg-gray-50 dark:bg-[#141414] border border-gray-100 dark:border-[#1f1f1f] px-4 py-3 mb-4 space-y-1">
-                {diff.schemaChanges.added.map(n => <p key={n} className="font-mono text-xs text-emerald-600 dark:text-emerald-400">+ Added: {n}</p>)}
-                {diff.schemaChanges.removed.map(n => <p key={n} className="font-mono text-xs text-red-500">− Removed: {n}</p>)}
-                {diff.schemaChanges.typeChanged.map(t => <p key={t.field_name} className="font-mono text-xs text-amber-600 dark:text-amber-400">↻ Changed: {t.field_name}</p>)}
+              <h3 className="text-base font-semibold text-gray-900 dark:text-white mb-2">
+                Switch &ldquo;{targetLabel}&rdquo; to {meta.label} extraction?
+              </h3>
+              <p className="text-sm text-gray-500 dark:text-zinc-400 mb-4 leading-relaxed">
+                {meta.blurb} {meta.calls}. Other fields are unaffected.
+              </p>
+              <div className="rounded-lg bg-gray-50 dark:bg-[#141414] border border-gray-100 dark:border-[#1f1f1f] px-4 py-3 mb-4">
+                <p className="text-xs text-gray-600 dark:text-zinc-400 leading-relaxed">
+                  Results already extracted for this form stay exactly as they are. Only new
+                  extraction runs use the new mode, so this form may hold results produced
+                  different ways until you re-run it.
+                </p>
               </div>
-              <p className="text-xs text-amber-600 dark:text-amber-400 mb-5">Cost: ~2–4 min · re-runs decomposition review</p>
+              {mode === 'agentic' && !modelIsClaude && (
+                <p className="text-xs text-amber-600 dark:text-amber-400 mb-5">
+                  Agentic mode runs on Claude. Runs of this form will use a Claude model
+                  instead of your selected {preferredModel} — your global setting is unchanged.
+                </p>
+              )}
               <div className="flex justify-end gap-3">
-                <button onClick={() => setShowConfirm(false)} className="text-sm px-4 py-2 rounded-lg border border-gray-200 dark:border-[#2a2a2a] text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-white/[0.03] transition-colors">
+                <button onClick={() => setPendingFieldMode(null)} className="text-sm px-4 py-2 rounded-lg border border-gray-200 dark:border-[#2a2a2a] text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-white/[0.03] transition-colors">
                   Cancel
                 </button>
-                <button disabled={saving} onClick={() => doStructuralSave(true)} className="text-sm font-semibold px-5 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-black border-none transition-colors disabled:opacity-40">
-                  {saving ? 'Starting…' : 'Regenerate'}
+                <button
+                  disabled={isSaving}
+                  onClick={() => applyFieldMode(pendingFieldMode.fieldName, pendingFieldMode.mode)}
+                  className="text-sm font-semibold px-5 py-2 rounded-lg bg-gray-900 dark:bg-white text-white dark:text-gray-900 border-none hover:opacity-90 transition-colors disabled:opacity-40"
+                >
+                  {isSaving ? 'Saving…' : 'Switch'}
                 </button>
               </div>
             </div>
           </div>
-        )}
-
+          );
+        })()}
 
         {/* Remove field — blocked (has consumers) */}
         {removeModal?.phase === 'blocked' && (

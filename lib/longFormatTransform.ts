@@ -7,6 +7,7 @@
  * fields (e.g., interventions) joined and repeated on every row.
  */
 
+import { displayLabel } from './absence';
 import type { FormField } from '@/types/api';
 
 // ---------------------------------------------------------------------------
@@ -60,16 +61,14 @@ function formatArray(arr: any[]): string {
 }
 
 /**
- * Provenance display rule for a value cell:
- *   genuine "not_reported" → 'NR'; any failure (error | missing) → '' (blank).
- * Returns null when status doesn't dictate the display (fall through to the raw value).
+ * Provenance display rule for a value cell, from the shared classifier:
+ *   not_reported → 'NR', not_applicable → 'NA', failure → the failure marker.
+ * A failure is deliberately NOT blank: a blank cell reads as "the paper does
+ * not report this", which is a different claim from "we could not read it".
+ * Returns null when status doesn't dictate the display (show the raw value).
  */
 function statusDisplay(data: any): string | null {
-  if (data && typeof data === 'object' && typeof data.status === 'string') {
-    if (data.status === 'error' || data.status === 'missing') return '';
-    if (data.status === 'not_reported') return 'NR';
-  }
-  return null;
+  return displayLabel(data);
 }
 
 /** Unwrap {value, source_text} wrappers to get the display value. */
@@ -176,7 +175,7 @@ export function findJoinKey(a: FormField, b: FormField): string | null {
 
 /** Build ordered column names for the long-format table. */
 export function buildColumns(classification: FieldClassification): string[] {
-  const cols: string[] = ['Paper'];
+  const cols: string[] = ['Paper', 'Ref ID'];
 
   // Flat field columns
   for (const f of classification.flatFields) {
@@ -211,6 +210,7 @@ export function buildColumns(classification: FieldClassification): string[] {
 interface DocInfo {
   id: string;
   filename: string;
+  ref_id?: number | null;
 }
 
 export function transformToLongFormat(
@@ -245,6 +245,7 @@ export function transformToLongFormat(
       _resultId: result.id,
       _documentId: result.document_id,
       Paper: filename.replace(/\.pdf$/i, ''),
+      'Ref ID': doc?.ref_id != null ? String(doc.ref_id) : '',
     };
 
     // No table fields — one row per paper
@@ -330,7 +331,7 @@ function fallbackTransform(
       allKeys.add(k);
     }
   }
-  const columns = ['Paper', ...Array.from(allKeys).sort()];
+  const columns = ['Paper', 'Ref ID', ...Array.from(allKeys).sort()];
   const rows: LongFormatRow[] = results.map(r => {
     const doc = documentsMap[r.document_id];
     const rawCells: Record<string, any> = {};
@@ -339,6 +340,7 @@ function fallbackTransform(
       _resultId: r.id,
       _documentId: r.document_id,
       Paper: (doc?.filename ?? r.document_id).replace(/\.pdf$/i, ''),
+      'Ref ID': doc?.ref_id != null ? String(doc.ref_id) : '',
     };
     for (const k of allKeys) {
       row[k] = extractScalar(r.extracted_data?.[k]);

@@ -34,6 +34,13 @@ export interface UsageBreakdown {
 export interface UsageByRunRow {
   extraction_id: string;
   started_at: string | null;
+  /** Wall clock: run start → last recorded call. */
+  elapsed_seconds?: number | null;
+  /** Sum of individual call durations — larger than elapsed, since papers run in parallel. */
+  model_time_seconds?: number | null;
+  /** Calls whose answer was discarded and re-asked (0 for runs predating labels). */
+  wasted_calls?: number;
+  wasted_cost_usd?: number;
   project_id: string | null;
   project_name: string;
   form_id: string | null;
@@ -55,6 +62,9 @@ export interface UsageByRun {
   rows: UsageByRunRow[];
 }
 
+/** One LLM call. The label fields (step … duration_ms) are written at flush time
+ *  by backend/utils/llm_call_labels.py and are absent on rows recorded before
+ *  that shipped — the UI falls back to a flat list when `step` is missing. */
 export interface UsageCallRow {
   id: string;
   timestamp: string | null;
@@ -65,15 +75,37 @@ export interface UsageCallRow {
   cache_creation_input_tokens?: number;
   cache_read_input_tokens?: number;
   cost_usd: number;
+  cache_savings_usd?: number;
   cache_hit: boolean;
   source_file: string | null;
   schema_name: string | null;
   signature: string | null;
+  /** record_discovery | recall_audit | slot_fill | slot_fill_row | refill | extract */
+  step?: string | null;
+  /** Record discovery found nothing for this paper, so the pipeline stopped here. */
+  stopped?: boolean;
+  document_id?: string | null;
+  filename?: string | null;
+  field_name?: string | null;
+  /** Records carried by this call (rows sent to fill / audited). */
+  n_records?: number | null;
+  attempt?: number | null;
+  attempts_total?: number | null;
+  /** True when a later attempt replaced this one — its cost bought nothing. */
+  superseded?: boolean;
+  superseded_reason?: string | null;
+  response_shape?: string | null;
+  duration_ms?: number | null;
+  transport?: string | null;
+  num_turns?: number | null;
 }
 
 export interface UsageCalls {
   window_days: number;
   schema_name: string | null;
+  extraction_id?: string | null;
+  /** False when the rows were matched by time window rather than by run id. */
+  exact?: boolean;
   rows: UsageCallRow[];
 }
 
@@ -148,9 +180,13 @@ export const usageService = {
   async getByRuns(days = 30): Promise<UsageByRun> {
     return apiClient.get<UsageByRun>(`/api/v1/usage/by-run?days=${days}`);
   },
-  async getCalls(opts: { schemaName?: string; since?: string; until?: string; days?: number; limit?: number } = {}): Promise<UsageCalls> {
+  async getCalls(opts: { schemaName?: string; extractionId?: string; jobId?: string; since?: string; until?: string; days?: number; limit?: number } = {}): Promise<UsageCalls> {
     const params = new URLSearchParams();
     if (opts.schemaName) params.set('schema_name', opts.schemaName);
+    // Exact run filters. since/until are still sent so the backend can fall back
+    // to the time window for runs recorded before extraction_id was stamped.
+    if (opts.extractionId) params.set('extraction_id', opts.extractionId);
+    if (opts.jobId) params.set('job_id', opts.jobId);
     if (opts.since) params.set('since', opts.since);
     if (opts.until) params.set('until', opts.until);
     params.set('days', String(opts.days ?? 30));

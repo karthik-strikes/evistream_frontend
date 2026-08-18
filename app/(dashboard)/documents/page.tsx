@@ -1,19 +1,27 @@
 'use client';
 
-import { useState, useCallback, useEffect } from 'react';
+import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useDropzone } from 'react-dropzone';
-import { FileText, Upload, Trash2, Download, Loader2, AlertCircle, CheckCircle, Clock, Pencil, X, Tag, FolderOpen } from 'lucide-react';
+import { FileText, Upload, Trash2, Download, Loader2, AlertCircle, CheckCircle, Clock, X, Tag, FolderOpen, RotateCcw, MoreHorizontal, MoreVertical, Search, ChevronDown, Check, ExternalLink, BookMarked, Copy, FlaskConical } from 'lucide-react';
 import { Button, Card, Alert, EmptyState, Badge } from '@/components/ui';
+import { Tooltip } from '@/components/ui/tooltip';
+import { useConfirmationDialog } from '@/components/ui/confirmation-dialog';
+import { DropdownMenu, DropdownMenuTrigger, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator } from '@/components/ui/dropdown-menu';
 import { useToast } from '@/hooks/use-toast';
 import { documentsService, healthService } from '@/services';
 import type { Document } from '@/types/api';
-import { formatBytes, formatDate, cn } from '@/lib/utils';
+import { formatBytes, formatDate, cn, getErrorMessage } from '@/lib/utils';
 import { useProject } from '@/contexts/ProjectContext';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 import { useRouter } from 'next/navigation';
 import { typography } from '@/lib/typography';
+import { LiteratureSearchDrawer } from '@/components/clinical-trials/LiteratureSearchDrawer';
+import { ImportedTrialDrawer } from '@/components/clinical-trials/ImportedTrialDrawer';
+import { EndNoteImportDialog } from '@/components/documents/EndNoteImportDialog';
+import { CitationImportDialog } from '@/components/documents/CitationImportDialog';
+import type { LiteratureScope } from '@/services/literature.service';
 
 interface StagedFile {
   file: File;
@@ -21,19 +29,118 @@ interface StagedFile {
   labelInput: string;
 }
 
+const SCOPE_OPTIONS: { label: string; value: LiteratureScope }[] = [
+  { label: 'All sources', value: 'all' },
+  { label: 'ClinicalTrials.gov', value: 'ctgov' },
+  { label: 'PubMed', value: 'pubmed' },
+];
+const SCOPE_LABELS: Record<LiteratureScope, string> = {
+  all: 'All sources',
+  ctgov: 'ClinicalTrials.gov',
+  pubmed: 'PubMed',
+};
+
+/**
+ * Labels shown before collapsing the rest behind a "+N" toggle. Two, not three:
+ * the meta row now also carries a gate badge and a provenance chip, and those
+ * are system facts that have to win the space.
+ */
+const MAX_VISIBLE_LABELS = 2;
+
 export default function DocumentsPage() {
   const { toast } = useToast();
   const { selectedProject } = useProject();
-  const { can_upload_docs, can_view_docs } = useProjectPermissions();
+  const { can_upload_docs, can_view_docs, isOwner, isAdmin } = useProjectPermissions();
+  const canDeleteDocs = isOwner || isAdmin;
+  // Row selection feeds TWO bulk actions with different permissions: delete
+  // (owner/admin) and accept-for-extraction (can_upload_docs). Gating the
+  // checkbox on delete alone made bulk accept unreachable for exactly the
+  // people it was built for — a member with upload rights could see the
+  // "Accept N for extraction" button's precondition but never satisfy it.
+  const canSelectDocs = canDeleteDocs || can_upload_docs;
+  const { confirm, dialog } = useConfirmationDialog();
   const router = useRouter();
   const queryClient = useQueryClient();
   const [searchQuery, setSearchQuery] = useState('');
+  const [debouncedSearchQuery, setDebouncedSearchQuery] = useState('');
+  const [importDrawerOpen, setImportDrawerOpen] = useState(false);
+  const [viewingTrialDoc, setViewingTrialDoc] = useState<Document | null>(null);
+  const [endnoteOpen, setEndnoteOpen] = useState(false);
+  const [citationOpen, setCitationOpen] = useState(false);
+  // Target document for the "attach a PDF to a needs_pdf import" flow.
+  const [searchScope, setSearchScope] = useState<LiteratureScope>('all');
+  const [scopeMenuOpen, setScopeMenuOpen] = useState(false);
+  const scopeMenuRef = useRef<HTMLDivElement>(null);
+  // Typed into the "Evidence search" hero card — seeds the drawer's query
+  // when the user opens it via Enter/Search, taking precedence over the
+  // project-name auto-seed (see LiteratureSearchDrawer's initialQuery).
+  const [heroQuery, setHeroQuery] = useState('');
 
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearchQuery(searchQuery), 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  // Close the scope dropdown on outside click — same pattern as
+  // components/ui/dropdown-menu.tsx.
+  useEffect(() => {
+    if (!scopeMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (scopeMenuRef.current && !scopeMenuRef.current.contains(e.target as Node)) {
+        setScopeMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [scopeMenuOpen]);
+
+  // This page is deliberately project-scoped, like every other page in the app.
+  // A cross-project ("All projects") browsing mode was tried and removed: every
+  // row action has to be disabled for out-of-project rows (we only know our role
+  // in the SELECTED project), and everything you'd do next with a document —
+  // extract, assign, adjudicate, export — is project-scoped anyway. The
+  // find-a-paper-across-projects need belongs to a global search that deep-links
+  // into the owning project, not to a list you can't act on.
   const { data: documents = [], isLoading } = useQuery({
-    queryKey: ['documents', selectedProject?.id, searchQuery],
-    queryFn: () => documentsService.getAll(selectedProject!.id, searchQuery),
+    queryKey: ['documents', selectedProject?.id, debouncedSearchQuery],
+    queryFn: () => documentsService.getAll(selectedProject!.id, debouncedSearchQuery),
     enabled: !!selectedProject,
   });
+
+  // The project's FULL document set, independent of the search box. `documents`
+  // above is filtered server-side by the search term, and anything derived from
+  // it is therefore a statement about the search results, not the project —
+  // which was wrong for every count on this page. Duplicate detection was the
+  // most visible symptom: typing a document's name made its own "possible
+  // duplicate" flag vanish, because the other copy had been filtered out.
+  // Reuses the same query key with an empty term, so it's a cache hit whenever
+  // the search box is empty (i.e. almost always).
+  const { data: allDocuments = [] } = useQuery({
+    queryKey: ['documents', selectedProject?.id, ''],
+    queryFn: () => documentsService.getAll(selectedProject!.id, ''),
+    enabled: !!selectedProject,
+  });
+  const isSearching = debouncedSearchQuery.trim() !== '';
+
+  // Duplicate detection is best-effort and on-demand: flag DOIs shared by
+  // more than one document already loaded for this project. Detection only —
+  // never auto-merged (the same DOI can legitimately be an author-accepted
+  // manuscript vs. the published version).
+  // Keyed by project+DOI: in cross-project mode the same paper appearing in two
+  // different reviews is normal, not a duplicate, so only a repeat WITHIN one
+  // project counts (which is exactly what the chip's tooltip claims).
+  // Computed over allDocuments, never the search-filtered list — a duplicate is
+  // a fact about the project, and it must not appear and disappear as you type.
+  const duplicateDois = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const d of allDocuments) {
+      if (d.doi) {
+        const key = `${d.project_id}::${d.doi}`;
+        counts.set(key, (counts.get(key) || 0) + 1);
+      }
+    }
+    return new Set([...counts.entries()].filter(([, n]) => n > 1).map(([key]) => key));
+  }, [allDocuments]);
 
   const [uploading, setUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<Record<string, number>>({});
@@ -46,7 +153,10 @@ export default function DocumentsPage() {
   // Selection state
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [docTab, setDocTab] = useState<'all' | 'ready' | 'attn'>('all');
+  const [accepting, setAccepting] = useState(false);
   const [zipDownloading, setZipDownloading] = useState<'pdf' | 'md' | null>(null);
+  const [reprocessingId, setReprocessingId] = useState<string | null>(null);
 
   const allSelected = documents.length > 0 && selectedIds.size === documents.length;
 
@@ -138,22 +248,176 @@ export default function DocumentsPage() {
     }
   };
 
+  // ── Evidence gate ─────────────────────────────────────────────────────────
+  // A document is held back when it has no usable full text and nobody has
+  // accepted it. Whether an abstract is enough depends on the form being run,
+  // so this is a human decision, not a rule.
+  const needsAttention = (doc: Document) =>
+    doc.processing_status === 'needs_pdf' ||
+    (doc.processing_status === 'metadata_only' && !doc.metadata_extraction_approved);
+
+  /**
+   * The ONE status badge a row may show. Colour on this page means "a human has
+   * to act"; everything else is neutral. Previously a single row could carry a
+   * status badge, an evidence-gap badge AND a green "Accepted" badge — three
+   * chips and up to three colours describing one state.
+   *
+   * The accepted branch keys off processing_status, not the bare approval flag:
+   * attach-pdf resets the status to `pending` without clearing
+   * metadata_extraction_approved (documents.py), so a flag-only check left a
+   * green "Accepted" badge on documents that had since gained full text.
+   */
+  const docGate = (
+    doc: Document
+  ): { label: string; variant: 'attention' | 'critical' | 'active' | 'neutral'; tooltip: string; pulse?: boolean } | null => {
+    switch (doc.processing_status) {
+      case 'failed':
+        return { label: 'Failed', variant: 'critical', tooltip: 'Processing failed — retry or delete from the ⋯ menu' };
+      case 'needs_pdf':
+        // Deliberately distinct from the accept-able case: the accept endpoint
+        // rejects needs_pdf, so offering "accept" here would be a dead end.
+        return { label: 'Needs PDF', variant: 'attention', tooltip: 'Nothing to read yet — attach a PDF to use this document' };
+      case 'metadata_only': {
+        const what = doc.source_type === 'ctgov' ? 'No results posted' : 'Abstract only';
+        return doc.metadata_extraction_approved
+          ? { label: `${what} · accepted`, variant: 'neutral', tooltip: 'Accepted for extraction despite thin evidence' }
+          : { label: what, variant: 'attention', tooltip: 'Held out of extraction until accepted — click the row to review' };
+      }
+      case 'processing':
+        return { label: 'Processing', variant: 'active', tooltip: 'Parsing in progress', pulse: true };
+      case 'pending':
+        return { label: 'Queued', variant: 'neutral', tooltip: 'Waiting to be parsed' };
+      default:
+        return null; // completed — the boring majority stays silent
+    }
+  };
+
+  /**
+   * One neutral provenance chip — but only where provenance is news.
+   * Provenance is a fact, not an action, so it never gets colour; that budget
+   * belongs to docGate.
+   *
+   * `upload` deliberately returns null. It's ~94% of documents, so a chip
+   * reading "Upload" would appear on nearly every row and tell a reader what
+   * they already assume. The ABSENCE of a chip is the signal: nobody imported
+   * this, you uploaded it. Chips are for the minority that came from somewhere.
+   */
+  const sourceChip = (doc: Document): { label: string; Icon: React.ComponentType<{ className?: string }>; href: string | null } | null => {
+    switch (doc.source_type) {
+      case 'ctgov':
+        return { label: 'Clinical trial', Icon: FlaskConical, href: doc.nct_id ? `https://clinicaltrials.gov/study/${doc.nct_id}` : null };
+      case 'pubmed':
+        return { label: 'PubMed', Icon: BookMarked, href: doc.pmid ? `https://pubmed.ncbi.nlm.nih.gov/${doc.pmid}/` : null };
+      case 'ris':
+      case 'endnote':
+        // No doi.org link here on purpose — the `doi:` link on this same row
+        // already goes there, and two identical links 30px apart is noise.
+        return { label: 'Reference', Icon: FileText, href: null };
+      default:
+        return null;
+    }
+  };
+
+  // Search-scoped: this drives the tab counts, which must describe what the tab
+  // will actually show. A tab reading "Needs attention 20" that opens onto one
+  // row is worse than no count.
+  const heldBack = useMemo(() => documents.filter(needsAttention), [documents]);
+  // Project-scoped: the banner is a claim about the next extraction run, which
+  // has nothing to do with what's typed in the search box.
+  const heldBackAll = useMemo(() => allDocuments.filter(needsAttention), [allDocuments]);
+
+  // Per-document only, from the row's ⋯ menu. There was briefly a project-wide
+  // "Find N missing DOIs" button in the header too; it was removed as clutter —
+  // a header that grows a button for every maintenance task stops being a
+  // header. The batch endpoint still exists server-side if it's ever wanted.
+  const [backfillingDoiId, setBackfillingDoiId] = useState<string | null>(null);
+
+  const handleBackfillOneDoi = async (id: string) => {
+    try {
+      setBackfillingDoiId(id);
+      await documentsService.backfillDoi(id);
+      toast({ title: 'Looking up DOI', description: 'Running in the background — the row will update shortly.', variant: 'success' });
+      queryClient.invalidateQueries({ queryKey: ['documents'] });
+    } catch (error: any) {
+      toast({ title: 'Error', description: getErrorMessage(error, 'Could not look up the DOI'), variant: 'error' });
+    } finally {
+      setBackfillingDoiId(null);
+    }
+  };
+
+  const visibleDocs = useMemo(() => {
+    if (docTab === 'attn') return documents.filter(needsAttention);
+    if (docTab === 'ready') return documents.filter(d => !needsAttention(d));
+    return documents;
+  }, [documents, docTab]);
+
+  const selectedHeldIds = useMemo(
+    () => heldBack.filter(d => selectedIds.has(d.id) && d.processing_status === 'metadata_only').map(d => d.id),
+    [heldBack, selectedIds]
+  );
+
+  const handleBulkAccept = async () => {
+    if (selectedHeldIds.length === 0) return;
+    const n = selectedHeldIds.length;
+    const confirmed = await confirm({
+      title: `Accept ${n} document${n === 1 ? '' : 's'} for extraction`,
+      description:
+        `${n === 1 ? 'This document has' : 'These documents have'} no full text. Extraction will read only ` +
+        `what is stored, so fields that appear solely in the full paper will come back NR. ` +
+        `You can still attach a PDF later — accepting doesn't close that off.`,
+      confirmLabel: 'Accept',
+      onConfirm: () => {},
+    });
+    if (!confirmed) return;
+    setAccepting(true);
+    try {
+      const res = await documentsService.approveMetadata(selectedHeldIds);
+      setSelectedIds(new Set());
+      await queryClient.invalidateQueries({ queryKey: ['documents'] });
+      toast({
+        variant: 'success',
+        title: `${res.count} document${res.count === 1 ? '' : 's'} accepted`,
+        description: 'They will be included in the next extraction.',
+      });
+    } catch (err: any) {
+      toast({ variant: 'error', title: 'Could not accept', description: err?.response?.data?.detail || err?.message || 'Please try again.' });
+    } finally {
+      setAccepting(false);
+    }
+  };
+
   const handleBulkDelete = async () => {
     if (selectedIds.size === 0) return;
     const count = selectedIds.size; // capture before state is cleared
-    if (!confirm(`Delete ${count} document${count > 1 ? 's' : ''}? This cannot be undone.`)) return;
+    const confirmed = await confirm({
+      title: 'Delete documents',
+      description: `Delete ${count} document${count > 1 ? 's' : ''}? This cannot be undone.`,
+      confirmLabel: 'Delete',
+      variant: 'destructive',
+      onConfirm: () => {},
+    });
+    if (!confirmed) return;
     setBulkDeleting(true);
     let failed = 0;
-    for (const id of selectedIds) {
-      try {
-        await documentsService.delete(id);
-      } catch {
-        failed++;
+
+    // Limited-concurrency delete so a big selection doesn't fire 100 requests at once.
+    const POOL = 5;
+    const queue = Array.from(selectedIds);
+    const worker = async () => {
+      while (queue.length) {
+        const id = queue.shift()!;
+        try {
+          await documentsService.delete(id);
+        } catch {
+          failed++;
+        }
       }
-    }
+    };
+    await Promise.all(Array.from({ length: Math.min(POOL, queue.length) }, worker));
+
     setBulkDeleting(false);
     setSelectedIds(new Set());
-    await queryClient.invalidateQueries({ queryKey: ['documents', selectedProject?.id] });
+    await queryClient.invalidateQueries({ queryKey: ['documents'] });
     if (failed > 0) {
       toast({ title: 'Partial failure', description: `${failed} document(s) could not be deleted`, variant: 'error' });
     } else {
@@ -184,11 +448,15 @@ export default function DocumentsPage() {
     ]);
   }, [selectedProject]);
 
-  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+  const { getRootProps, getInputProps, isDragActive, open: openFileDialog } = useDropzone({
     onDrop,
     accept: { 'application/pdf': ['.pdf'] },
     multiple: true,
     disabled: uploading,
+    // The hero card below is a click target for search, not upload — file
+    // selection now happens only via its explicit "Upload files" button
+    // (which calls openFileDialog()) or by dragging files onto the card.
+    noClick: true,
   });
 
   // Staging: add label to specific file
@@ -258,7 +526,7 @@ export default function DocumentsPage() {
         }
       }
       setStagedFiles(prev => prev.filter(sf => !successfulFileNames.has(sf.file.name)));
-      await queryClient.invalidateQueries({ queryKey: ['documents', selectedProject?.id] });
+      await queryClient.invalidateQueries({ queryKey: ['documents'] });
     } finally {
       setUploading(false);
       setUploadProgress({});
@@ -266,16 +534,39 @@ export default function DocumentsPage() {
   };
 
   const handleDelete = async (documentId: string, filename: string) => {
-    if (!confirm(`Are you sure you want to delete "${filename}"?`)) return;
+    const confirmed = await confirm({
+      title: 'Delete document',
+      description: `Are you sure you want to delete "${filename}"?`,
+      confirmLabel: 'Delete',
+      variant: 'destructive',
+      onConfirm: () => {},
+    });
+    if (!confirmed) return;
     try {
       await documentsService.delete(documentId);
       toast({ title: 'Success', description: 'Document deleted successfully', variant: 'success' });
-      await queryClient.invalidateQueries({ queryKey: ['documents', selectedProject?.id] });
+      await queryClient.invalidateQueries({ queryKey: ['documents'] });
     } catch (error: any) {
       const errorMessage = typeof error.response?.data?.detail === 'string'
         ? error.response.data.detail
         : 'Failed to delete document';
       toast({ title: 'Error', description: errorMessage, variant: 'error' });
+    }
+  };
+
+  const handleReprocess = async (documentId: string) => {
+    setReprocessingId(documentId);
+    try {
+      await documentsService.reprocess(documentId);
+      toast({ title: 'Reprocessing started', description: 'The document will be reprocessed shortly.', variant: 'success' });
+      await queryClient.invalidateQueries({ queryKey: ['documents'] });
+    } catch (error: any) {
+      const errorMessage = typeof error.response?.data?.detail === 'string'
+        ? error.response.data.detail
+        : 'Failed to start reprocessing';
+      toast({ title: 'Error', description: errorMessage, variant: 'error' });
+    } finally {
+      setReprocessingId(null);
     }
   };
 
@@ -339,7 +630,7 @@ export default function DocumentsPage() {
     setEditLabelInput('');
     try {
       await documentsService.updateLabels(docId, finalLabels);
-      await queryClient.invalidateQueries({ queryKey: ['documents', selectedProject?.id] });
+      await queryClient.invalidateQueries({ queryKey: ['documents'] });
       setEditingDocId(null);
       setEditLabels([]);
     } catch (error: any) {
@@ -352,17 +643,44 @@ export default function DocumentsPage() {
     }
   };
 
-  const labelColor = (l: string) => {
-    const palette = [
-      "bg-blue-50 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300",
-      "bg-violet-50 text-violet-700 dark:bg-violet-950/40 dark:text-violet-300",
-      "bg-emerald-50 text-emerald-700 dark:bg-emerald-950/40 dark:text-emerald-300",
-      "bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-300",
-      "bg-rose-50 text-rose-700 dark:bg-rose-950/40 dark:text-rose-300",
-    ];
-    let h = 0; for (const c of l) h = (h * 31 + c.charCodeAt(0)) >>> 0;
-    return palette[h % palette.length];
-  };
+  // Labels collapse past this count behind a "+N" toggle — the design's answer to
+  // a row with 7 labels wrecking the layout. Per-row, keyed by document id.
+  const [expandedLabels, setExpandedLabels] = useState<Record<string, boolean>>({});
+  const toggleLabels = (id: string) =>
+    setExpandedLabels(prev => ({ ...prev, [id]: !prev[id] }));
+
+  /**
+   * One neutral chip for a user label, identical whether the label is staged,
+   * saved, or being edited — it used to render three different ways, so a label
+   * you typed as grey lowercase saved as a shouty violet pill.
+   *
+   * The old version hashed the label name into five hues. That produced actively
+   * misleading output: `included` rendered red, `included` and `excluded`
+   * rendered identically, `high risk` got the exact amber this page uses for
+   * "needs attention", and a label named `pubmed` got the exact green of the
+   * PubMed system badge. A colour nobody chose can't mean anything, and here it
+   * collided with colours that do mean something.
+   *
+   * Casing is preserved (no `uppercase`): it's the user's text, and shouting it
+   * made `COVID-19` and `covid-19` — two distinct labels, since dedupe is
+   * case-sensitive — render identically.
+   */
+  const LabelChip = ({ label, onRemove }: { label: string; onRemove?: () => void }) => (
+    <Tooltip content={label}>
+      <Badge variant="neutral" className="max-w-[9rem] shrink-0">
+        <span className="truncate">{label}</span>
+        {onRemove && (
+          <button
+            onClick={e => { e.stopPropagation(); onRemove(); }}
+            aria-label={`Remove label ${label}`}
+            className="shrink-0 leading-none text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-zinc-300"
+          >
+            <X className="h-2.5 w-2.5" />
+          </button>
+        )}
+      </Badge>
+    </Tooltip>
+  );
 
   if (!selectedProject) {
     return (
@@ -410,32 +728,140 @@ export default function DocumentsPage() {
 
         {selectedProject && can_view_docs && (
           <>
-            {/* Drop Zone */}
-            {can_upload_docs && (
-              <div
-                {...getRootProps()}
-                className={`border-2 border-dashed rounded-lg p-12 text-center cursor-pointer transition-colors ${
-                  isDragActive
-                    ? 'border-gray-400 bg-gray-50 dark:bg-[#1a1a1a] dark:border-[#3f3f3f]'
-                    : 'border-gray-300 dark:border-[#2a2a2a] dark:bg-[#111111]'
-                } ${uploading ? 'opacity-50 cursor-not-allowed' : ''}`}
-              >
-                <input {...getInputProps()} />
-                <Upload className="h-12 w-12 mx-auto mb-4 text-gray-400" />
-                {isDragActive ? (
-                  <p className={cn(typography.dropzone.title, 'text-gray-900 dark:text-white')}>Drop here</p>
-                ) : (
-                  <div className="space-y-2">
-                    <p className={cn(typography.dropzone.title, 'text-gray-900 dark:text-white')}>
-                      Drag & drop files here
-                    </p>
-                    <p className={cn(typography.dropzone.subtitle, 'text-gray-400')}>
-                      or click to browse
-                    </p>
+            {/* Evidence search hero — search entry point (opens LiteratureSearchDrawer)
+                doubling as the file-upload drop target (Upload files button / drag-drop). */}
+            <div
+              {...getRootProps()}
+              className={cn(
+                // No overflow-hidden here — the scope dropdown menu below is
+                // absolutely-positioned and needs to render OUTSIDE this
+                // card's box; clipping it was cutting off "PubMed" (the
+                // last/lowest option). The gradient/rounded corners don't
+                // need overflow-hidden to render correctly on their own.
+                "relative rounded-2xl px-6 py-6 sm:px-8 sm:py-7 bg-gradient-to-br from-[#0d1526] via-[#141d35] to-[#1c2b4d] transition-shadow",
+                isDragActive && "ring-2 ring-blue-400",
+                uploading && "opacity-60"
+              )}
+            >
+              {can_upload_docs && <input {...getInputProps()} />}
+
+              <div className="flex items-start justify-between gap-4 mb-5 flex-wrap">
+                <div>
+                  <div className="text-[11px] font-bold tracking-wider text-blue-400 uppercase mb-1">
+                    Evidence search
+                  </div>
+                  <h2 className="text-xl font-bold text-white tracking-tight">
+                    Find trials &amp; literature
+                  </h2>
+                </div>
+                {can_upload_docs && (
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      onClick={(e) => { e.stopPropagation(); openFileDialog(); }}
+                      disabled={uploading}
+                      className="inline-flex items-center gap-2 text-sm font-semibold text-white bg-white/10 hover:bg-white/15 border border-white/15 rounded-lg px-3.5 py-2 backdrop-blur-sm transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      <Upload className="w-4 h-4" />
+                      Upload files
+                    </button>
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          type="button"
+                          disabled={uploading}
+                          aria-label="More import options"
+                          className="w-9 h-9 flex items-center justify-center text-white bg-white/10 hover:bg-white/15 border border-white/15 rounded-lg backdrop-blur-sm transition-colors cursor-pointer disabled:opacity-50"
+                        >
+                          <MoreVertical className="w-4 h-4" />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end">
+                        <DropdownMenuItem onClick={() => setEndnoteOpen(true)}>
+                          <BookMarked className="w-3.5 h-3.5" />
+                          Import from EndNote
+                        </DropdownMenuItem>
+                        <DropdownMenuItem onClick={() => setCitationOpen(true)}>
+                          <FileText className="w-3.5 h-3.5" />
+                          Import RIS / DOIs
+                        </DropdownMenuItem>
+                      </DropdownMenuContent>
+                    </DropdownMenu>
                   </div>
                 )}
               </div>
-            )}
+
+              <div className="flex items-center gap-2 bg-white/[0.06] border border-white/10 rounded-xl px-4 py-2.5 mb-4">
+                <Search className="w-4 h-4 text-blue-400 shrink-0" />
+                <input
+                  type="text"
+                  value={heroQuery}
+                  onChange={(e) => setHeroQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') setImportDrawerOpen(true);
+                  }}
+                  placeholder="Condition, drug, NCT ID or PMID..."
+                  className="flex-1 min-w-0 bg-transparent text-sm text-white placeholder:text-blue-200/40 outline-none"
+                />
+                <div ref={scopeMenuRef} className="relative shrink-0">
+                  <button
+                    onClick={() => setScopeMenuOpen((o) => !o)}
+                    className="flex items-center gap-1 text-[12px] font-semibold text-white bg-white/10 hover:bg-white/15 border border-white/10 rounded-lg px-3 py-1.5 transition-colors cursor-pointer whitespace-nowrap"
+                  >
+                    {SCOPE_LABELS[searchScope]}
+                    <ChevronDown className="w-3.5 h-3.5 text-blue-200/60" />
+                  </button>
+
+                  {scopeMenuOpen && (
+                    <div className="absolute top-full right-0 mt-1.5 w-48 bg-white dark:bg-[#161616] border border-gray-200 dark:border-[#2a2a2a] rounded-lg shadow-lg z-40 overflow-hidden py-1">
+                      {SCOPE_OPTIONS.map((opt) => (
+                        <button
+                          key={opt.value}
+                          onClick={() => {
+                            setSearchScope(opt.value);
+                            setScopeMenuOpen(false);
+                            // Just sets the default scope for next time — does NOT open the
+                            // drawer. Forcing navigation here was the reported bug: picking a
+                            // scope preference shouldn't act like clicking "Search".
+                          }}
+                          className={cn(
+                            'w-full flex items-center justify-between px-3.5 py-2 text-[12.5px] font-medium text-left cursor-pointer transition-colors',
+                            searchScope === opt.value
+                              ? 'text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-950/30'
+                              : 'text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-[#1f1f1f]',
+                          )}
+                        >
+                          {opt.label}
+                          {searchScope === opt.value && <Check className="w-3.5 h-3.5" />}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => setImportDrawerOpen(true)}
+                  className="inline-flex items-center px-4 py-1.5 text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg cursor-pointer transition-colors shrink-0"
+                >
+                  Search
+                </button>
+              </div>
+
+              <div className="flex items-center gap-5 text-xs text-blue-200/50 flex-wrap">
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-blue-400 shrink-0" />
+                  ClinicalTrials.gov <span className="text-blue-200/30">&middot;</span> 480k+ studies
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                  PubMed <span className="text-blue-200/30">&middot;</span> 36M+ articles
+                </span>
+              </div>
+
+              {isDragActive && (
+                <div className="absolute inset-0 flex items-center justify-center rounded-2xl bg-[#0d1526]/90 backdrop-blur-sm">
+                  <p className="text-sm font-semibold text-white">Drop PDFs to upload</p>
+                </div>
+              )}
+            </div>
 
             {/* Staging Area */}
             {stagedFiles.length > 0 && (
@@ -502,18 +928,7 @@ export default function DocumentsPage() {
                         {/* Label chips + input */}
                         <div className="flex items-center flex-wrap gap-1.5">
                           {sf.labels.map(label => (
-                            <span
-                              key={label}
-                              className="inline-flex items-center gap-1 text-[11px] font-medium bg-gray-100 dark:bg-[#1f1f1f] text-gray-600 dark:text-gray-400 px-2 py-0.5 rounded-full"
-                            >
-                              {label}
-                              <button
-                                onClick={() => removeLabelFromStaged(index, label)}
-                                className="text-gray-400 hover:text-gray-600 leading-none"
-                              >
-                                <X className="w-2.5 h-2.5" />
-                              </button>
-                            </span>
+                            <LabelChip key={label} label={label} onRemove={() => removeLabelFromStaged(index, label)} />
                           ))}
                           <input
                             type="text"
@@ -527,6 +942,7 @@ export default function DocumentsPage() {
                       </div>
                       <button
                         onClick={() => removeStagedFile(index)}
+                        aria-label="Remove file"
                         className="text-gray-300 hover:text-gray-500 dark:hover:text-gray-300 transition-colors mt-0.5"
                       >
                         <X className="w-4 h-4" />
@@ -542,9 +958,10 @@ export default function DocumentsPage() {
               {/* Header + Search */}
               <div className="flex items-center justify-between gap-3 mb-6">
                 <div className="flex items-center gap-3">
-                  {documents.length > 0 && can_upload_docs && (
+                  {documents.length > 0 && canSelectDocs && (
                     <input
                       type="checkbox"
+                      aria-label="Select all documents"
                       checked={documents.length > 0 && selectedIds.size === documents.length}
                       ref={el => { if (el) el.indeterminate = selectedIds.size > 0 && selectedIds.size < documents.length; }}
                       onChange={toggleSelectAll}
@@ -555,9 +972,21 @@ export default function DocumentsPage() {
                     Uploaded Documents
                   </span>
                   <span className={cn(typography.body.tiny, 'text-gray-300 dark:text-zinc-600')}>
-                    {documents.length}
+                    {/* "N of M" while searching, so the number is never mistaken
+                        for the size of the project. */}
+                    {isSearching ? `${documents.length} of ${allDocuments.length}` : documents.length}
                   </span>
-                  {selectedIds.size > 0 && can_upload_docs && (
+                  {selectedHeldIds.length > 0 && can_upload_docs && (
+                    <button
+                      onClick={handleBulkAccept}
+                      disabled={accepting}
+                      className="inline-flex items-center gap-1.5 text-xs font-medium text-amber-700 dark:text-amber-300 bg-amber-50 dark:bg-amber-900/20 border border-amber-200 dark:border-amber-800/50 px-3 py-1 rounded-lg hover:bg-amber-100 dark:hover:bg-amber-900/30 transition-colors disabled:opacity-50"
+                    >
+                      {accepting ? <Loader2 className="w-3 h-3 animate-spin" /> : <Check className="w-3 h-3" />}
+                      Accept {selectedHeldIds.length} for extraction
+                    </button>
+                  )}
+                  {selectedIds.size > 0 && canDeleteDocs && (
                     <button
                       onClick={handleBulkDelete}
                       disabled={bulkDeleting}
@@ -604,165 +1033,464 @@ export default function DocumentsPage() {
                 )}
               </div>
 
-              {isLoading ? (
-                <div className="flex items-center justify-center py-12">
-                  <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
-                </div>
-              ) : documents.length === 0 && !searchQuery ? (
-                <div className="py-6">
-                  <EmptyState
-                    icon={FileText}
-                    title="No documents yet"
-                    description="Upload your first PDF to get started"
-                    className="border-0"
-                  />
-                </div>
-              ) : documents.length === 0 && searchQuery ? (
-                <div className="text-center py-10 text-sm text-gray-400">No documents matching &ldquo;{searchQuery}&rdquo;</div>
-              ) : (
-                <div className="flex flex-col gap-2.5">
-                  {documents.map((doc) => {
-                    const getStatusStyle = () => {
-                      switch (doc.processing_status) {
-                        case 'completed':
-                          return { cls: 'text-green-700 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50', label: "Completed" };
-                        case 'processing':
-                          return { cls: 'text-blue-700 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800/50', label: "Processing" };
-                        case 'failed':
-                          return { cls: 'text-purple-700 dark:text-purple-400 bg-purple-50 dark:bg-purple-900/20 border border-purple-200 dark:border-purple-800/50', label: "Failed" };
-                        case 'pending':
-                          return { cls: 'text-gray-600 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a]', label: "Pending" };
-                        default:
-                          return { cls: 'text-gray-600 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a]', label: doc.processing_status };
-                      }
-                    };
+              <div className="flex flex-col gap-3">
+                  {/* Evidence-gate tabs. Always rendered for every project — the
+                      counts are the point, so "Needs attention 0" is a useful
+                      answer, not an empty surface worth hiding. */}
+                  <div className="flex flex-wrap items-center gap-1.5 pb-1">
+                    {([
+                      { key: 'all' as const, label: 'All', n: documents.length },
+                      { key: 'ready' as const, label: 'Ready', n: documents.length - heldBack.length },
+                      { key: 'attn' as const, label: 'Needs attention', n: heldBack.length },
+                    ]).map(({ key, label, n }) => (
+                      <button
+                        key={key}
+                        onClick={() => setDocTab(key)}
+                        className={cn(
+                          'inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs font-semibold transition-colors',
+                          docTab === key
+                            ? key === 'attn'
+                              ? 'border-amber-400 bg-amber-400 text-amber-950'
+                              : 'border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-black'
+                            : 'border-gray-200 bg-transparent text-gray-500 hover:text-gray-700 dark:border-[#1f1f1f] dark:text-zinc-400 dark:hover:text-zinc-200',
+                          key === 'attn' && n === 0 && docTab !== 'attn' && 'opacity-60',
+                        )}
+                      >
+                        {key === 'attn' && docTab !== 'attn' && n > 0 && (
+                          <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                        )}
+                        {label} <span className="tabular-nums opacity-65">{n}</span>
+                      </button>
+                    ))}
+                  </div>
 
-                    const s = getStatusStyle();
+                  {isLoading ? (
+                    <div className="flex items-center justify-center py-12">
+                      <Loader2 className="h-8 w-8 animate-spin text-gray-400" />
+                    </div>
+                  ) : documents.length === 0 && !searchQuery ? (
+                    <div className="py-6">
+                      <EmptyState
+                        icon={FileText}
+                        title="No documents yet"
+                        description="Upload your first PDF to get started"
+                        className="border-0"
+                      />
+                    </div>
+                  ) : documents.length === 0 && searchQuery ? (
+                    <div className="text-center py-10 text-sm text-gray-400">No documents matching &ldquo;{searchQuery}&rdquo;</div>
+                  ) : (
+                  <>
+                  {/* Never silently skip: say so before the run, not after. */}
+                  {docTab !== 'attn' && heldBackAll.length > 0 && (
+                    <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900 dark:border-amber-800/50 dark:bg-amber-900/15 dark:text-amber-200">
+                      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
+                      <div>
+                        <span className="font-semibold">
+                          {heldBackAll.length} document{heldBackAll.length === 1 ? '' : 's'} will be skipped by the next extraction.
+                        </span>{' '}
+                        {/* Two different remedies hide behind one amber state:
+                            needs_pdf can ONLY be fixed by attaching a PDF (the
+                            accept endpoint rejects it — documents.py restricts
+                            eligibility to metadata_only), while metadata_only is
+                            fixed by accepting. Saying "haven't been accepted" for
+                            both sent people looking for a button that isn't there. */}
+                        {(() => {
+                          const needPdf = heldBackAll.filter(d => d.processing_status === 'needs_pdf').length;
+                          const needAccept = heldBackAll.length - needPdf;
+                          const parts: string[] = [];
+                          if (needAccept) parts.push(`${needAccept} ${needAccept === 1 ? 'has' : 'have'} thin evidence awaiting acceptance`);
+                          if (needPdf) parts.push(`${needPdf} ${needPdf === 1 ? 'needs' : 'need'} a PDF attached`);
+                          return `${parts.join('; ')}.`;
+                        })()}{' '}
+                        <button
+                          onClick={() => setDocTab('attn')}
+                          className="font-semibold underline underline-offset-2 hover:no-underline"
+                        >
+                          Review them
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {visibleDocs.length === 0 && (
+                    <div className="rounded-xl border border-dashed border-gray-200 py-12 text-center text-sm text-gray-400 dark:border-[#1f1f1f]">
+                      {docTab === 'ready' ? (
+                        <>
+                          <div className="mb-1 font-semibold text-gray-600 dark:text-zinc-300">No documents are extraction-ready</div>
+                          Every document still needs full text or acceptance.
+                        </>
+                      ) : (
+                        <>
+                          <div className="mb-1 font-semibold text-gray-600 dark:text-zinc-300">Nothing needs attention</div>
+                          Every document has full text, or has been accepted.
+                        </>
+                      )}
+                    </div>
+                  )}
+
+                  {visibleDocs.map((doc) => {
+                    // getStatusStyle used to live here: it computed a `textCls`
+                    // nothing ever read, and its default branch would have shown a
+                    // raw enum string ("needs_pdf") as a user-facing label. docGate
+                    // replaces it.
+                    const gate = docGate(doc);
+                    const source = sourceChip(doc);
+                    const isDuplicate = !!doc.doi && duplicateDois.has(`${doc.project_id}::${doc.doi}`);
                     const isEditing = editingDocId === doc.id;
+                    const titleText = doc.filename.replace(/\.pdf$/i, '');
+                    const allLabels = doc.labels || [];
+                    const labelsExpanded = !!expandedLabels[doc.id];
+                    const shownLabels = labelsExpanded ? allLabels : allLabels.slice(0, MAX_VISIBLE_LABELS);
+                    const hiddenLabelCount = allLabels.length - shownLabels.length;
 
                     return (
                       <div
                         key={doc.id}
-                        className={cn("group bg-white rounded-xl border py-5 px-[22px] relative transition-all duration-150 hover:shadow-card-hover hover:-translate-y-px dark:bg-[#111111]", selectedIds.has(doc.id) ? "border-gray-400 dark:border-[#3f3f3f]" : "border-border dark:border-[#1f1f1f]", doc.processing_status === 'completed' && "cursor-pointer")}
-                        onClick={() => handleOpenPdf(doc.id, doc.processing_status)}
+                        className={cn(
+                          // items-start + minmax(0,1fr) per the design's grid. The left
+                          // accent border is ALWAYS 3px so a status colour appearing never
+                          // shifts the row. It is NOT `border-l-transparent`: twMerge treats
+                          // border-l-* and border-* as the same conflict group, so the
+                          // border-gray-200 below silently deleted it and every plain row
+                          // already had a grey 3px edge. Stating that colour honestly.
+                          "relative hover:z-20 grid grid-cols-[auto_minmax(0,1fr)_auto] items-start gap-x-5 rounded-xl border border-l-[3px] border-l-gray-200 dark:border-l-[#1f1f1f] bg-white dark:bg-[#111111] px-3 sm:px-4 py-4 transition-all duration-150 group",
+                          selectedIds.has(doc.id)
+                            ? "border-gray-300 dark:border-[#2a2a2a] bg-gray-50 dark:bg-[#1a1a1a]"
+                            : "border-gray-200 dark:border-[#1f1f1f] hover:shadow-card-hover hover:-translate-y-px hover:border-gray-300 dark:hover:border-[#2a2a2a]",
+                          // Two stripes, and only two: a human must act, or it failed.
+                          // `processing`/`pending` lost theirs — a transient state that
+                          // resolves itself hasn't earned a permanent structural marker.
+                          // `accepted` lost its emerald stripe: settled is not scannable news.
+                          //
+                          // Each re-asserts its own hover:border-l-*, because the
+                          // hover:border-gray-300 above is an all-sides shorthand with higher
+                          // specificity — without this, hovering any row wiped its stripe to
+                          // grey. Same guard as forms/page.tsx.
+                          needsAttention(doc) &&
+                            "border-l-amber-400 dark:border-l-amber-500 hover:border-l-amber-400 dark:hover:border-l-amber-500 cursor-pointer",
+                          doc.processing_status === 'failed' &&
+                            "border-l-red-400 dark:border-l-red-500 hover:border-l-red-400 dark:hover:border-l-red-500",
+                          doc.processing_status === 'completed' && "cursor-pointer"
+                        )}
+                        onClick={() => {
+                          // A metadata-only import (EndNote/RIS) with no PDF yet — open the
+                          // imported-record drawer, exactly like a no-PDF PubMed row. It shows
+                          // the stored metadata, DOI/publisher links to go find the paper, and
+                          // an Attach PDF button. This used to jump straight to a file picker,
+                          // which asked for a PDF without telling you which paper it wanted.
+                          if (doc.processing_status === 'needs_pdf') {
+                            setViewingTrialDoc(doc);
+                            return;
+                          }
+                          // Predicate is "is there a PDF to open?", NOT a list of source
+                          // types. The old enumeration missed RIS-with-PMC-full-text rows
+                          // (completed, no PDF, source 'ris'), which fell through and asked
+                          // handleOpenPdf for a file that doesn't exist.
+                          if (!doc.s3_pdf_path) {
+                            setViewingTrialDoc(doc);
+                            return;
+                          }
+                          handleOpenPdf(doc.id, doc.processing_status);
+                        }}
                       >
-                        <div className="flex items-start justify-between gap-4">
-                          {/* Checkbox */}
-                          {can_upload_docs && (
+                        {/* Checkbox — nudged to sit on the title's first line now
+                            that the grid is items-start (design: margin-top 3px). */}
+                        <div className="relative mt-[3px]">
+                          {canSelectDocs && (
                             <input
                               type="checkbox"
+                              aria-label={`Select ${doc.filename}`}
                               checked={selectedIds.has(doc.id)}
                               onChange={() => toggleSelect(doc.id)}
                               onClick={e => e.stopPropagation()}
-                              className="doc-checkbox mt-1"
+                              className="doc-checkbox"
                             />
                           )}
-                          {/* PDF badge */}
-                          <div className={cn(
-                            "flex-shrink-0 w-9 h-11 rounded-md flex items-end justify-center pb-1 text-[9px] font-semibold font-mono border",
-                            doc.processing_status === 'completed' && "bg-red-50 text-red-500 border-red-200/70 dark:bg-red-950/30 dark:text-red-400 dark:border-red-900/40",
-                            doc.processing_status === 'processing' && "bg-blue-50 text-blue-500 border-blue-200/70 dark:bg-blue-950/30 dark:text-blue-400 dark:border-blue-900/40",
-                            doc.processing_status === 'failed' && "bg-purple-50 text-purple-500 border-purple-200/70 dark:bg-purple-950/30 dark:text-purple-400 dark:border-purple-900/40",
-                            (doc.processing_status === 'pending' || !doc.processing_status) && "bg-gray-100 text-gray-400 border-gray-200 dark:bg-[#1a1a1a] dark:border-[#2a2a2a]",
-                          )}>PDF</div>
-                          {/* Left: Filename, date, labels */}
-                          <div className="flex-1 min-w-0">
-                            {/* Filename + status inline */}
-                            <div className="flex items-center gap-2.5 mb-1.5">
-                              <h3 className="text-base font-semibold text-gray-900 m-0 tracking-tight leading-snug overflow-hidden text-ellipsis whitespace-nowrap dark:text-white">{doc.filename}</h3>
-                              {doc.processing_status !== 'completed' && (
-                                <span className={cn('text-[10.5px] font-semibold px-2 py-0.5 rounded-[5px] tracking-wide whitespace-nowrap inline-flex items-center', s.cls)}>
-                                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-current mr-1.5" />
-                                  {s.label}
-                                </span>
-                              )}
-                            </div>
-                            {/* Date */}
-                            <div className="text-[11px] font-mono text-gray-400 dark:text-zinc-500 tracking-tight mb-2">
-                              {formatDate(doc.created_at)}
-                            </div>
-                            {/* Labels display / edit */}
-                            {!isEditing ? (
-                              <div className="flex items-center flex-wrap gap-1.5">
-                                {(doc.labels || []).map(label => (
-                                  <span
-                                    key={label}
-                                    className={cn("inline-flex items-center text-[11px] font-medium px-2 py-0.5 rounded-md", labelColor(label))}
-                                  >
-                                    {label}
-                                  </span>
-                                ))}
-                              </div>
-                            ) : (
-                              <div className="flex items-center flex-wrap gap-1.5 mt-1">
-                                {editLabels.map(label => (
-                                  <span
-                                    key={label}
-                                    className="inline-flex items-center gap-1 text-[11px] font-medium bg-gray-100 dark:bg-[#1f1f1f] text-gray-600 dark:text-gray-400 px-2 py-0.5 rounded-full"
-                                  >
-                                    {label}
-                                    <button onClick={e => { e.stopPropagation(); removeEditLabel(label); }} className="text-gray-400 hover:text-gray-600 leading-none">
-                                      <X className="w-2.5 h-2.5" />
-                                    </button>
-                                  </span>
-                                ))}
-                                <input
-                                  type="text"
-                                  value={editLabelInput}
-                                  onChange={e => setEditLabelInput(e.target.value)}
-                                  onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') addEditLabel(editLabelInput); }}
-                                  placeholder="Add label..."
-                                  autoFocus
-                                  className="text-[11px] text-gray-600 dark:text-gray-400 placeholder:text-gray-300 dark:placeholder:text-gray-600 bg-transparent outline-none w-24"
-                                />
-                                <button
-                                  onClick={e => { e.stopPropagation(); saveEditLabels(doc.id); }}
-                                  disabled={savingLabels}
-                                  className="text-[11px] font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-[#1f1f1f] px-2 py-0.5 rounded hover:bg-gray-200 dark:hover:bg-[#2a2a2a] transition-colors disabled:opacity-50"
-                                >
-                                  {savingLabels ? 'Saving...' : 'Save'}
-                                </button>
-                                <button
-                                  onClick={e => { e.stopPropagation(); cancelEditLabels(); }}
-                                  className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors"
-                                >
-                                  Cancel
-                                </button>
-                              </div>
-                            )}
-                          </div>
+                        </div>
 
-                          {/* Right: Action buttons */}
-                          <div className="flex items-center flex-shrink-0 rounded-lg border border-gray-100 dark:border-[#2a2a2a] divide-x divide-gray-100 dark:divide-[#2a2a2a] overflow-hidden">
-                            {can_upload_docs && !isEditing && (
-                              <button
-                                title="Edit labels"
-                                onClick={e => { e.stopPropagation(); startEditLabels(doc); }}
-                                className="p-2 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-[#1f1f1f] transition-colors cursor-pointer"
+                        {/* Title + metadata + labels, with ghost ref number trailing the whole block */}
+                        <div className="min-w-0 flex-1 flex items-center gap-4">
+                          <div className="min-w-0 flex-1">
+                          {/* Title line carries the title and nothing else. The three
+                              source badges that used to sit here (CLINICAL TRIAL / PUBMED /
+                              RIS, in three different colours) moved to the meta row as a
+                              single neutral provenance chip — provenance is a fact, not an
+                              action, so it competed with the states that are.
+                              No truncate: the full filename wraps, text-wrap:pretty
+                              balances the last line. */}
+                          <div className="flex items-baseline gap-2.5 min-w-0">
+                            <span className={cn(typography.cardTitle.default, "relative z-10 min-w-0 text-gray-900 dark:text-white break-words [text-wrap:pretty]")}>
+                              {titleText}
+                            </span>
+                          </div>
+                          {/* ONE wrapping meta row, in a fixed priority order:
+                              gate → source → duplicate → labels → +N → id → date → DOI.
+                              The coloured thing is leftmost so scanning the list reads a
+                              single left-aligned column of colour; user labels sit AFTER
+                              the system chips so they can never be mistaken for one;
+                              identity comes last because it's a lookup, not a scan. */}
+                          <div className="relative z-10 flex flex-wrap items-center gap-x-2 gap-y-1.5 mt-1.5 text-xs text-gray-400 dark:text-zinc-500">
+                            {/* 1 — the row's single status badge, and the only colour on it */}
+                            {gate && (
+                              <Tooltip content={gate.tooltip}>
+                                <Badge variant={gate.variant} className="shrink-0">
+                                  {gate.pulse && (
+                                    <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-current" />
+                                  )}
+                                  {gate.label}
+                                </Badge>
+                              </Tooltip>
+                            )}
+
+                            {/* 2 — provenance, but only when it's news. A plain
+                                upload gets no chip: that's the default, and a chip
+                                on 94% of rows is noise, not information. */}
+                            {source && (source.href ? (
+                              <a
+                                href={source.href}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={e => e.stopPropagation()}
+                                className="shrink-0"
                               >
-                                <Pencil className="w-3.5 h-3.5" />
+                                <Badge variant="neutral" className="cursor-pointer transition-opacity hover:opacity-70">
+                                  <source.Icon className="h-3 w-3 shrink-0" />
+                                  {source.label}
+                                  <ExternalLink className="h-2.5 w-2.5 shrink-0" />
+                                </Badge>
+                              </a>
+                            ) : (
+                              <Badge variant="neutral" className="shrink-0">
+                                <source.Icon className="h-3 w-3 shrink-0" />
+                                {source.label}
+                              </Badge>
+                            ))}
+
+                            {/* 3 — duplicate: an icon, not a chip. It's a hint about
+                                identity, not an action, and it's often a false positive
+                                (an author manuscript and the published version legitimately
+                                share a DOI), so it shouldn't shout like a state does. */}
+                            {isDuplicate && (
+                              <Tooltip content="Another document in this project shares this DOI">
+                                <Copy className="h-3 w-3 shrink-0 text-amber-500" />
+                              </Tooltip>
+                            )}
+
+                            {/* 4 — user vocabulary */}
+                            {!isEditing && shownLabels.map(label => (
+                              <LabelChip key={label} label={label} />
+                            ))}
+                            {!isEditing && hiddenLabelCount > 0 && (
+                              <Tooltip
+                                content={allLabels.slice(MAX_VISIBLE_LABELS).join(', ')}
+                                className="max-w-xs whitespace-normal"
+                              >
+                                <button
+                                  onClick={e => { e.stopPropagation(); toggleLabels(doc.id); }}
+                                  className="shrink-0 rounded-full border border-gray-200 px-2 py-0.5 text-[11px] font-medium leading-5 text-gray-600 transition-colors hover:bg-gray-100 dark:border-[#2a2a2a] dark:text-zinc-400 dark:hover:bg-[#1f1f1f]"
+                                >
+                                  +{hiddenLabelCount}
+                                </button>
+                              </Tooltip>
+                            )}
+                            {!isEditing && labelsExpanded && allLabels.length > MAX_VISIBLE_LABELS && (
+                              <button
+                                onClick={e => { e.stopPropagation(); toggleLabels(doc.id); }}
+                                className="shrink-0 px-1 py-0.5 text-[11px] font-medium text-gray-500 transition-colors hover:text-gray-700 dark:text-zinc-500 dark:hover:text-zinc-300"
+                              >
+                                Less
                               </button>
                             )}
-                            {can_upload_docs && (
-                              <button
-                                title="Delete"
-                                onClick={e => { e.stopPropagation(); handleDelete(doc.id, doc.filename); }}
-                                className="p-2 text-zinc-400 hover:text-red-500 dark:hover:text-red-400 hover:bg-red-50 dark:hover:bg-red-900/20 transition-colors cursor-pointer"
-                              >
-                                <Trash2 className="w-3.5 h-3.5" />
-                              </button>
+
+                            {/* 5 — identity and dates: plain text, first to go when narrow */}
+                            {(doc.source_type === 'ctgov' ? doc.nct_id : doc.source_type === 'pubmed' ? doc.pmid : null) && (
+                              <span className="min-w-0 truncate">
+                                {doc.source_type === 'ctgov' ? doc.nct_id : `PMID ${doc.pmid}`}
+                              </span>
+                            )}
+                            <span className="hidden whitespace-nowrap sm:inline">{formatDate(doc.created_at)}</span>
+                            {/* One DOI link for every source (the two near-identical
+                                branches differed only in a title attribute).
+                                Shown IN FULL — a DOI is an identifier you copy or read
+                                against another list, and half of one is useless. It was
+                                briefly truncated here to stop a long DOI overflowing the
+                                row; `break-all` solves that properly instead, letting it
+                                wrap inside this flex-wrap row rather than pushing it wide.
+                                Never re-add `truncate` or `whitespace-nowrap` here. */}
+                            {doc.source_type !== 'ctgov' && doc.doi && (
+                              <Tooltip content={doc.title || `doi:${doc.doi}`}>
+                                <a
+                                  href={`https://doi.org/${doc.doi}`}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  onClick={e => e.stopPropagation()}
+                                  className="min-w-0 break-all font-mono hover:text-gray-600 hover:underline dark:hover:text-zinc-300"
+                                >
+                                  doi:{doc.doi}
+                                </a>
+                              </Tooltip>
                             )}
                           </div>
+                          {/* Label editing (read-only chips now render inline next to the title) */}
+                          {isEditing && (
+                            <div className="flex items-center flex-wrap gap-1.5 mt-2.5">
+                              {/* Same chip as the read-only row and the staging list —
+                                  a label shouldn't change appearance depending on which
+                                  mode you're looking at it in. */}
+                              {editLabels.map(label => (
+                                <LabelChip key={label} label={label} onRemove={() => removeEditLabel(label)} />
+                              ))}
+                              <input
+                                type="text"
+                                value={editLabelInput}
+                                onChange={e => setEditLabelInput(e.target.value)}
+                                onKeyDown={e => { e.stopPropagation(); if (e.key === 'Enter') addEditLabel(editLabelInput); }}
+                                onClick={e => e.stopPropagation()}
+                                placeholder="Add label..."
+                                autoFocus
+                                className="text-[11px] text-gray-600 dark:text-gray-400 placeholder:text-gray-300 dark:placeholder:text-gray-600 bg-transparent outline-none w-24"
+                              />
+                              <button
+                                onClick={e => { e.stopPropagation(); saveEditLabels(doc.id); }}
+                                disabled={savingLabels}
+                                className="text-[11px] font-medium text-gray-700 dark:text-gray-300 bg-gray-100 dark:bg-[#1f1f1f] px-2 py-0.5 rounded hover:bg-gray-200 dark:hover:bg-[#2a2a2a] transition-colors disabled:opacity-50"
+                              >
+                                {savingLabels ? 'Saving...' : 'Save'}
+                              </button>
+                              <button
+                                onClick={e => { e.stopPropagation(); cancelEditLabels(); }}
+                                className="text-[11px] text-gray-400 hover:text-gray-600 transition-colors"
+                              >
+                                Cancel
+                              </button>
+                            </div>
+                          )}
+                          </div>
+                        </div>
+
+                        {/* Actions */}
+                        {/* self-center: the grid is items-start now, but the ghost
+                            number and ⋯ stay vertically centred (design does the
+                            same with align-self: center on both). */}
+                        <div className="relative flex items-center gap-3 self-center" onClick={e => e.stopPropagation()}>
+                          <span className="shrink-0 select-none font-serif italic leading-none text-3xl sm:text-6xl text-gray-200 dark:text-zinc-800">
+                            {String(doc.ref_id).padStart(2, '0')}
+                          </span>
+                          {((can_upload_docs && doc.processing_status === 'failed') || (can_upload_docs && !isEditing) || canDeleteDocs) && (
+                            <DropdownMenu>
+                              <DropdownMenuTrigger asChild>
+                                <button className="w-7 h-7 flex items-center justify-center rounded-md text-gray-400 dark:text-zinc-500 hover:bg-gray-100 dark:hover:bg-[#1f1f1f] transition-colors">
+                                  <MoreHorizontal className="w-4 h-4" />
+                                </button>
+                              </DropdownMenuTrigger>
+                              <DropdownMenuContent align="end">
+                                {can_upload_docs && doc.processing_status === 'failed' && (
+                                  <DropdownMenuItem onClick={() => handleReprocess(doc.id)} disabled={reprocessingId === doc.id}>
+                                    <RotateCcw className="w-3.5 h-3.5" />
+                                    {reprocessingId === doc.id ? 'Retrying...' : 'Retry'}
+                                  </DropdownMenuItem>
+                                )}
+                                {can_upload_docs && !isEditing && (
+                                  <DropdownMenuItem onClick={() => startEditLabels(doc)}>
+                                    <Tag className="w-3.5 h-3.5" />
+                                    Edit labels
+                                  </DropdownMenuItem>
+                                )}
+                                {/* Per-document counterpart to the bulk button. Only
+                                    where it can do something: a DOI that was never
+                                    looked for, on a parsed document with a PDF to read. */}
+                                {can_upload_docs && !doc.doi_source && doc.processing_status === 'completed' && doc.s3_pdf_path && (
+                                  <DropdownMenuItem
+                                    onClick={() => handleBackfillOneDoi(doc.id)}
+                                    disabled={backfillingDoiId === doc.id}
+                                  >
+                                    <Search className="w-3.5 h-3.5" />
+                                    {backfillingDoiId === doc.id ? 'Looking up…' : 'Find DOI'}
+                                  </DropdownMenuItem>
+                                )}
+                                {canDeleteDocs && (
+                                  <>
+                                    <DropdownMenuSeparator />
+                                    <DropdownMenuItem destructive onClick={() => handleDelete(doc.id, doc.filename)}>
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                      Delete
+                                    </DropdownMenuItem>
+                                  </>
+                                )}
+                              </DropdownMenuContent>
+                            </DropdownMenu>
+                          )}
                         </div>
                       </div>
                     );
                   })}
+                  </>
+                  )}
                 </div>
-              )}
             </div>
           </>
         )}
       </div>
+      {dialog}
+      {selectedProject && (
+        <LiteratureSearchDrawer
+          open={importDrawerOpen}
+          onClose={() => setImportDrawerOpen(false)}
+          projectId={selectedProject.id}
+          projectName={selectedProject.name}
+          initialScope={searchScope}
+          initialQuery={heroQuery}
+        />
+      )}
+      <ImportedTrialDrawer
+        open={!!viewingTrialDoc}
+        onClose={() => setViewingTrialDoc(null)}
+        source={
+          viewingTrialDoc?.source_type === 'pubmed' ? 'pubmed'
+            : viewingTrialDoc?.source_type === 'ctgov' ? 'ctgov'
+            : viewingTrialDoc?.source_type === 'endnote' ? 'endnote'
+            : viewingTrialDoc?.source_type === 'ris' ? 'ris'
+            : null
+        }
+        recordId={
+          viewingTrialDoc?.source_type === 'pubmed' ? (viewingTrialDoc?.pmid ?? null)
+            : viewingTrialDoc?.source_type === 'ctgov' ? (viewingTrialDoc?.nct_id ?? null)
+            // EndNote/RIS have no registry id — the DOI is the closest stable
+            // handle, and it's what the drawer's header subtitle shows.
+            : (viewingTrialDoc?.doi ?? null)
+        }
+        documentId={viewingTrialDoc?.id ?? null}
+        approvable={
+          viewingTrialDoc?.processing_status === 'metadata_only' &&
+          !viewingTrialDoc?.metadata_extraction_approved &&
+          // Was computed from status alone, so a viewer saw "Accept for
+          // extraction" and got a 403 from the backend, which gates on
+          // can_upload_docs.
+          can_upload_docs
+        }
+        canAttachPdf={can_upload_docs}
+      />
+      {selectedProject && (
+        <EndNoteImportDialog
+          open={endnoteOpen}
+          projectId={selectedProject.id}
+          onClose={() => setEndnoteOpen(false)}
+          onDone={() => queryClient.invalidateQueries({ queryKey: ['documents'] })}
+        />
+      )}
+      {selectedProject && (
+        <CitationImportDialog
+          open={citationOpen}
+          projectId={selectedProject.id}
+          onClose={() => setCitationOpen(false)}
+          onDone={() => queryClient.invalidateQueries({ queryKey: ['documents'] })}
+        />
+      )}
+      {/* The "attach a PDF to a needs_pdf import" picker used to live here as a
+          hidden input fired straight from the row click. needs_pdf rows now open
+          ImportedTrialDrawer instead, which owns its own picker — so this input
+          had no trigger left. */}
     </DashboardLayout>
   );
 }

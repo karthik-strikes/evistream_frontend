@@ -54,3 +54,4 @@ export { SuccessAnimation, SuccessToast, ProgressCelebration } from './success-a
 export { Sparkline, generateTrendData } from './sparkline';
 export { TextLink } from './text-link';
 export { PermissionGate } from './permission-gate';
+export { ForestPlotIcon } from './forest-plot-icon';

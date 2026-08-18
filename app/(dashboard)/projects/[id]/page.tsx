@@ -4,6 +4,8 @@ import { useState, useEffect, use } from 'react';
 import { useRouter, useSearchParams, usePathname } from 'next/navigation';
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
+import { useAuth } from '@/contexts/AuthContext';
+import { useConfirmationDialog } from '@/components/ui/confirmation-dialog';
 import { formsService, documentsService, extractionsService, assignmentsService, vocabulariesService } from '@/services';
 import { projectMembersService } from '@/services/project-members.service';
 import type { ProjectMember, AssignmentProgress } from '@/types/api';
@@ -20,26 +22,27 @@ import {
   Loader2,
   Users,
   ClipboardList,
-  BookOpen,
+  Archive,
+  RotateCcw,
+  Crosshair,
 } from 'lucide-react';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 import { ProjectMembersModal } from '@/components/project/ProjectMembersModal';
 import { ProjectHubCard } from '@/components/project/ProjectHubCard';
 import { ProjectCostSummary } from '@/components/project/ProjectCostSummary';
-import { DocumentsSection } from '@/components/project/sections/DocumentsSection';
-import { FormsSection } from '@/components/project/sections/FormsSection';
 import { ExtractionsSection } from '@/components/project/sections/ExtractionsSection';
 import { MembersSection } from '@/components/project/sections/MembersSection';
 import { AssignmentsSection } from '@/components/project/sections/AssignmentsSection';
 import { VocabulariesSection } from '@/components/project/sections/VocabulariesSection';
+import { ReviewScopeSection } from '@/components/project/sections/ReviewScopeSection';
 
 // ============================================================================
 // Section type
 // ============================================================================
 
-type Section = 'documents' | 'forms' | 'extractions' | 'members' | 'assignments' | 'vocabularies' | null;
+type Section = 'extractions' | 'members' | 'assignments' | 'vocabularies' | 'scope' | null;
 
-const VALID_SECTIONS = ['documents', 'forms', 'extractions', 'members', 'assignments', 'vocabularies'] as const;
+const VALID_SECTIONS = ['extractions', 'members', 'assignments', 'vocabularies', 'scope'] as const;
 
 function parseSection(value: string | null): Section {
   if (value && (VALID_SECTIONS as readonly string[]).includes(value)) return value as Section;
@@ -56,10 +59,49 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const { toast } = useToast();
-  const { projects, selectedProject, setSelectedProject, updateProject, deleteProject, refreshProjects } = useProject();
+  const { projects, allProjects, selectedProject, setSelectedProject, updateProject, deleteProject, archiveProject, unarchiveProject, refreshProjects } = useProject();
   const perms = useProjectPermissions();
+  const { currentUser, isAdmin } = useAuth();
+  const { confirm, dialog } = useConfirmationDialog();
 
-  const proj = projects.find((p: any) => p.id === id) || null;
+  // allProjects (not projects) so an ARCHIVED project's detail page still
+  // resolves — archived rows are filtered out of `projects` by design.
+  const proj = allProjects.find((p: any) => p.id === id) || null;
+  const isProjArchived = !!proj?.archived_at;
+
+  // Gate off the project row rather than `perms`: ProjectContext only fetches
+  // permissions for the *selected* project, so on a non-active project's page
+  // `perms` describes the wrong project.
+  const canManageThis = !!proj && (
+    isAdmin || proj.user_id === currentUser?.id ||
+    proj.my_role === 'owner' || proj.my_role === 'manager'
+  );
+
+  const handleArchiveToggle = async () => {
+    if (!proj) return;
+    if (isProjArchived) {
+      try {
+        await unarchiveProject(proj.id);
+        toast({ title: 'Project restored', variant: 'success' });
+      } catch (err: any) {
+        toast({ title: 'Error', description: err.message, variant: 'error' });
+      }
+      return;
+    }
+    const confirmed = await confirm({
+      title: 'Archive project',
+      description: `Archive "${proj.name}"? It will be hidden from the project selector and become read-only. Results stay viewable, and you can restore it anytime.`,
+      confirmLabel: 'Archive',
+      onConfirm: () => {},
+    });
+    if (!confirmed) return;
+    try {
+      await archiveProject(proj.id);
+      toast({ title: 'Project archived', variant: 'success' });
+    } catch (err: any) {
+      toast({ title: 'Error', description: err.message, variant: 'error' });
+    }
+  };
 
   const [forms, setForms] = useState<any[]>([]);
   const [documents, setDocuments] = useState<any[]>([]);
@@ -77,6 +119,16 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     else params.delete('tab');
     const qs = params.toString();
     router.replace(qs ? `${pathname}?${qs}` : pathname, { scroll: false });
+  };
+
+  const navigateToForms = () => {
+    if (proj && selectedProject?.id !== proj.id) setSelectedProject(proj);
+    router.push('/forms');
+  };
+
+  const navigateToDocuments = () => {
+    if (proj && selectedProject?.id !== proj.id) setSelectedProject(proj);
+    router.push('/documents');
   };
 
   const [showEdit, setShowEdit] = useState(false);
@@ -116,6 +168,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
         setForms([]);
         setDocuments([]);
         setExtractions([]);
+        toast({ title: 'Error', description: 'Failed to load project data. Try refreshing the page.', variant: 'error' });
       } finally {
         setLoading(false);
       }
@@ -163,7 +216,14 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
 
   const handleDelete = async () => {
     if (!proj) return;
-    if (!confirm(`Delete "${proj.name}"? This action cannot be undone.`)) return;
+    const confirmed = await confirm({
+      title: 'Delete project',
+      description: `Delete "${proj.name}"? This action cannot be undone.`,
+      confirmLabel: 'Delete',
+      variant: 'destructive',
+      onConfirm: () => {},
+    });
+    if (!confirmed) return;
     setSubmitting(true);
     try {
       await deleteProject(proj.id);
@@ -183,6 +243,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           <div className="flex items-center gap-3 mb-8">
             <button
               onClick={() => router.back()}
+              aria-label="Back to projects"
               className="flex items-center justify-center w-8 h-8 rounded-lg border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 cursor-pointer hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors"
             >
               <ArrowLeft size={15} />
@@ -207,6 +268,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
             <div className="flex items-start gap-4">
               <button
                 onClick={() => router.push('/projects')}
+                aria-label="Back to projects"
                 className="mt-1 flex items-center justify-center w-8 h-8 rounded-lg border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 cursor-pointer hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors shrink-0"
               >
                 <ArrowLeft size={15} />
@@ -216,9 +278,14 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                   <h1 className={cn(typography.page.title, 'text-gray-900 dark:text-white m-0')}>
                     {proj.name}
                   </h1>
-                  {isActive && (
+                  {isActive && !isProjArchived && (
                     <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15 px-2 py-0.5 rounded-full">
                       Active
+                    </span>
+                  )}
+                  {isProjArchived && (
+                    <span className="text-[10px] font-semibold text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-400/15 px-2 py-0.5 rounded-full">
+                      Archived
                     </span>
                   )}
                 </div>
@@ -229,7 +296,8 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
             </div>
 
             <div className="flex items-center gap-2 shrink-0 mt-1">
-              {!isActive && (
+              {/* Archived projects are hidden from the selector, so they can't be made active */}
+              {!isActive && !isProjArchived && (
                 <button
                   onClick={handleSetActive}
                   disabled={submitting}
@@ -238,12 +306,26 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                   Set Active
                 </button>
               )}
-              {activeSection === null && (perms.isOwner || perms.isAdmin) && (
+              {/* Archive/restore: owner, manager, admin, or creator */}
+              {activeSection === null && canManageThis && (
+                <button
+                  onClick={handleArchiveToggle}
+                  disabled={submitting}
+                  title={isProjArchived ? 'Restore project' : 'Archive project'}
+                  aria-label={isProjArchived ? 'Restore project' : 'Archive project'}
+                  className="flex items-center justify-center w-8 h-8 rounded-lg border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] hover:text-gray-700 dark:hover:text-zinc-200 transition-colors disabled:opacity-40"
+                >
+                  {isProjArchived ? <RotateCcw size={14} /> : <Archive size={14} />}
+                </button>
+              )}
+              {/* Rename is blocked server-side on archived projects (409), so hide it */}
+              {activeSection === null && (perms.isOwner || perms.isAdmin) && !isProjArchived && (
                 <>
                   <button
                     onClick={handleOpenEdit}
                     disabled={submitting}
                     title="Rename project"
+                    aria-label="Rename project"
                     className="flex items-center justify-center w-8 h-8 rounded-lg border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] hover:text-gray-700 dark:hover:text-zinc-200 transition-colors disabled:opacity-40"
                   >
                     <Edit2 size={14} />
@@ -252,6 +334,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                     onClick={handleDelete}
                     disabled={submitting}
                     title="Delete project"
+                    aria-label="Delete project"
                     className="flex items-center justify-center w-8 h-8 rounded-lg border border-red-200 dark:border-red-900/40 bg-white dark:bg-[#111111] text-red-500 hover:bg-red-50 dark:hover:bg-red-900/10 transition-colors disabled:opacity-40"
                   >
                     <Trash2 size={14} />
@@ -273,7 +356,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           /* Hub Card Grid                                                 */
           /* ============================================================ */
           <>
-            {(perms.isOwner || perms.isAdmin) && <ProjectCostSummary projectId={id} />}
+            {proj.user_id === currentUser?.id && <ProjectCostSummary projectId={id} />}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             <ProjectHubCard
               icon={FileCheck}
@@ -284,7 +367,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                 `${completedDocs} ready`,
                 ...(processingDocs > 0 ? [`${processingDocs} processing`] : []),
               ]}
-              onClick={() => setActiveSection('documents')}
+              onClick={navigateToDocuments}
             />
             <ProjectHubCard
               icon={FileText}
@@ -295,7 +378,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                 `${activeForms} active`,
                 ...(draftForms > 0 ? [`${draftForms} draft`] : []),
               ]}
-              onClick={() => setActiveSection('forms')}
+              onClick={navigateToForms}
             />
             <ProjectHubCard
               icon={Play}
@@ -326,12 +409,15 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
               onClick={() => setActiveSection('assignments')}
             />
             <ProjectHubCard
-              icon={BookOpen}
-              title="Vocabularies"
-              count={vocabularies.length}
-              accentColor="bg-teal-500"
-              breakdownLines={[]}
-              badge="Beta"
+              icon={Crosshair}
+              title="Review scope"
+              valueLabel={proj?.review_scope ? 'Set' : 'Not set'}
+              accentColor="bg-amber-500"
+              breakdownLines={[
+                proj?.review_scope ? 'Guides every form' : 'Guides how fields are read',
+              ]}
+              actionLabel={canManageThis ? 'Edit scope' : undefined}
+              onClick={() => setActiveSection('scope')}
             />
             </div>
           </>
@@ -350,12 +436,6 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
 
             <div className="rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111]">
               <div className="px-6 py-5">
-                {activeSection === 'documents' && (
-                  <DocumentsSection projectId={id} documents={documents} />
-                )}
-                {activeSection === 'forms' && (
-                  <FormsSection projectId={id} forms={forms} />
-                )}
                 {activeSection === 'extractions' && (
                   <ExtractionsSection projectId={id} extractions={extractions} />
                 )}
@@ -382,6 +462,14 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                     projectId={id}
                     vocabularies={vocabularies}
                     onVocabulariesChange={setVocabularies}
+                  />
+                )}
+                {activeSection === 'scope' && (
+                  <ReviewScopeSection
+                    projectId={id}
+                    reviewScope={proj?.review_scope}
+                    onScopeChange={refreshProjects}
+                    editable={canManageThis && !isProjArchived}
                   />
                 )}
               </div>
@@ -418,6 +506,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
               <span className="text-sm font-semibold text-gray-900 dark:text-white">Edit Project</span>
               <button
                 onClick={() => setShowEdit(false)}
+                aria-label="Close"
                 className="w-6 h-6 flex items-center justify-center rounded-full bg-gray-100 dark:bg-[#1f1f1f] text-gray-400 hover:text-gray-600 dark:hover:text-gray-200 transition-colors text-xs"
               >
                 X
@@ -474,6 +563,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           </div>
         </div>
       )}
+      {dialog}
     </DashboardLayout>
   );
 }

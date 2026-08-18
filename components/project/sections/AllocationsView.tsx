@@ -9,6 +9,7 @@ import { cn } from '@/lib/utils';
 import { assignmentsService } from '@/services';
 import type { ReviewAssignment } from '@/types/api';
 import { AllocationsByPaperView } from './AllocationsByPaperView';
+import { ROLE_COLORS } from '@/lib/reviewerColors';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -24,10 +25,12 @@ const AVATAR_COLORS = [
   'bg-teal-100 text-teal-700 dark:bg-teal-900/40 dark:text-teal-300',
 ];
 
+// Role hues from lib/reviewerColors, so R2 is one colour app-wide (it was violet
+// here and emerald in the extraction queue).
 const ROLE_MAP = {
-  reviewer_1:  { tag: 'R1',  pill: 'text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-400/15' },
-  reviewer_2:  { tag: 'R2',  pill: 'text-violet-600 dark:text-violet-400 bg-violet-100 dark:bg-violet-400/15' },
-  adjudicator: { tag: 'Cons', pill: 'text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15' },
+  reviewer_1:  { tag: 'R1',  pill: ROLE_COLORS.reviewer_1.pill },
+  reviewer_2:  { tag: 'R2',  pill: ROLE_COLORS.reviewer_2.pill },
+  adjudicator: { tag: 'Cons', pill: ROLE_COLORS.adjudicator.pill },
 } as const;
 
 type ReviewerRole = keyof typeof ROLE_MAP;

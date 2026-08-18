@@ -7,7 +7,7 @@ import {
   Plus, Minus, X, Scale, LayoutGrid,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
-import { assignmentsService, formsService, projectMembersService, documentsService } from '@/services';
+import { assignmentsService, formsService, projectMembersService, documentsService, projectsService } from '@/services';
 import type { AssignmentProgress, ProjectMember, Form, Document } from '@/types/api';
 import { useToast } from '@/hooks/use-toast';
 import { Avatar } from '@/components/ui/avatar';
@@ -99,6 +99,10 @@ export function AssignmentsSection({ projectId, progress, onProgressChange }: As
 
   const [loading, setLoading] = useState(true);
 
+  // Reviewer blinding (project-level; governs every form in this project)
+  const [reviewSettings, setReviewSettings] = useState<{ blinding: 'none' | 'partial' | 'full'; hide_ai_results: boolean }>({ blinding: 'none', hide_ai_results: false });
+  const [savingReviewSettings, setSavingReviewSettings] = useState(false);
+
   // Data
   const [forms, setForms]         = useState<Form[]>([]);
   const [members, setMembers]     = useState<ProjectMember[]>([]);
@@ -149,16 +153,22 @@ export function AssignmentsSection({ projectId, progress, onProgressChange }: As
     setLoading(true);
 
     // Each call is isolated — one 403/500 must not zero out every stat card.
-    const [formsRes, membersRes, docsRes, progRes, existingRes] = await Promise.allSettled([
+    const [formsRes, membersRes, docsRes, progRes, existingRes, projectRes] = await Promise.allSettled([
       formsService.getAll(projectId),
       projectMembersService.listMembers(projectId),
       documentsService.getAll(projectId),
       assignmentsService.getProgress(projectId),
       assignmentsService.getProjectAssignments(projectId),
+      projectsService.getById(projectId),
     ]);
 
     setForms(formsRes.status === 'fulfilled' ? formsRes.value : []);
     setMembers(membersRes.status === 'fulfilled' ? membersRes.value : []);
+
+    if (projectRes.status === 'fulfilled') {
+      const rs = projectRes.value.review_settings;
+      setReviewSettings({ blinding: rs?.blinding ?? 'none', hide_ai_results: rs?.hide_ai_results ?? false });
+    }
 
     if (docsRes.status === 'fulfilled') {
       const completedDocs = (docsRes.value as Document[])
@@ -197,6 +207,7 @@ export function AssignmentsSection({ projectId, progress, onProgressChange }: As
     if (docsRes.status === 'rejected')     failures.push('documents');
     if (progRes.status === 'rejected')     failures.push('progress');
     if (existingRes.status === 'rejected') failures.push('assignments');
+    if (projectRes.status === 'rejected') failures.push('review settings');
     if (failures.length) {
       toast({
         title: 'Some data failed to load',
@@ -209,6 +220,21 @@ export function AssignmentsSection({ projectId, progress, onProgressChange }: As
   }, [projectId, onProgressChange, toast, perms.can_manage_assignments]);
 
   useEffect(() => { loadData(); }, [loadData]);
+
+  const saveReviewSettings = async (next: { blinding: 'none' | 'partial' | 'full'; hide_ai_results: boolean }) => {
+    const prev = reviewSettings;
+    setReviewSettings(next);
+    setSavingReviewSettings(true);
+    try {
+      await projectsService.updateReviewSettings(projectId, next);
+      toast({ title: 'Saved', description: 'Reviewer blinding settings updated.', variant: 'success' });
+    } catch (err: any) {
+      setReviewSettings(prev);
+      toast({ title: 'Error', description: err?.message || 'Failed to update review settings', variant: 'error' });
+    } finally {
+      setSavingReviewSettings(false);
+    }
+  };
 
   // Auto-rebalance shares when the allocation target changes (mode toggle, doc list change).
   useEffect(() => {
@@ -407,6 +433,40 @@ export function AssignmentsSection({ projectId, progress, onProgressChange }: As
             <LayoutGrid className="h-3 w-3" />
             Allocations
           </button>
+        </div>
+      </div>
+
+      {/* ── Reviewer blinding (project-level) ──────────────────────────────── */}
+      <div className="border border-gray-200 dark:border-[#1f1f1f] rounded-xl bg-white dark:bg-[#111111] p-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h3 className="text-[13px] font-semibold text-gray-900 dark:text-white">Reviewer blinding</h3>
+            <p className="text-[12px] text-gray-400 dark:text-zinc-500 mt-0.5">
+              Controls whether R1 and R2 can see each other&apos;s manual answers. Applies to every form in this project.
+            </p>
+          </div>
+          <div className="flex items-center gap-3 flex-wrap">
+            <select
+              value={reviewSettings.blinding}
+              onChange={e => saveReviewSettings({ ...reviewSettings, blinding: e.target.value as 'none' | 'partial' | 'full' })}
+              disabled={savingReviewSettings}
+              className="text-[12.5px] bg-gray-50 dark:bg-[#141414] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-3 py-1.5 text-gray-800 dark:text-zinc-200 focus:outline-none disabled:opacity-50"
+            >
+              <option value="none">Off — everyone sees everything</option>
+              <option value="partial">Partial — R1/R2 blind to each other</option>
+              <option value="full">Full — R1/R2 blind to each other</option>
+            </select>
+            <label className="inline-flex items-center gap-2 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={reviewSettings.hide_ai_results}
+                onChange={e => saveReviewSettings({ ...reviewSettings, hide_ai_results: e.target.checked })}
+                disabled={savingReviewSettings}
+                className="accent-amber-500"
+              />
+              <span className="text-[12px] text-gray-500 dark:text-zinc-400">Hide AI results too</span>
+            </label>
+          </div>
         </div>
       </div>
 

@@ -39,7 +39,8 @@ function StatusPill({ status }: { status: string }) {
 
 export function ExtractionsSection({ projectId, extractions }: ExtractionsSectionProps) {
   const router = useRouter();
-  const { selectedProject, setSelectedProject, projects } = useProject();
+  // allProjects so an archived project still resolves by id
+  const { selectedProject, setSelectedProject, allProjects: projects } = useProject();
 
   const navigateToExtractions = () => {
     const proj = projects.find((p: any) => p.id === projectId);

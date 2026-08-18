@@ -99,12 +99,17 @@ async function uploadToS3(
 }
 
 export const documentsService = {
-  async getAll(projectId: string, search?: string): Promise<Document[]> {
-    let url = `/api/v1/documents?project_id=${encodeURIComponent(projectId)}&limit=500`;
-    if (search && search.trim()) {
-      url += `&search=${encodeURIComponent(search.trim())}`;
-    }
-    return apiClient.get<Document[]>(url);
+  /**
+   * List documents. Pass a projectId to scope to one project; omit it (or pass
+   * null) to list across EVERY project the caller can view — the backend's
+   * `list_documents` falls back to owned + member projects when no project_id
+   * is supplied.
+   */
+  async getAll(projectId?: string | null, search?: string): Promise<Document[]> {
+    const params = new URLSearchParams({ limit: '500' });
+    if (projectId) params.set('project_id', projectId);
+    if (search && search.trim()) params.set('search', search.trim());
+    return apiClient.get<Document[]>(`/api/v1/documents?${params.toString()}`);
   },
 
   async getById(id: string): Promise<Document> {
@@ -174,8 +179,62 @@ export const documentsService = {
     return apiClient.delete<void>(`/api/v1/documents/${id}`);
   },
 
+  /**
+   * Accept thin-evidence (`metadata_only`) documents for extraction. Bulk by
+   * design. Does NOT change processing_status — the document stays
+   * `metadata_only` so results and exports can still show the evidence was thin.
+   */
+  async approveMetadata(ids: string[], approved = true): Promise<{ count: number; skipped: number }> {
+    return apiClient.patch('/api/v1/documents/approve-metadata', { document_ids: ids, approved });
+  },
+
+  async reprocess(id: string): Promise<{ status: string; job_id: string | null }> {
+    return apiClient.post<{ status: string; job_id: string | null }>(`/api/v1/documents/${id}/reprocess`, {});
+  },
+
+  /**
+   * Best-effort DOI/title resolution for one document whose DOI was never
+   * attempted (doi_source IS NULL — anything uploaded before the DOI pipeline
+   * existed). Reads the PDF's embedded metadata, then page-1 text, then falls
+   * back to a Crossref title lookup. No Datalab calls, so it costs nothing but
+   * a little time.
+   */
+  async backfillDoi(id: string): Promise<{ status: string; job_id: string | null }> {
+    return apiClient.post<{ status: string; job_id: string | null }>(`/api/v1/documents/${id}/backfill-doi`, {});
+  },
+
+
+  async attachPdf(id: string, file: File): Promise<{ status: string; job_id: string | null }> {
+    // Manual full-text fallback (see ImportedTrialDrawer's "Attach PDF"
+    // prompt) — bypasses apiClient for the same reason vocabulariesService's
+    // importCSV does: a raw fetch with just the auth header avoids axios's
+    // default JSON Content-Type header fighting FormData's auto-set
+    // multipart boundary.
+    const formData = new FormData();
+    formData.append('file', file);
+    const token = apiClient.getToken();
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+    const response = await fetch(`/api/v1/documents/${id}/attach-pdf`, {
+      method: 'POST',
+      headers,
+      body: formData,
+    });
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}));
+      throw new Error(data.detail || `Attach failed: ${response.status}`);
+    }
+    return response.json();
+  },
+
   async downloadMarkdown(id: string): Promise<string> {
-    return apiClient.get<string>(`/api/v1/documents/${id}/markdown`);
+    // responseType: 'text' forces axios to hand back the raw string body.
+    // Without it, axios's default transform silently JSON.parses ANY
+    // response string that happens to be valid JSON — regardless of the
+    // server's Content-Type header — which turns this into an object
+    // instead of a string for CT.gov-imported documents (whose stored
+    // "markdown" is now pure JSON) and crashes callers expecting a string.
+    return apiClient.get<string>(`/api/v1/documents/${id}/markdown`, { responseType: 'text' } as any);
   },
 
   async downloadBlocks(id: string): Promise<unknown | null> {

@@ -8,10 +8,10 @@ import {
   Badge, EmptyState, Spinner,
   Dialog, DialogContent, DialogHeader, DialogTitle,
 } from '@/components/ui';
-import { DollarSign, Hash, Database, AlertCircle, Inbox, Sparkles, Clock, FolderKanban } from 'lucide-react';
+import { DollarSign, Hash, Database, AlertCircle, Inbox, Sparkles, Clock, FolderKanban, ChevronDown, ChevronRight, RotateCcw } from 'lucide-react';
 import { cn, formatModelName } from '@/lib/utils';
 import { typography } from '@/lib/typography';
-import { usageService, type UsageBreakdownRow, type UsageByRunRow, type UsageByProjectRow } from '@/services/usage.service';
+import { usageService, type UsageBreakdownRow, type UsageByRunRow, type UsageByProjectRow, type UsageCallRow } from '@/services/usage.service';
 
 type GroupBy = 'model' | 'source' | 'day' | 'schema';
 
@@ -191,6 +191,8 @@ function ByRunCard({ rows, days }: { rows: UsageByRunRow[]; days: number }) {
                     <th className="px-3 py-2 font-medium text-right">Calls</th>
                     <th className="px-3 py-2 font-medium text-right">Tokens</th>
                     <th className="px-3 py-2 font-medium text-right" title="Total tokens / PDFs in this run">Avg tok/PDF</th>
+                    <th className="px-3 py-2 font-medium text-right" title="Wall clock from run start to its last LLM call">Time</th>
+                    <th className="px-3 py-2 font-medium text-right" title="Cost of calls whose answer was discarded and re-asked">Waste</th>
                     <th className="px-3 py-2 font-medium text-right">Cost</th>
                   </tr>
                 </thead>
@@ -236,6 +238,21 @@ function ByRunCard({ rows, days }: { rows: UsageByRunRow[]; days: number }) {
                       <td className="px-3 py-2 text-right tabular-nums dark:text-zinc-300">
                         {r.avg_tokens_per_pdf === null ? '—' : formatTokens(Math.round(r.avg_tokens_per_pdf))}
                       </td>
+                      <td
+                        className="px-3 py-2 text-right tabular-nums dark:text-zinc-300"
+                        title={r.model_time_seconds ? `${formatDuration(r.model_time_seconds)} of model time across all calls` : undefined}
+                      >
+                        {formatDuration(r.elapsed_seconds ?? 0)}
+                      </td>
+                      <td
+                        className={cn(
+                          'px-3 py-2 text-right tabular-nums',
+                          r.wasted_calls ? 'text-amber-600 dark:text-amber-400' : 'text-gray-400 dark:text-zinc-600'
+                        )}
+                        title={r.wasted_calls ? `${r.wasted_calls} call${r.wasted_calls === 1 ? '' : 's'} discarded and re-asked` : 'No discarded calls'}
+                      >
+                        {r.wasted_calls ? `$${(r.wasted_cost_usd ?? 0).toFixed(3)}` : '—'}
+                      </td>
                       <td className="px-3 py-2 text-right tabular-nums font-medium dark:text-white">${r.cost_usd.toFixed(4)}</td>
                     </tr>
                   ))}
@@ -249,6 +266,7 @@ function ByRunCard({ rows, days }: { rows: UsageByRunRow[]; days: number }) {
         open={!!drillRow}
         onClose={() => setDrillRow(null)}
         schemaName={drillRow?.schema_name ?? null}
+        extractionId={drillRow?.extraction_id ?? null}
         formName={drillRow?.form_name ?? null}
         projectName={drillRow?.project_name ?? null}
         startedAt={drillRow?.started_at ?? null}
@@ -261,12 +279,90 @@ function ByRunCard({ rows, days }: { rows: UsageByRunRow[]; days: number }) {
   );
 }
 
+// Pipeline steps of the keyed (Rigorous) table path. Their presence in a run is
+// what tells us a paper with a single first-pass call *stopped* rather than
+// simply being a scalar form. Named per the Aug 2026 terminology — record
+// discovery, recall audit, slot fill, refill — never "Stage 1 / Stage 2".
+const KEYED_STEPS = new Set(['record_discovery', 'recall_audit', 'slot_fill', 'slot_fill_row', 'refill']);
+
+const STEP_LABEL: Record<string, string> = {
+  record_discovery: 'record discovery',
+  recall_audit: 'recall audit',
+  slot_fill: 'slot fill',
+  slot_fill_row: 'slot fill · per record',
+  refill: 'refill',
+  extract: 'extract',
+};
+
+type CallGroup = {
+  key: string;
+  title: string;
+  subtitle?: string;
+  calls: UsageCallRow[];
+  cost: number;
+  savings: number;
+  ms: number;
+  wastedCost: number;
+  wastedCalls: number;
+  note?: string;
+  /** More than one form field in this paper's calls — show the field per row. */
+  multiField?: boolean;
+};
+
+/** Group a run's calls by the paper they were about, in pipeline order. */
+function buildCallGroups(rows: UsageCallRow[]): { groups: CallGroup[]; keyed: boolean } {
+  const keyed = rows.some((r) => !!r.step && KEYED_STEPS.has(r.step));
+  const map = new Map<string, CallGroup>();
+
+  rows.forEach((r) => {
+    const key = r.filename || r.document_id || (r.transport === 'langchain' ? '__codegen' : '__unlabeled');
+    const title = r.filename
+      || (r.transport === 'langchain' ? 'Form generation' : null)
+      || (r.document_id ? `Document ${r.document_id.slice(0, 8)}` : 'Unattributed calls');
+    let g = map.get(key);
+    if (!g) {
+      g = { key, title, calls: [], cost: 0, savings: 0, ms: 0, wastedCost: 0, wastedCalls: 0 };
+      map.set(key, g);
+    }
+    g.calls.push(r);
+    g.cost += r.cost_usd || 0;
+    g.savings += r.cache_savings_usd || 0;
+    g.ms += r.duration_ms || 0;
+    if (r.superseded) {
+      g.wastedCalls += 1;
+      g.wastedCost += r.cost_usd || 0;
+    }
+  });
+
+  const groups = Array.from(map.values());
+  groups.forEach((g) => {
+    g.calls.sort((a, b) => (a.timestamp ?? '').localeCompare(b.timestamp ?? ''));
+    // The backend decides this from the form's schema: a table field whose paper
+    // produced only record discovery had no rows to fill. It must not be inferred
+    // here from "one call in a keyed run" — on a mixed form that label lands on
+    // every scalar field.
+    const stopped = g.calls.filter((c) => c.stopped);
+    if (stopped.length) {
+      const which = Array.from(new Set(stopped.map((c) => c.field_name).filter(Boolean)));
+      g.note = which.length === 1
+        ? `no rows found for ${which[0]}`
+        : 'no rows found';
+    }
+    const fields = Array.from(new Set(g.calls.map((c) => c.field_name).filter(Boolean) as string[]));
+    if (fields.length === 1) g.subtitle = fields[0];
+    g.multiField = fields.length > 1;
+  });
+  groups.sort((a, b) => b.cost - a.cost);
+  return { groups, keyed };
+}
+
 function CallsDrillDialog({
-  open, onClose, schemaName, formName, projectName, startedAt, since, until, pdfCount, days,
+  open, onClose, schemaName, extractionId, formName, projectName, startedAt, since, until, pdfCount, days,
 }: {
   open: boolean;
   onClose: () => void;
   schemaName: string | null;
+  extractionId?: string | null;
   formName: string | null;
   projectName?: string | null;
   startedAt?: string | null;
@@ -275,10 +371,15 @@ function CallsDrillDialog({
   pdfCount?: number;
   days: number;
 }) {
+  const [toggled, setToggled] = useState<Record<string, boolean>>({});
+
   const { data, isLoading } = useQuery({
-    queryKey: ['usage', 'calls', schemaName, since, until, days],
+    queryKey: ['usage', 'calls', extractionId, schemaName, since, until, days],
     queryFn: () => usageService.getCalls({
       schemaName: schemaName ?? undefined,
+      // Exact when the run's calls carry its id; the backend falls back to the
+      // since/until window for runs recorded before that was stamped.
+      extractionId: extractionId ?? undefined,
       since: since ?? undefined,
       until: until ?? undefined,
       days,
@@ -287,19 +388,32 @@ function CallsDrillDialog({
     enabled: !!schemaName && open,
   });
 
-  // Compute unique non-meta signatures from the call data
-  const META = new Set(['reasoning', 'completed', 'done', 'output', 'answer', 'rationale']);
-  const uniqueSignatures = (() => {
-    if (!data?.rows) return 0;
-    const set = new Set<string>();
-    data.rows.forEach((c) => {
-      if (c.signature && !META.has(c.signature.toLowerCase())) set.add(c.signature);
-    });
-    return set.size;
+  const rows = data?.rows ?? [];
+  const labelled = rows.some((r) => !!r.step);
+  const { groups, keyed } = buildCallGroups(rows);
+
+  const totals = rows.reduce(
+    (acc, r) => ({
+      cost: acc.cost + (r.cost_usd || 0),
+      savings: acc.savings + (r.cache_savings_usd || 0),
+      ms: acc.ms + (r.duration_ms || 0),
+      wastedCost: acc.wastedCost + (r.superseded ? r.cost_usd || 0 : 0),
+      wastedCalls: acc.wastedCalls + (r.superseded ? 1 : 0),
+    }),
+    { cost: 0, savings: 0, ms: 0, wastedCost: 0, wastedCalls: 0 }
+  );
+
+  // Wall clock ≠ the sum of call durations: papers run in parallel, so showing
+  // one as the other would misstate both.
+  const elapsedSeconds = (() => {
+    if (!startedAt || rows.length === 0) return null;
+    const last = rows.reduce((m, r) => ((r.timestamp ?? '') > m ? (r.timestamp ?? '') : m), '');
+    if (!last) return null;
+    const secs = (new Date(last).getTime() - new Date(startedAt).getTime()) / 1000;
+    return Number.isFinite(secs) && secs >= 0 ? secs : null;
   })();
-  const actualCalls = data?.rows.length ?? 0;
-  const expectedCalls = (pdfCount ?? 0) * uniqueSignatures;
-  const extraCalls = actualCalls - expectedCalls;
+
+  const papersSeen = new Set(rows.map((r) => r.document_id || r.filename).filter(Boolean)).size;
 
   return (
     <Dialog open={open} onOpenChange={(o) => { if (!o) onClose(); }}>
@@ -313,43 +427,215 @@ function CallsDrillDialog({
             {projectName && startedAt && <span className="text-gray-300 dark:text-zinc-600">·</span>}
             {startedAt && <span>{formatFriendlyTime(startedAt)}</span>}
           </div>
-          {actualCalls > 0 && (pdfCount ?? 0) > 0 && uniqueSignatures > 0 && (
-            <div className="text-sm text-gray-700 dark:text-zinc-300 pt-2">
-              <span className="tabular-nums font-medium">{pdfCount}</span> paper{pdfCount === 1 ? '' : 's'}
-              {' × '}
-              <span className="tabular-nums font-medium">{uniqueSignatures}</span> field{uniqueSignatures === 1 ? '' : 's'}
-              {' = '}
-              <span className="tabular-nums font-semibold">{expectedCalls}</span> calls
-              {extraCalls > 0 && (
-                <span className="text-amber-600 dark:text-amber-400">
-                  {' '}· {extraCalls} retry{extraCalls === 1 ? '' : 's'} ({actualCalls} total)
-                </span>
+          {rows.length > 0 && (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1 pt-2 text-sm text-gray-700 dark:text-zinc-300">
+              <span>
+                <span className="tabular-nums font-semibold">{rows.length}</span> call{rows.length === 1 ? '' : 's'}
+              </span>
+              <span className="text-gray-300 dark:text-zinc-600">·</span>
+              <span className="tabular-nums font-semibold">${totals.cost.toFixed(4)}</span>
+              {papersSeen > 0 && (
+                <>
+                  <span className="text-gray-300 dark:text-zinc-600">·</span>
+                  <span className="tabular-nums">
+                    {papersSeen}
+                    {pdfCount ? `/${pdfCount}` : ''} paper{papersSeen === 1 ? '' : 's'}
+                  </span>
+                </>
+              )}
+              {elapsedSeconds !== null && (
+                <>
+                  <span className="text-gray-300 dark:text-zinc-600">·</span>
+                  <span
+                    className="tabular-nums"
+                    title="Wall clock for the run. Model time is the sum of every call's duration — larger, because papers run in parallel."
+                  >
+                    {formatDuration(elapsedSeconds)} elapsed
+                    {totals.ms > 0 && ` (${formatDuration(totals.ms / 1000)} model time)`}
+                  </span>
+                </>
+              )}
+              {totals.savings > 0 && (
+                <>
+                  <span className="text-gray-300 dark:text-zinc-600">·</span>
+                  <span className="text-emerald-600 dark:text-emerald-400 tabular-nums" title="Saved by prompt caching versus paying full input price">
+                    ${totals.savings.toFixed(3)} saved by cache
+                  </span>
+                </>
+              )}
+              {totals.wastedCalls > 0 && (
+                <>
+                  <span className="text-gray-300 dark:text-zinc-600">·</span>
+                  <span className="text-amber-600 dark:text-amber-400 tabular-nums" title="Answers that were discarded and re-asked">
+                    ${totals.wastedCost.toFixed(3)} wasted on {totals.wastedCalls} discarded call{totals.wastedCalls === 1 ? '' : 's'}
+                  </span>
+                </>
               )}
             </div>
           )}
+          {rows.length > 0 && data?.exact === false && (
+            <p className="pt-1 text-[11px] text-gray-400 dark:text-zinc-500">
+              Matched by time window — this run predates per-call labels, so a concurrent run of the same form may appear here.
+            </p>
+          )}
         </DialogHeader>
+
         <div className="flex-1 overflow-auto rounded-md border border-gray-100 dark:border-[#1a1a1a]">
           {isLoading ? (
             <div className="flex h-32 items-center justify-center"><Spinner /></div>
-          ) : !data || data.rows.length === 0 ? (
+          ) : rows.length === 0 ? (
             <EmptyState icon={Inbox} title="No calls" description="No LLM calls recorded for this form." />
+          ) : labelled ? (
+            <table className="w-full text-xs">
+              <thead className="bg-gray-50 dark:bg-[#141414] sticky top-0 z-10">
+                <tr className="text-left uppercase tracking-wide text-gray-500 dark:text-zinc-500">
+                  <th className="px-3 py-2 font-medium">Paper / step</th>
+                  <th className="px-3 py-2 font-medium">Model</th>
+                  <th className="px-3 py-2 font-medium text-right">In</th>
+                  <th className="px-3 py-2 font-medium text-right">Out</th>
+                  <th className="px-3 py-2 font-medium text-right" title="How long the model took to answer">Took</th>
+                  <th className="px-3 py-2 font-medium text-right" title="Tokens written to (✎) and read from (✓) the prompt cache">Cache</th>
+                  <th className="px-3 py-2 font-medium text-right">Cost</th>
+                </tr>
+              </thead>
+              {groups.map((g) => {
+                const isOpen = toggled[g.key] ?? g.calls.length > 1;
+                return (
+                  <tbody key={g.key} className="divide-y divide-gray-100 dark:divide-[#1a1a1a]">
+                    <tr
+                      className="bg-gray-50/60 dark:bg-[#141414]/60 cursor-pointer hover:bg-gray-100/70 dark:hover:bg-[#1a1a1a]"
+                      onClick={() => setToggled((t) => ({ ...t, [g.key]: !isOpen }))}
+                    >
+                      <td className="px-3 py-2" colSpan={2}>
+                        <div className="flex items-center gap-1.5">
+                          {isOpen
+                            ? <ChevronDown className="h-3.5 w-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />
+                            : <ChevronRight className="h-3.5 w-3.5 text-gray-400 dark:text-zinc-500 shrink-0" />}
+                          <span className="font-medium text-gray-800 dark:text-zinc-100 truncate max-w-[280px]" title={g.title}>
+                            {g.title}
+                          </span>
+                          {g.subtitle && (
+                            <span className="font-mono text-[10px] text-gray-400 dark:text-zinc-500 truncate max-w-[160px]" title={g.subtitle}>
+                              {g.subtitle}
+                            </span>
+                          )}
+                          <span className="text-gray-400 dark:text-zinc-500">
+                            · {g.calls.length} call{g.calls.length === 1 ? '' : 's'}
+                          </span>
+                          {g.note && (
+                            <span className="text-gray-500 dark:text-zinc-400 italic">· {g.note}</span>
+                          )}
+                          {g.wastedCalls > 0 && (
+                            <Badge variant="secondary" className="ml-1 text-[10px] text-amber-700 dark:text-amber-400">
+                              ${g.wastedCost.toFixed(3)} wasted
+                            </Badge>
+                          )}
+                        </div>
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-gray-500 dark:text-zinc-400" colSpan={2}>
+                        {formatTokens(g.calls.reduce((s, c) => s + c.total_tokens, 0))} tok
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-gray-500 dark:text-zinc-400">
+                        {g.ms > 0 ? formatDuration(g.ms / 1000) : '—'}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums text-emerald-600 dark:text-emerald-400">
+                        {g.savings > 0 ? `$${g.savings.toFixed(3)}` : ''}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums font-semibold dark:text-white">
+                        ${g.cost.toFixed(4)}
+                      </td>
+                    </tr>
+
+                    {isOpen && g.calls.map((c) => {
+                      const cw = c.cache_creation_input_tokens ?? 0;
+                      const cr = c.cache_read_input_tokens ?? 0;
+                      const stepKey = c.step ?? '';
+                      return (
+                        <tr key={c.id} className={cn('hover:bg-gray-50 dark:hover:bg-[#141414]', c.superseded && 'opacity-70')}>
+                          <td className="px-3 py-1.5">
+                            <div className="flex items-center gap-2 pl-5">
+                              <span className="text-gray-400 dark:text-zinc-500 tabular-nums whitespace-nowrap">
+                                {formatClock(c.timestamp)}
+                              </span>
+                              <span className="dark:text-zinc-200">
+                                {STEP_LABEL[stepKey] ?? c.signature ?? '—'}
+                                {c.n_records ? ` · ${c.n_records} record${c.n_records === 1 ? '' : 's'}` : ''}
+                                {c.transport === 'claude_agent_sdk' && c.num_turns ? ` · ${c.num_turns} turns` : ''}
+                              </span>
+                              {/* On a form with several fields, the step alone is ambiguous:
+                                  a scalar field's call and a table field's first pass both
+                                  read "extract"/"record discovery". */}
+                              {g.multiField && c.field_name && (
+                                <span className="font-mono text-[10px] text-gray-400 dark:text-zinc-500 truncate max-w-[170px]" title={c.field_name}>
+                                  {c.field_name}
+                                </span>
+                              )}
+                              {c.stopped && (
+                                <span className="text-[10px] text-gray-500 dark:text-zinc-400 italic">
+                                  no rows found
+                                </span>
+                              )}
+                              {c.attempts_total && c.attempts_total > 1 && (
+                                <span
+                                  className={cn(
+                                    'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]',
+                                    c.superseded
+                                      ? 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400'
+                                      : 'bg-gray-100 text-gray-500 dark:bg-[#1f1f1f] dark:text-zinc-400'
+                                  )}
+                                  title={c.superseded ? (c.superseded_reason ?? undefined) : 'The attempt whose answer was used'}
+                                >
+                                  <RotateCcw className="h-2.5 w-2.5" />
+                                  try {c.attempt}/{c.attempts_total}
+                                  {c.superseded ? ' · discarded' : ' · kept'}
+                                </span>
+                              )}
+                              {c.superseded && c.superseded_reason && (
+                                <span className="text-[10px] text-amber-700/80 dark:text-amber-400/70 truncate max-w-[260px]">
+                                  {c.superseded_reason}
+                                </span>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-3 py-1.5 font-mono text-gray-400 dark:text-zinc-500">{shortModel(c.model ?? '')}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums dark:text-zinc-300">{c.prompt_tokens.toLocaleString()}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums dark:text-zinc-300">{c.completion_tokens.toLocaleString()}</td>
+                          <td className="px-3 py-1.5 text-right tabular-nums dark:text-zinc-300">
+                            {c.duration_ms ? formatDuration(c.duration_ms / 1000) : '—'}
+                          </td>
+                          <td className="px-3 py-1.5 text-right tabular-nums whitespace-nowrap">
+                            {cr > 0 && <span className="text-emerald-600 dark:text-emerald-400 font-medium">✓{formatTokens(cr)}</span>}
+                            {cr > 0 && cw > 0 && ' '}
+                            {cw > 0 && <span className="text-amber-600 dark:text-amber-400">✎{formatTokens(cw)}</span>}
+                            {cr === 0 && cw === 0 && <span className="text-gray-400 dark:text-zinc-600">—</span>}
+                          </td>
+                          <td className="px-3 py-1.5 text-right tabular-nums dark:text-zinc-300">${c.cost_usd.toFixed(6)}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                );
+              })}
+            </table>
           ) : (
+            // Rows written before per-call labels existed: paper and step are not
+            // recoverable, so show the plain chronological list.
             <table className="w-full text-xs">
               <thead className="bg-gray-50 dark:bg-[#141414] sticky top-0">
                 <tr className="text-left uppercase tracking-wide text-gray-500 dark:text-zinc-500">
                   <th className="px-3 py-2 font-medium">When</th>
                   <th className="px-3 py-2 font-medium">Model</th>
-                  <th className="px-3 py-2 font-medium" title="DSPy signature / output field this call targeted">Signature</th>
+                  <th className="px-3 py-2 font-medium" title="Output field this call targeted">Signature</th>
                   <th className="px-3 py-2 font-medium text-right">In</th>
                   <th className="px-3 py-2 font-medium text-right">Out</th>
                   <th className="px-3 py-2 font-medium text-right">Total</th>
-                  <th className="px-3 py-2 font-medium text-right" title="Tokens written to Anthropic prompt cache (billed at 1.25× input rate)">Cache write</th>
-                  <th className="px-3 py-2 font-medium text-right" title="Tokens read from Anthropic prompt cache (billed at 0.1× input rate)">Cache read</th>
+                  <th className="px-3 py-2 font-medium text-right" title="Tokens written to the prompt cache (1.25× input rate)">Cache write</th>
+                  <th className="px-3 py-2 font-medium text-right" title="Tokens read from the prompt cache (0.1× input rate)">Cache read</th>
                   <th className="px-3 py-2 font-medium text-right">Cost</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-[#1a1a1a]">
-                {data.rows.map((c) => {
+                {rows.map((c) => {
                   const cw = c.cache_creation_input_tokens ?? 0;
                   const cr = c.cache_read_input_tokens ?? 0;
                   return (
@@ -377,11 +663,20 @@ function CallsDrillDialog({
           )}
         </div>
         <div className="text-xs text-gray-500 dark:text-zinc-500 pt-2">
-          {data ? `Showing ${data.rows.length} call${data.rows.length === 1 ? '' : 's'} (newest first, capped at 500).` : ''}
+          {data ? `Showing ${rows.length} call${rows.length === 1 ? '' : 's'}${labelled ? ', grouped by paper in pipeline order' : ' (newest first)'}, capped at 500.` : ''}
         </div>
       </DialogContent>
     </Dialog>
   );
+}
+
+function formatClock(ts: string | null): string {
+  if (!ts) return '—';
+  try {
+    return new Date(ts).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  } catch {
+    return ts;
+  }
 }
 
 function formatTime(ts: string | null): string {
@@ -485,7 +780,10 @@ function formatTokens(n: number): string {
 }
 
 function formatDuration(s: number): string {
-  if (!s || s < 1) return '—';
+  if (!s || s <= 0) return '—';
+  // Sub-10s matters now that individual call durations are shown; rounding a
+  // 0.9s call to "—" would read as "not recorded".
+  if (s < 10) return `${s.toFixed(1)}s`;
   if (s < 60) return `${Math.round(s)}s`;
   const m = Math.floor(s / 60);
   if (m < 60) return `${m}m`;

@@ -3,6 +3,7 @@
 import { useCallback, useEffect } from 'react';
 import dynamic from 'next/dynamic';
 import { cn } from '@/lib/utils';
+import { MetadataSourceEvidence } from './MetadataSourceEvidence';
 
 // react-pdf pulls in pdfjs-dist which needs browser-only APIs (DOMMatrix,
 // DOMRect). Lazy-load on the client to avoid SSR/static-prerender errors.
@@ -36,6 +37,16 @@ export interface SourceEvidenceDrawerProps {
   onNext?: () => void;
   hasPrev?: boolean;
   hasNext?: boolean;
+  /** Whether the document has an ingested PDF to highlight. When false and the
+   *  doc is a metadata import (ctgov/pubmed), the drawer renders the metadata
+   *  evidence view instead of the PDF highlighter. Defaults to true so existing
+   *  PDF-backed call sites are unchanged. */
+  hasPdf?: boolean;
+  /** Document provenance — drives the metadata-view branch and badge. */
+  sourceType?: string | null;
+  /** NCT ID (ctgov) or PMID (pubmed) for the metadata record. */
+  recordId?: string | null;
+  doi?: string | null;
 }
 
 /**
@@ -61,6 +72,10 @@ export function SourceEvidenceDrawer({
   onNext,
   hasPrev,
   hasNext,
+  hasPdf = true,
+  sourceType,
+  recordId,
+  doi,
 }: SourceEvidenceDrawerProps) {
   // Wrap onClose so we blur whatever button is focused inside the drawer
   // BEFORE flipping aria-hidden to true on its ancestor. Otherwise Chrome
@@ -115,18 +130,36 @@ export function SourceEvidenceDrawer({
         {/* Body — PdfHighlightViewer owns the entire chrome now (filename,
             page input, zoom, prev/next, close all live in its header). */}
         <div className="relative flex-1 min-h-0 bg-gray-50 p-3 dark:bg-[#0a0a0a]">
-          <PdfHighlightViewer
-            documentId={documentId}
-            filename={documentFilename ?? undefined}
-            sourceText={sourceText}
-            storedValue={storedValue ?? null}
-            fieldLabel={fieldLabel ?? null}
-            onClose={handleClose}
-            onPrev={onPrev}
-            onNext={onNext}
-            hasPrev={hasPrev}
-            hasNext={hasNext}
-          />
+          {!hasPdf && (sourceType === 'ctgov' || sourceType === 'pubmed') ? (
+            <MetadataSourceEvidence
+              documentId={documentId}
+              filename={documentFilename ?? undefined}
+              sourceText={sourceText}
+              storedValue={storedValue ?? null}
+              fieldLabel={fieldLabel ?? null}
+              source={sourceType === 'pubmed' ? 'pubmed' : 'ctgov'}
+              recordId={recordId ?? null}
+              doi={doi ?? null}
+              onClose={handleClose}
+              onPrev={onPrev}
+              onNext={onNext}
+              hasPrev={hasPrev}
+              hasNext={hasNext}
+            />
+          ) : (
+            <PdfHighlightViewer
+              documentId={documentId}
+              filename={documentFilename ?? undefined}
+              sourceText={sourceText}
+              storedValue={storedValue ?? null}
+              fieldLabel={fieldLabel ?? null}
+              onClose={handleClose}
+              onPrev={onPrev}
+              onNext={onNext}
+              hasPrev={hasPrev}
+              hasNext={hasNext}
+            />
+          )}
         </div>
       </aside>
     </>

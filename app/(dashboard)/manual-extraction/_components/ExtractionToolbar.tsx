@@ -2,6 +2,7 @@
 
 import { ArrowLeft, EyeOff, Sparkles, PanelLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { ROLE_COLORS } from '@/lib/reviewerColors';
 
 export type ExtractionMode = 'blind' | 'ai_assisted';
 
@@ -17,10 +18,12 @@ interface ExtractionToolbarProps {
   reviewerRole?: string | null;
 }
 
+// Role hues from lib/reviewerColors — R2 was emerald, which collides with the
+// app's "done / agreed" green.
 const ROLE_PILL: Record<string, { label: string; cls: string }> = {
-  reviewer_1:  { label: 'R1',  cls: 'text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-400/15' },
-  reviewer_2:  { label: 'R2',  cls: 'text-emerald-600 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-400/15' },
-  adjudicator: { label: 'Adjudicator', cls: 'text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15' },
+  reviewer_1:  { label: 'R1',  cls: ROLE_COLORS.reviewer_1.pill },
+  reviewer_2:  { label: 'R2',  cls: ROLE_COLORS.reviewer_2.pill },
+  adjudicator: { label: 'Adjudicator', cls: ROLE_COLORS.adjudicator.pill },
 };
 
 export function ExtractionToolbar({

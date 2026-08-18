@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="theme-color" content="#f4f4f2">
+<title>Deploying an update · eviStreams</title>
+<!-- Favicon is an inline data: URI on purpose. nginx serves this page while the
+     Next.js upstream is down, so a /icon.svg reference would itself 503. Same
+     rule applies to everything below: zero external requests, no fonts, no JS
+     bundles, one self-contained file.
+     Geometry is public/icon.svg (2.5px/2px round-capped strokes), NOT the
+     logo.tsx mark — that one is drawn for 32px+ and its 1.5px strokes render as
+     a grey smear at favicon size. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg%20xmlns='http://www.w3.org/2000/svg'%20viewBox='0%200%2032%2032'%3E%3Cg%20stroke='%230b0b0c'%20fill='none'%20stroke-linecap='round'%3E%3Cpath%20d='M5%206%20Q8%2011%205%2016%20Q8%2021%205%2026'%20stroke-width='2.5'/%3E%3Cpath%20d='M11%206%20Q8%2011%2011%2016%20Q8%2021%2011%2026'%20stroke-width='2.5'/%3E%3Cline%20x1='5'%20y1='9'%20x2='11'%20y2='9'%20stroke-width='2'/%3E%3Cline%20x1='6'%20y1='16'%20x2='10'%20y2='16'%20stroke-width='2'/%3E%3Cline%20x1='5'%20y1='23'%20x2='11'%20y2='23'%20stroke-width='2'/%3E%3C/g%3E%3Cg%20fill='%230b0b0c'%3E%3Crect%20x='15'%20y='7'%20width='14'%20height='4'%20rx='2'/%3E%3Crect%20x='15'%20y='14'%20width='10'%20height='4'%20rx='2'/%3E%3Crect%20x='15'%20y='21'%20width='12'%20height='4'%20rx='2'/%3E%3C/g%3E%3C/svg%3E">
+<style>
+  /* Palette, type and motion are ported verbatim from the Claude Design source
+     ("Error page refinements" → eviStreams 503.dc.html). The design commits to a
+     single light paper look, so there is deliberately no dark branch here. */
+  :root{
+    --paper:#f4f4f2;
+    --ink:#0b0b0c;
+    --ink-hover:#2a2a2c;
+    --line:#e4e4e0;
+    --body:#5c5c57;
+    --micro:#85857e;
+    --dim:#a3a39c;
+    --amber:#c97e06;
+    --track:#e9e9e5;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--paper); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Helvetica Neue',Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased; -moz-osx-font-smoothing:grayscale;
+  }
+
+  @keyframes evi-up{from{opacity:0;transform:translateY(14px)}to{opacity:1;transform:none}}
+  @keyframes evi-blink{0%,100%{opacity:.25}50%{opacity:1}}
+  @keyframes evi-ring{0%{opacity:.5;transform:scale(1)}100%{opacity:0;transform:scale(2.8)}}
+  @keyframes evi-sweep{0%{transform:translateX(-110%)}100%{transform:translateX(1200%)}}
+  /* 12deg, not the design's 5deg: at 22px a 5deg swing moves the outermost part
+     of the helix 0.63px — sub-pixel, so the mark looked frozen. 12deg gives
+     ~1.5px, which reads without turning into a wobble. */
+  @keyframes evi-rot{0%,100%{transform:rotate(0)}50%{transform:rotate(12deg)}}
+  @keyframes evi-bar{0%,100%{transform:scaleX(.76);opacity:.6}50%{transform:scaleX(1);opacity:1}}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important}}
+
+  .shell{
+    min-height:100vh; display:grid; grid-template-rows:auto 1fr auto;
+    position:relative; overflow:hidden;
+  }
+
+  /* Oversized logo watermark, bleeding off the right edge. */
+  .watermark{
+    position:absolute; right:-160px; top:50%; width:640px; height:640px;
+    transform:translateY(-50%); color:var(--ink); opacity:.035; pointer-events:none;
+  }
+
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    gap:16px; row-gap:10px; flex-wrap:wrap;
+    padding:26px clamp(24px,6vw,64px); border-bottom:1px solid var(--line);
+    position:relative;
+  }
+  .brand{display:flex; align-items:center; gap:9px}
+  .brand svg{display:block; color:var(--ink)}
+  .brand span{font-size:14px; font-weight:600; letter-spacing:-.012em}
+  .helix{transform-origin:8px 16px; animation:evi-rot 3.4s ease-in-out infinite}
+  /* The bars carry most of the visible motion at this size — a width change is
+     legible where a 1.5px rotation barely is. fill-box so each bar scales from
+     its own left edge instead of the viewBox's. */
+  .bar{transform-box:fill-box; transform-origin:left center; animation:evi-bar 2.4s ease-in-out infinite}
+  .bar-2{animation-delay:.35s}
+  .bar-3{animation-delay:.7s}
+
+  .state{display:flex; align-items:center; gap:8px}
+  .beacon{position:relative; width:6px; height:6px; flex:none; display:block}
+  .beacon i{position:absolute; inset:0; border-radius:50%; display:block}
+  .beacon .core{background:var(--amber); animation:evi-blink 1.6s ease-in-out infinite}
+  .beacon .ring{border:1px solid var(--amber); animation:evi-ring 1.6s ease-out infinite}
+  .state span{
+    font-family:var(--mono); font-size:10px; font-weight:500;
+    text-transform:uppercase; letter-spacing:.14em; color:var(--micro);
+  }
+
+  main{
+    display:flex; flex-direction:column; justify-content:center;
+    padding:clamp(40px,7vh,80px) clamp(24px,6vw,64px);
+    max-width:880px; position:relative;
+  }
+  .lede{animation:evi-up .5s cubic-bezier(.2,.8,.2,1) both}
+  h1{
+    margin:0 0 22px; font-size:clamp(38px,6.5vw,58px); font-weight:600;
+    letter-spacing:-.035em; line-height:1.04;
+  }
+  .lede p{
+    margin:0; font-size:16px; line-height:1.7; color:var(--body);
+    text-wrap:pretty; max-width:46ch;
+  }
+  .lede strong{color:var(--ink); font-weight:500}
+
+  .steps{
+    margin:clamp(36px,6vh,56px) 0 0; display:flex; flex-direction:column;
+    max-width:400px; font-family:var(--mono); font-size:12px;
+    animation:evi-up .5s cubic-bezier(.2,.8,.2,1) .12s both;
+  }
+  /* This page is static — it cannot read the live deploy. The caption says so,
+     so the marks below read as the sequence a deploy runs through rather than
+     as a status feed claiming where this particular deploy has got to. */
+  .steps-cap{
+    margin:0 0 2px; font-size:10px; font-weight:500; text-transform:uppercase;
+    letter-spacing:.14em; color:var(--dim);
+  }
+  .step{
+    display:flex; align-items:center; gap:12px; padding:9px 0;
+    border-top:1px solid var(--line);
+  }
+  /* ✓/●/○ are missing from several mono faces (Consolas among them), so name
+     the symbol fonts first; the fixed-width box keeps any fallback in line. */
+  .step .mark{
+    width:14px; flex:none; text-align:center;
+    font-family:'Segoe UI Symbol','Apple Symbols',var(--mono),sans-serif;
+  }
+  .step .label{flex:1}
+  .step .meta{font-size:11px; color:var(--dim)}
+  .step.is-done{color:var(--ink)}
+  .step.is-active{color:var(--amber)}
+  .step.is-queued{color:var(--dim)}
+
+  footer{border-top:1px solid var(--line); position:relative}
+  .footrow{
+    display:flex; align-items:center; justify-content:space-between; gap:16px;
+    padding:18px clamp(24px,6vw,64px);
+  }
+  .footrow small{
+    font-family:var(--mono); font-size:11px; color:var(--micro);
+    font-variant-numeric:tabular-nums; letter-spacing:.02em;
+  }
+  button{
+    font:inherit; font-size:12px; font-weight:600; color:var(--paper);
+    background:var(--ink); border:1px solid var(--ink); border-radius:999px;
+    padding:9px 18px; cursor:pointer; transition:background .13s,transform .13s;
+  }
+  button:hover{background:var(--ink-hover)}
+  button:active{transform:translateY(1px)}
+  button:focus-visible{outline:2px solid var(--ink); outline-offset:3px}
+
+  .sweep{position:absolute; inset:auto 0 0; height:2px; background:var(--track); overflow:hidden}
+  .sweep i{
+    display:block; height:100%; width:9%;
+    background:linear-gradient(90deg,rgba(11,11,12,0),var(--ink),rgba(11,11,12,0));
+    animation:evi-sweep 2.6s cubic-bezier(.45,0,.55,1) infinite;
+  }
+
+  .sr-only{
+    position:absolute; width:1px; height:1px; padding:0; margin:-1px;
+    overflow:hidden; clip:rect(0 0 0 0); white-space:nowrap; border:0;
+  }
+</style>
+<!-- Without JS nothing probes the upstream, and the copy promises this page
+     refreshes itself. A meta refresh keeps that promise for those visitors;
+     it is scoped to <noscript> so it never fights the JS probe below. -->
+<noscript><meta http-equiv="refresh" content="30"></noscript>
+</head>
+<body>
+<div class="shell">
+
+  <svg class="watermark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+    <g stroke="currentColor" fill="none" stroke-linecap="round">
+      <path d="M5 6 Q8 11 5 16 Q8 21 5 26" stroke-width="2.5"/>
+      <path d="M11 6 Q8 11 11 16 Q8 21 11 26" stroke-width="2.5"/>
+      <line x1="5" y1="9"  x2="11" y2="9"  stroke-width="2"/>
+      <line x1="6" y1="16" x2="10" y2="16" stroke-width="2"/>
+      <line x1="5" y1="23" x2="11" y2="23" stroke-width="2"/>
+    </g>
+    <rect x="15" y="7"  width="14" height="4" rx="2" fill="currentColor"/>
+    <rect x="15" y="14" width="10" height="4" rx="2" fill="currentColor"/>
+    <rect x="15" y="21" width="12" height="4" rx="2" fill="currentColor"/>
+  </svg>
+
+  <header>
+    <div class="brand">
+      <!-- Mark is frontend/public/icon.svg, the app's small-size logo. The
+           logo.tsx mark the design referenced has 1.5px strokes and only 4
+           units between its strands, so at 22px they merge into a blob. -->
+      <svg width="22" height="22" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <g class="helix" stroke="currentColor" fill="none" stroke-linecap="round">
+          <path d="M5 6 Q8 11 5 16 Q8 21 5 26" stroke-width="2.5"/>
+          <path d="M11 6 Q8 11 11 16 Q8 21 11 26" stroke-width="2.5"/>
+          <line x1="5" y1="9"  x2="11" y2="9"  stroke-width="2"/>
+          <line x1="6" y1="16" x2="10" y2="16" stroke-width="2"/>
+          <line x1="5" y1="23" x2="11" y2="23" stroke-width="2"/>
+        </g>
+        <rect class="bar bar-1" x="15" y="7"  width="14" height="4" rx="2" fill="currentColor"/>
+        <rect class="bar bar-2" x="15" y="14" width="10" height="4" rx="2" fill="currentColor"/>
+        <rect class="bar bar-3" x="15" y="21" width="12" height="4" rx="2" fill="currentColor"/>
+      </svg>
+      <span>eviStreams</span>
+    </div>
+    <div class="state">
+      <span class="beacon" aria-hidden="true">
+        <i class="core"></i>
+        <i class="ring"></i>
+      </span>
+      <span>Deploy in progress &middot; 503</span>
+    </div>
+  </header>
+
+  <main>
+    <div class="lede">
+      <h1>We&rsquo;re pushing<br>an update</h1>
+      <p>
+        The site <strong>isn&rsquo;t down</strong> &mdash; a new version is going out right now.
+        This usually takes <strong>15&ndash;30 minutes</strong>. Your projects, documents and
+        extractions are all safe, and this page will refresh itself the moment we&rsquo;re back.
+      </p>
+    </div>
+
+    <section class="steps" aria-label="Standard deploy sequence">
+      <p class="steps-cap">Standard deploy sequence</p>
+      <div class="step is-done"><span class="mark">&#10003;</span><span class="label">Build compiled</span><span class="meta">done</span></div>
+      <div class="step is-done"><span class="mark">&#10003;</span><span class="label">Database migrated</span><span class="meta">done</span></div>
+      <div class="step is-active"><span class="mark">&#9679;</span><span class="label">Rolling out new version</span><span class="meta">active</span></div>
+      <div class="step is-queued"><span class="mark">&#9675;</span><span class="label">Health checks</span><span class="meta">queued</span></div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="footrow">
+      <small id="status">Checking automatically&hellip;</small>
+      <button id="now" type="button">Check now</button>
+    </div>
+    <!-- The countdown ticks every second, so it must NOT be a live region — a
+         screen reader would read every tick. Only phase changes land here. -->
+    <p id="announce" class="sr-only" role="status" aria-live="polite"></p>
+    <div class="sweep" aria-hidden="true"><i></i></div>
+  </footer>
+</div>
+
+<script>
+(function () {
+  // The design exposed these as editor props (retrySeconds 15 / autoRetry true).
+  // They are plain constants here — this file has no props to bind.
+  var RETRY_SECONDS = 15;
+  var AUTO_RETRY = true;
+
+  var interval = Math.max(3, RETRY_SECONDS);
+  var left = interval;
+  var busy = false;
+  var status = document.getElementById('status');
+  var announce = document.getElementById('announce');
+  var btn = document.getElementById('now');
+  var phase = '';
+
+  function paint() {
+    var text, next;
+    if (busy === 'back')   { text = 'Back online — reloading…';   next = 'back'; }
+    else if (busy)         { text = 'Checking…';                  next = 'checking'; }
+    else if (!AUTO_RETRY)  { text = 'Automatic checks paused';    next = 'paused'; }
+    else { text = 'Next check in ' + String(left).padStart(2, '0') + 's'; next = 'waiting'; }
+    status.textContent = text;
+    // Announce transitions only, never the per-second countdown.
+    if (next !== phase) {
+      phase = next;
+      announce.textContent = next === 'waiting'
+        ? 'Waiting for the next automatic check.'
+        : text;
+    }
+  }
+
+  // Probe the URL the visitor actually asked for. While nginx is serving this
+  // page the response is 503 (not ok); once Next.js is back it is a 2xx (or a
+  // followed redirect to /login) and we reload straight into the page they
+  // wanted rather than dumping them on the root.
+  function check() {
+    if (busy) return;
+    busy = true;
+    paint();
+    fetch(location.pathname + '?_probe=' + Date.now(), {
+      method: 'HEAD', cache: 'no-store', redirect: 'follow'
+    }).then(function (res) {
+      if (res.ok) { busy = 'back'; paint(); location.reload(); return; }
+      throw new Error('still down');
+    }).catch(function () {
+      busy = false; left = interval; paint();
+    });
+  }
+
+  setInterval(function () {
+    if (busy) return;
+    if (!AUTO_RETRY) return;
+    left -= 1;
+    if (left <= 0) { check(); return; }
+    paint();
+  }, 1000);
+
+  btn.addEventListener('click', function () { left = 0; check(); });
+  paint();
+})();
+</script>
+</body>
+</html>

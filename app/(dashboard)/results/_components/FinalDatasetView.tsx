@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useMemo } from 'react';
+import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useProject } from '@/contexts/ProjectContext';
 import { resultsService, formsService, documentsService } from '@/services';
@@ -108,6 +108,40 @@ export function FinalDatasetView() {
     return Array.from(fields).sort();
   }, [grouped]);
 
+  // Column reorder (Document column is fixed; only field columns can move)
+  const colOrderKey = formId ? `final-dataset-col-order:${formId}` : null;
+  const [columnOrder, setColumnOrder] = useState<string[]>([]);
+  useEffect(() => {
+    if (!colOrderKey) { setColumnOrder([]); return; }
+    try {
+      const raw = localStorage.getItem(colOrderKey);
+      setColumnOrder(raw ? JSON.parse(raw) : []);
+    } catch { setColumnOrder([]); }
+  }, [colOrderKey]);
+  useEffect(() => {
+    if (!colOrderKey) return;
+    try { localStorage.setItem(colOrderKey, JSON.stringify(columnOrder)); } catch {}
+  }, [columnOrder, colOrderKey]);
+  const draggedColRef = useRef<string | null>(null);
+  const [dragOverCol, setDragOverCol] = useState<string | null>(null);
+  const moveColumn = useCallback((dataCols: string[], dragged: string, target: string) => {
+    if (dragged === target) return;
+    const next = [...dataCols];
+    const from = next.indexOf(dragged);
+    const to = next.indexOf(target);
+    if (from === -1 || to === -1) return;
+    next.splice(from, 1);
+    next.splice(to, 0, dragged);
+    setColumnOrder(next);
+  }, []);
+  const orderedFields = useMemo(() => {
+    if (allFields.length === 0) return allFields;
+    const fieldSet = new Set(allFields);
+    const userOrdered = columnOrder.filter(f => fieldSet.has(f));
+    const remaining = allFields.filter(f => !userOrdered.includes(f));
+    return [...userOrdered, ...remaining];
+  }, [allFields, columnOrder]);
+
   // Resolve value for a document + field based on source priority
   const resolveValue = (docId: string, field: string): string => {
     const types = grouped[docId];
@@ -150,11 +184,12 @@ export function FinalDatasetView() {
     if (rows.length === 0) return;
 
     if (format === 'csv') {
-      const header = ['Document', ...allFields];
+      const header = ['Ref ID', 'Document', ...orderedFields];
       const csvRows = rows.map(docId => {
         const filename = docMap[docId]?.filename || docId;
-        const values = allFields.map(f => resolveValue(docId, f));
-        return [filename, ...values].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',');
+        const refId = docMap[docId]?.ref_id ?? '';
+        const values = orderedFields.map(f => resolveValue(docId, f));
+        return [refId, filename, ...values].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',');
       });
       const csv = [header.map(h => `"${h}"`).join(','), ...csvRows].join('\n');
       const blob = new Blob([csv], { type: 'text/csv' });
@@ -166,8 +201,8 @@ export function FinalDatasetView() {
       URL.revokeObjectURL(url);
     } else {
       const data = rows.map(docId => {
-        const obj: Record<string, any> = { document: docMap[docId]?.filename || docId };
-        allFields.forEach(f => { obj[f] = resolveValue(docId, f); });
+        const obj: Record<string, any> = { ref_id: docMap[docId]?.ref_id ?? null, document: docMap[docId]?.filename || docId };
+        orderedFields.forEach(f => { obj[f] = resolveValue(docId, f); });
         return obj;
       });
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -318,22 +353,49 @@ export function FinalDatasetView() {
                       {allSelected && <Check className="w-3 h-3 text-white dark:text-gray-900" />}
                     </button>
                   </th>
+                  {/* Ref ID column */}
+                  <th className="px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400 dark:text-zinc-500 whitespace-nowrap">
+                    Ref ID
+                  </th>
                   {/* Document column */}
                   <th className="px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400 dark:text-zinc-500 sticky left-0 bg-gray-50/60 dark:bg-[#0a0a0a] min-w-[180px]">
                     Document
                   </th>
                   {/* Field columns */}
-                  {allFields.map(field => (
-                    <th key={field} className="px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400 dark:text-zinc-500 min-w-[140px] whitespace-nowrap">
-                      {field.replace(/_/g, ' ')}
-                    </th>
-                  ))}
+                  {orderedFields.map(field => {
+                    const isDragOver = dragOverCol === field;
+                    return (
+                      <th
+                        key={field}
+                        draggable
+                        onDragStart={() => { draggedColRef.current = field; }}
+                        onDragOver={(e) => { e.preventDefault(); if (dragOverCol !== field) setDragOverCol(field); }}
+                        onDragLeave={() => { if (dragOverCol === field) setDragOverCol(null); }}
+                        onDrop={(e) => {
+                          e.preventDefault();
+                          const dragged = draggedColRef.current;
+                          draggedColRef.current = null;
+                          setDragOverCol(null);
+                          if (dragged) moveColumn(orderedFields, dragged, field);
+                        }}
+                        onDragEnd={() => { draggedColRef.current = null; setDragOverCol(null); }}
+                        title="Drag to reorder"
+                        className={cn(
+                          'px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400 dark:text-zinc-500 min-w-[140px] whitespace-nowrap select-none cursor-grab active:cursor-grabbing hover:text-gray-600 dark:hover:text-zinc-300',
+                          isDragOver && 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400'
+                        )}
+                      >
+                        {field.replace(/_/g, ' ')}
+                      </th>
+                    );
+                  })}
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100 dark:divide-[#1f1f1f]">
                 {filteredDocIds.map(docId => {
                   const checked = selectedRows.has(docId);
                   const filename = docMap[docId]?.filename || docId.slice(0, 8);
+                  const refId = docMap[docId]?.ref_id;
                   return (
                     <tr key={docId} className={cn('transition-colors', checked ? 'bg-blue-50/50 dark:bg-blue-900/10' : 'hover:bg-gray-50/50 dark:hover:bg-[#0a0a0a]')}>
                       <td className="px-3 py-2.5">
@@ -349,10 +411,13 @@ export function FinalDatasetView() {
                           {checked && <Check className="w-3 h-3 text-white dark:text-gray-900" />}
                         </button>
                       </td>
+                      <td className="px-3 py-2.5 text-xs font-mono text-gray-400 dark:text-zinc-500 whitespace-nowrap">
+                        {refId != null ? String(refId) : ''}
+                      </td>
                       <td className="px-3 py-2.5 text-xs font-medium text-gray-800 dark:text-zinc-300 sticky left-0 bg-white dark:bg-[#111111] truncate max-w-[220px]" title={filename}>
                         {filename.replace(/\.pdf$/i, '')}
                       </td>
-                      {allFields.map(field => {
+                      {orderedFields.map(field => {
                         const val = resolveValue(docId, field);
                         const cellKey = `${docId}:${field}`;
                         const isExpanded = expandedCells.has(cellKey);

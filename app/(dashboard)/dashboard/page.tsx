@@ -10,7 +10,6 @@ import { extractionsService } from '@/services/extractions.service';
 import { useToast } from '@/hooks/use-toast';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 import Link from 'next/link';
-import { statusColor } from '@/lib/colors';
 import { cn } from '@/lib/utils';
 
 // ── Theme tokens ──────────────────────────────────────────────────────
@@ -36,6 +35,9 @@ const makeTokens = (d: boolean) => ({
   cardShadow: d ? 'none' : '0 1px 4px rgba(0,0,0,0.06), 0 6px 24px rgba(0,0,0,0.08)',
 });
 
+// A tooltip is only useful if it reveals something beyond the visible placeholder text.
+const hasExtraInfo = (s: string) => s !== '—' && s !== 'Unknown' && !/^\d+\s+docs$/.test(s);
+
 // ── Hooks ─────────────────────────────────────────────────────────────
 const useCountUp = (target: number, duration = 900) => {
   const [value, setValue] = useState(0);
@@ -59,62 +61,6 @@ const useCountUp = (target: number, duration = 900) => {
 const fmtFormStatus = (s: string) => {
   const map: Record<string, string> = { active: 'Active', generating: 'Generating', awaiting_review: 'Review', regenerating: 'Generating', draft: 'Draft', failed: 'Failed' };
   return map[s] || s;
-};
-
-// ── Status Pill ───────────────────────────────────────────────────────
-const Pill = ({ status, isDark }: { status: string; isDark: boolean }) => {
-  const color = statusColor[status] || '#888';
-  const bg = isDark ? `${color}18` : status === 'Active' || status === 'done' || status === 'Completed' ? '#f0fdf4'
-    : status === 'running' || status === 'Generating' ? '#eff6ff'
-    : status === 'failed' || status === 'Failed' ? '#fef2f2' : '#f5f5f5';
-  return (
-    <span style={{ color, background: bg, fontSize: 10, fontWeight: 600, padding: '2px 8px', borderRadius: 999, whiteSpace: 'nowrap' }}>
-      {status}
-    </span>
-  );
-};
-
-// ── Panel Section (slide-over) ────────────────────────────────────────
-const PanelSection = ({ icon, iconColor, title, items, renderItem, T, isDark }: {
-  icon: React.ReactNode; iconColor: string; title: string; items: any[]; isDark: boolean;
-  renderItem: (item: any, i: number, hasBorder: boolean) => React.ReactElement;
-  T: ReturnType<typeof makeTokens>;
-}) => {
-  const [collapsed, setCollapsed] = useState(false);
-  const [search, setSearch] = useState('');
-  const [showCount, setShowCount] = useState(8);
-
-  const filtered = items.filter((i) => !search || i.name.toLowerCase().includes(search.toLowerCase()));
-  const visible = filtered.slice(0, showCount);
-  const hasMore = filtered.length > showCount;
-
-  return (
-    <div style={{ marginBottom: 20 }}>
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 8, borderBottom: `1px solid ${T.divider}`, marginBottom: 6 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }} onClick={() => setCollapsed((c) => !c)}>
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke={iconColor} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">{icon}</svg>
-          <span style={{ fontSize: 11, fontWeight: 600, color: T.text }}>{title}</span>
-          <span style={{ fontSize: 10, color: T.textMuted }}>{items.length}</span>
-        </div>
-        {items.length > 5 && (
-          <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search..."
-            style={{ fontSize: 11, color: T.text, background: T.glassBg, border: `1px solid ${T.glassBorder}`, borderRadius: 6, padding: '2px 8px', outline: 'none', width: 120 }} />
-        )}
-      </div>
-      {!collapsed && (
-        <div style={{ border: `1px solid ${T.glassBorder}`, borderRadius: 8, overflow: 'hidden', background: T.glassBg }}>
-          {visible.length === 0 && <div style={{ padding: 12, textAlign: 'center', fontSize: 11, color: T.textMuted }}>No matches</div>}
-          {visible.map((item, i) => renderItem(item, i, i < visible.length - 1))}
-          {(hasMore || showCount > 8) && (
-            <div style={{ display: 'flex', gap: 12, justifyContent: 'center', padding: '6px 0', borderTop: `1px solid ${T.divider}` }}>
-              {hasMore && <button onClick={() => setShowCount((c) => c + 10)} style={{ fontSize: 11, color: T.accentBlue, background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>Show more</button>}
-              {showCount > 8 && <button onClick={() => setShowCount(8)} style={{ fontSize: 11, color: T.textMuted, background: 'none', border: 'none', cursor: 'pointer', fontFamily: 'inherit' }}>Collapse</button>}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
 };
 
 // ── Main Dashboard ────────────────────────────────────────────────────
@@ -143,10 +89,6 @@ export default function DashboardPage() {
   const [cmdIndex, setCmdIndex] = useState(0);
   const cmdInputRef = useRef<HTMLInputElement>(null);
   const cmdListRef = useRef<HTMLDivElement>(null);
-
-  // Slide-over panel
-  const [selectedProject, setSelectedProjectPanel] = useState<any>(null);
-  const [panelClosing, setPanelClosing] = useState(false);
 
   const [hoveredStat, setHoveredStat] = useState<number | null>(null);
   const [hoveredRow, setHoveredRow] = useState<number | null>(null);
@@ -217,7 +159,7 @@ export default function DashboardPage() {
     { label: 'RESULTS',     value: cResults,      color: T.accentGreen },
   ];
 
-  const gridCols = '8px 1fr 1fr 150px 72px 80px';
+  const gridCols = '8px 180px 1fr 150px 72px 80px';
 
   // Command palette
   const allCmdItems = [
@@ -227,28 +169,20 @@ export default function DashboardPage() {
     { label: 'View all results', icon: '◎', category: 'Navigate', href: '/results' },
     { label: 'Forms library', icon: '☰', category: 'Navigate', href: '/forms' },
     { label: 'Jobs monitor', icon: '↻', category: 'Navigate', href: '/jobs' },
-    { label: 'Export all data as CSV', icon: '↓', category: 'Export', href: '/results' },
-    { label: 'Export all data as JSON', icon: '↓', category: 'Export', href: '/results' },
   ];
   const cmdItems = allCmdItems.filter((i) => !cmdQuery || i.label.toLowerCase().includes(cmdQuery.toLowerCase()));
   const cmdCategories = [...new Set(cmdItems.map((i) => i.category))];
-
-  const closePanel = useCallback(() => {
-    if (!selectedProject) return;
-    setPanelClosing(true);
-    setTimeout(() => { setSelectedProjectPanel(null); setPanelClosing(false); }, 200);
-  }, [selectedProject]);
 
   useEffect(() => { setCmdIndex(0); }, [cmdQuery]);
   useEffect(() => { if (cmdOpen) cmdInputRef.current?.focus(); }, [cmdOpen]);
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 'k') { e.preventDefault(); setCmdOpen(true); setCmdQuery(''); setCmdIndex(0); }
-      if (e.key === 'Escape') { setCmdOpen(false); closePanel(); }
+      if (e.key === 'Escape') { setCmdOpen(false); }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [closePanel]);
+  }, []);
   const handleCmdKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'ArrowDown') { e.preventDefault(); setCmdIndex((i) => Math.min(i + 1, cmdItems.length - 1)); }
     if (e.key === 'ArrowUp') { e.preventDefault(); setCmdIndex((i) => Math.max(i - 1, 0)); }
@@ -283,10 +217,13 @@ export default function DashboardPage() {
 
       {isDark && <div style={{ position: 'fixed', inset: 0, background: T.pageBg, zIndex: -1, pointerEvents: 'none' }} />}
       <div style={{ minHeight: '100%', paddingBottom: 48 }}>
-        <div style={{ maxWidth: 960, margin: '0 auto', padding: '0 8px' }}>
+        <div style={{ maxWidth: 1200, margin: '0 auto', padding: '0 8px' }}>
 
           {/* ── Header ──────────────────────────────────────────── */}
-          <div style={{ padding: '24px 4px 20px', animation: 'card-in 0.3s ease both', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', zIndex: 50 }}>
+          {/* zIndex must stay BELOW the navbar (z-40) or this row paints over the
+              navbar's account dropdown. 20 is still above the stats card below,
+              which is auto/static — that's all this needs to outrank. */}
+          <div style={{ padding: '24px 4px 20px', animation: 'card-in 0.3s ease both', display: 'flex', alignItems: 'center', justifyContent: 'space-between', position: 'relative', zIndex: 20 }}>
 
             {/* Project dropdown */}
             <div ref={projectDropRef} style={{ position: 'relative' }}>
@@ -519,8 +456,8 @@ export default function DashboardPage() {
                       animation: `row-in 0.25s ease ${i * 50}ms both`,
                     }}>
                     <div style={{ width: 8, height: 8, borderRadius: '50%', background: dotColor, animation: doc.status === 'running' ? 'live-pulse 1.5s ease infinite' : 'none' }} />
-                    <div style={{ fontSize: 13, fontWeight: 500, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.name}</div>
-                    <div style={{ fontSize: 12, color: T.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.form}</div>
+                    <div title={hasExtraInfo(doc.name) ? doc.name : undefined} style={{ fontSize: 13, fontWeight: 500, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.name}</div>
+                    <div title={hasExtraInfo(doc.form) ? doc.form : undefined} style={{ fontSize: 12, color: T.textMuted, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{doc.form}</div>
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                       <div style={{ flex: 1, height: 4, borderRadius: 2, background: T.trackBg, overflow: 'hidden' }}>
                         {doc.status === 'running'
@@ -675,60 +612,6 @@ export default function DashboardPage() {
 
         </div>
       </div>
-
-      {/* ── Project detail slide-over ────────────────────────── */}
-      {selectedProject && (
-        <div onClick={closePanel}
-          className={cn('fixed inset-0 flex items-stretch justify-end z-[90]', panelClosing ? 'animate-dashboard-overlayOut' : 'animate-dashboard-overlayIn')}
-          style={{ background: 'rgba(0,0,0,0.4)', backdropFilter: 'blur(4px)' }}>
-          <div onClick={(e) => e.stopPropagation()}
-            className={cn(panelClosing ? 'animate-dashboard-panelOut' : 'animate-dashboard-panelIn')}
-            style={{ width: 520, background: T.panelBg, borderLeft: `1px solid ${T.glassBorder}`, display: 'flex', flexDirection: 'column' }}>
-            <div style={{ padding: '20px 24px 16px', borderBottom: `1px solid ${T.divider}` }}>
-              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
-                <div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={T.textMuted} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="3" width="20" height="18" rx="2" /><path d="M8 3v18" /></svg>
-                    <h2 style={{ fontSize: 16, fontWeight: 700, color: T.text, margin: 0 }}>{selectedProject.name}</h2>
-                    {selectedProject.active && <Pill status="Active" isDark={isDark} />}
-                  </div>
-                  <div style={{ fontSize: 12, color: T.textMuted, paddingLeft: 23 }}>{selectedProject.desc}</div>
-                  <div style={{ display: 'flex', gap: 16, paddingLeft: 23, marginTop: 8 }}>
-                    <span style={{ fontSize: 12, color: T.textMuted }}><span style={{ fontWeight: 600, color: T.text }}>{selectedProject.forms.length}</span> forms</span>
-                    <span style={{ fontSize: 12, color: T.textMuted }}><span style={{ fontWeight: 600, color: T.text }}>{selectedProject.documents.length}</span> documents</span>
-                    <span style={{ fontSize: 12, color: T.textMuted }}>{selectedProject.created}</span>
-                  </div>
-                </div>
-                <button onClick={closePanel} style={{ fontSize: 16, color: T.textMuted, background: 'none', border: 'none', cursor: 'pointer', padding: '2px 8px', borderRadius: 6, fontFamily: 'inherit' }}>✕</button>
-              </div>
-            </div>
-            <div style={{ flex: 1, overflowY: 'auto', padding: '16px 24px 24px' }}>
-              <PanelSection
-                icon={<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />}
-                iconColor={T.accentBlue} title="Forms" items={selectedProject.forms}
-                T={T} isDark={isDark}
-                renderItem={(form, i, hasBorder) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderBottom: hasBorder ? `1px solid ${T.divider}` : 'none', cursor: 'pointer' }}>
-                    <span style={{ fontSize: 12, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, marginRight: 10 }}>{form.name}</span>
-                    <Pill status={form.status} isDark={isDark} />
-                  </div>
-                )}
-              />
-              <PanelSection
-                icon={<path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />}
-                iconColor={T.accentAmber} title="Documents" items={selectedProject.documents}
-                T={T} isDark={isDark}
-                renderItem={(doc, i, hasBorder) => (
-                  <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderBottom: hasBorder ? `1px solid ${T.divider}` : 'none', cursor: 'pointer' }}>
-                    <span style={{ fontSize: 12, color: T.text, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', flex: 1, marginRight: 10 }}>{doc.name}</span>
-                    <Pill status={doc.status} isDark={isDark} />
-                  </div>
-                )}
-              />
-            </div>
-          </div>
-        </div>
-      )}
 
       {/* ── Command palette ──────────────────────────────────── */}
       {cmdOpen && (

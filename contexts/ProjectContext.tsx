@@ -1,6 +1,6 @@
 'use client';
 
-import React, { createContext, useContext, useState, useEffect, useCallback, useRef, ReactNode } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback, useMemo, useRef, ReactNode } from 'react';
 import { projectsService } from '@/services';
 import { projectMembersService } from '@/services/project-members.service';
 import { Project as APIProject, CreateProjectRequest, MyPermissionsResponse } from '@/types/api';
@@ -12,7 +12,13 @@ import { useAuth } from '@/contexts/AuthContext';
 export type Project = APIProject;
 
 interface ProjectContextType {
+  /** Active projects only. Every existing consumer reads this, so archived
+   *  projects disappear from the selector and all dropdowns automatically. */
   projects: Project[];
+  /** Active + archived. Use this when looking a project up by id (e.g. a
+   *  project detail page), so archived projects still resolve. */
+  allProjects: Project[];
+  archivedProjects: Project[];
   selectedProject: Project | null;
   loading: boolean;
   error: string | null;
@@ -20,12 +26,16 @@ interface ProjectContextType {
   createProject: (name: string, description?: string) => Promise<Project>;
   updateProject: (id: string, updates: Partial<CreateProjectRequest>) => Promise<void>;
   deleteProject: (id: string) => Promise<void>;
+  archiveProject: (id: string) => Promise<void>;
+  unarchiveProject: (id: string) => Promise<void>;
   refreshProjects: () => Promise<void>;
   myPermissions: MyPermissionsResponse | null;
   isOwner: boolean;
 }
 
 const ProjectContext = createContext<ProjectContextType | undefined>(undefined);
+
+const isArchived = (p: Project) => !!p.archived_at;
 
 function safeGetItem(key: string): string | null {
   if (typeof window === 'undefined') return null;
@@ -63,13 +73,16 @@ function getInitialProjects(): Project[] {
   return [];
 }
 
+// Only ever select an ACTIVE project — otherwise a project archived in a
+// previous session could be restored into the selector from the cache.
 function getInitialSelectedProject(projects: Project[]): Project | null {
+  const active = projects.filter((p) => !isArchived(p));
   const storedId = safeGetItem('selectedProjectId');
-  if (storedId && projects.length > 0) {
-    const found = projects.find((p) => p.id === storedId);
+  if (storedId && active.length > 0) {
+    const found = active.find((p) => p.id === storedId);
     if (found) return found;
   }
-  return projects.length > 0 ? projects[0] : null;
+  return active.length > 0 ? active[0] : null;
 }
 
 export function ProjectProvider({ children }: { children: ReactNode }) {
@@ -81,13 +94,34 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     const s = getInitialSelectedProject(p);
     return { initialProjects: p, initialSelected: s };
   });
-  const [projects, setProjects] = useState<Project[]>(initialProjects);
+  // Holds active AND archived; the exposed `projects` is the active subset.
+  const [allProjects, setAllProjects] = useState<Project[]>(initialProjects);
   const [selectedProject, setSelectedProjectState] = useState<Project | null>(initialSelected);
   const [loading, setLoading] = useState(!initialSelected);
   const [error, setError] = useState<string | null>(null);
   const [myPermissions, setMyPermissions] = useState<MyPermissionsResponse | null>(null);
   const [isOwner, setIsOwner] = useState(false);
   const refreshInFlight = useRef(false);
+
+  // Sort defensively rather than trusting arrival order: the localStorage cache
+  // can hold an older ordering, and optimistic updates drift (createProject
+  // prepends, archive/update map in place). .filter() already copies, so the
+  // in-place .sort() never mutates allProjects.
+  const byNewest = (a: string | null | undefined, b: string | null | undefined) =>
+    new Date(b || 0).getTime() - new Date(a || 0).getTime();
+
+  const projects = useMemo(
+    () => allProjects.filter((p) => !isArchived(p))
+      .sort((a, b) => byNewest(a.created_at, b.created_at)),
+    [allProjects]
+  );
+  // Archived list is ordered most-recently-archived first — more useful than
+  // creation order when you're looking for something you just archived.
+  const archivedProjects = useMemo(
+    () => allProjects.filter(isArchived)
+      .sort((a, b) => byNewest(a.archived_at, b.archived_at)),
+    [allProjects]
+  );
 
   const refreshProjects = useCallback(async () => {
     if (refreshInFlight.current) return;
@@ -96,8 +130,10 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     if (!safeGetItem('projects')) setLoading(true);
     setError(null);
     try {
-      const data = await projectsService.getAll();
-      setProjects(data);
+      // Fetch archived too, then filter locally — the Projects page needs the
+      // archived list, and everything else reads the filtered `projects`.
+      const data = await projectsService.getAll(true);
+      setAllProjects(data);
       safeSetItem('projects', JSON.stringify(data));
     } catch (err: unknown) {
       console.error('Failed to fetch projects:', err);
@@ -107,7 +143,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
       const stored = safeGetItem('projects');
       if (stored) {
         try {
-          setProjects(JSON.parse(stored));
+          setAllProjects(JSON.parse(stored));
         } catch (e) {
           console.error('Failed to parse stored projects:', e);
         }
@@ -129,7 +165,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, [authLoading, refreshProjects]);
 
-  // Restore selected project from localStorage
+  // Restore selected project from localStorage. Depends on the ACTIVE list, so
+  // an archived project can never be auto-selected.
   useEffect(() => {
     if (projects.length > 0) {
       const storedId = safeGetItem('selectedProjectId');
@@ -188,6 +225,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
           can_qa_review: false,
           can_manage_assignments: false,
           can_manage_members: false,
+          can_manage_project: false,
         };
         setMyPermissions(fallback);
         setIsOwner(false);
@@ -199,7 +237,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
     try {
       const newProject = await projectsService.create(request);
-      setProjects((prev) => {
+      setAllProjects((prev) => {
         const updated = [newProject, ...prev];
         safeSetItem('projects', JSON.stringify(updated));
         return updated;
@@ -219,7 +257,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     try {
       const updated = await projectsService.update(id, updates);
 
-      setProjects((prev) => {
+      setAllProjects((prev) => {
         const newProjects = prev.map((p) => (p.id === id ? updated : p));
         safeSetItem('projects', JSON.stringify(newProjects));
         return newProjects;
@@ -236,7 +274,7 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     try {
       await projectsService.delete(id);
 
-      setProjects((prev) => {
+      setAllProjects((prev) => {
         const remaining = prev.filter((p) => p.id !== id);
         safeSetItem('projects', JSON.stringify(remaining));
         return remaining;
@@ -255,6 +293,40 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  // Archive/restore keep the row in `allProjects` (so its detail page still
+  // resolves) and let the `projects` memo move it in or out of the active list.
+  const setArchived = useCallback(async (id: string, archived: boolean): Promise<void> => {
+    try {
+      const updated = archived
+        ? await projectsService.archive(id)
+        : await projectsService.unarchive(id);
+
+      setAllProjects((prev) => {
+        const next = prev.map((p) => (p.id === id ? updated : p));
+        safeSetItem('projects', JSON.stringify(next));
+        return next;
+      });
+
+      if (archived) {
+        // Archived projects are hidden, so drop the selection if it was this
+        // one; the effect on `projects` picks the next active project.
+        setSelectedProjectState((prev) => {
+          if (prev?.id === id) {
+            safeRemoveItem('selectedProjectId');
+            return null;
+          }
+          return prev;
+        });
+      }
+    } catch (err: unknown) {
+      console.error(`Failed to ${archived ? 'archive' : 'restore'} project:`, err);
+      throw new Error(getErrorMessage(err, `Failed to ${archived ? 'archive' : 'restore'} project`));
+    }
+  }, []);
+
+  const archiveProject = useCallback((id: string) => setArchived(id, true), [setArchived]);
+  const unarchiveProject = useCallback((id: string) => setArchived(id, false), [setArchived]);
+
   const setSelectedProject = useCallback((project: Project | null) => {
     setSelectedProjectState(project);
     if (project) {
@@ -266,6 +338,8 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
 
   const value = React.useMemo(() => ({
     projects,
+    allProjects,
+    archivedProjects,
     selectedProject,
     loading,
     error,
@@ -273,10 +347,12 @@ export function ProjectProvider({ children }: { children: ReactNode }) {
     createProject,
     updateProject,
     deleteProject,
+    archiveProject,
+    unarchiveProject,
     refreshProjects,
     myPermissions,
     isOwner,
-  }), [projects, selectedProject, loading, error, setSelectedProject, createProject, updateProject, deleteProject, refreshProjects, myPermissions, isOwner]);
+  }), [projects, allProjects, archivedProjects, selectedProject, loading, error, setSelectedProject, createProject, updateProject, deleteProject, archiveProject, unarchiveProject, refreshProjects, myPermissions, isOwner]);
 
   return (
     <ProjectContext.Provider value={value}>

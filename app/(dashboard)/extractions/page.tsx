@@ -224,8 +224,14 @@ export default function ExtractionsPage() {
       ...(form.extracted_document_ids || []),
       ...(form.failed_document_ids || []),
     ]);
+    // Same rule as RunExtractionDialog and the worker: accepted thin-evidence
+    // documents are eligible, so "run the rest" must not silently skip them.
     const allDocIds = allDocuments
-      .filter((d) => d.processing_status === 'completed')
+      .filter(
+        (d) =>
+          d.processing_status === 'completed' ||
+          (d.processing_status === 'metadata_only' && d.metadata_extraction_approved)
+      )
       .map((d) => d.id);
     const remainingIds = allDocIds.filter((id) => !doneIds.has(id));
 

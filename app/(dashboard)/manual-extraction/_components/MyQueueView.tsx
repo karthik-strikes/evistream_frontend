@@ -4,6 +4,7 @@ import { useMemo, useState } from 'react';
 import { ChevronRight, FileText, ClipboardList, Scale, Layers, Loader2, Check, CircleDot, Search } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Document, Form, ReviewAssignment } from '@/types/api';
+import { ROLE_COLORS } from '@/lib/reviewerColors';
 
 export type FormState = 'done' | 'partial' | 'todo';
 
@@ -21,10 +22,12 @@ interface MyQueueViewProps {
   hasBrowseAll: boolean;
 }
 
+// Role hues come from lib/reviewerColors so R2 is the same purple here as on the
+// consensus screen. It used to be emerald, which is also the app's "done" colour.
 const ROLE_META: Record<string, { label: string; pill: string; icon: typeof ClipboardList; section: string }> = {
-  reviewer_1:  { label: 'R1',  pill: 'text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-400/15',         icon: ClipboardList, section: 'R1 work' },
-  reviewer_2:  { label: 'R2',  pill: 'text-emerald-600 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-400/15', icon: ClipboardList, section: 'R2 work' },
-  adjudicator: { label: 'Adjudicator', pill: 'text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15',    icon: Scale,        section: 'Adjudication waiting' },
+  reviewer_1:  { label: 'R1',  pill: ROLE_COLORS.reviewer_1.pill,  icon: ClipboardList, section: 'R1 work' },
+  reviewer_2:  { label: 'R2',  pill: ROLE_COLORS.reviewer_2.pill,  icon: ClipboardList, section: 'R2 work' },
+  adjudicator: { label: 'Adjudicator', pill: ROLE_COLORS.adjudicator.pill, icon: Scale, section: 'Adjudication waiting' },
 };
 
 const STATUS_PILL: Record<string, string> = {

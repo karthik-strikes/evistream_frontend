@@ -4,7 +4,7 @@ import type {
   PilotState, PilotStartResponse, PilotFeedbackResponse, PilotCompleteResponse,
   PilotFieldFeedback,
   ReviewNote,
-  FieldEditUpdate, FieldEditsResponse, FieldPromptsResponse,
+  FieldEditUpdate, FieldEditsResponse, FieldPromptsResponse, TableExtractionMode,
 } from '@/types/api';
 
 export const formsService = {
@@ -98,10 +98,23 @@ export const formsService = {
     return apiClient.delete<void>(`/api/v1/forms/${formId}/pilot`);
   },
 
-  async updateFieldEdits(formId: string, fieldUpdates: FieldEditUpdate[]): Promise<FieldEditsResponse> {
+  /**
+   * Patch per-field calibration and/or the form-level table extraction mode.
+   * Both ride this endpoint so they share one atomic schema_def + fields +
+   * metadata write and its OCC guard. Either argument may be empty/omitted,
+   * but not both — the API rejects a no-op request.
+   */
+  async updateFieldEdits(
+    formId: string,
+    fieldUpdates: FieldEditUpdate[],
+    tableExtractionMode?: TableExtractionMode,
+  ): Promise<FieldEditsResponse> {
     return apiClient.patch<FieldEditsResponse>(
       `/api/v1/forms/${formId}/fields`,
-      { field_updates: fieldUpdates },
+      {
+        field_updates: fieldUpdates,
+        ...(tableExtractionMode ? { table_extraction_mode: tableExtractionMode } : {}),
+      },
     );
   },
 
@@ -129,7 +142,7 @@ export const formsService = {
     return apiClient.post(`/api/v1/forms/${formId}/fields`, payload);
   },
 
-  async removeField(formId: string, fieldName: string): Promise<{ form_id: string; field_name: string }> {
+  async removeField(formId: string, fieldName: string): Promise<{ form_id: string; field_name: string; removed_signature: string | null; removed_stage: number | null }> {
     return apiClient.delete(`/api/v1/forms/${formId}/fields/${encodeURIComponent(fieldName)}`);
   },
 

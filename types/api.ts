@@ -86,6 +86,16 @@ export interface Project {
   user_id?: string;
   created_at: string;
   updated_at: string;
+  review_settings?: { blinding: 'none' | 'partial' | 'full'; hide_ai_results: boolean } | null;
+  /** Free text describing what the review is about. Injected into every
+   *  extraction prompt at runtime as CONTEXT — it helps the model pick the
+   *  right arm/population/timepoint. It never filters rows. */
+  review_scope?: string | null;
+  my_role?: 'owner' | 'manager' | 'member' | 'viewer' | 'admin';
+  /** Soft archive. Null/undefined = active. Archived projects are hidden from
+   *  the selector and every dropdown, and are read-only until restored. */
+  archived_at?: string | null;
+  archived_by?: string | null;
 }
 
 export interface CreateProjectRequest {
@@ -97,14 +107,145 @@ export interface CreateProjectRequest {
 export interface Document {
   id: string;
   project_id: string;
+  ref_id: number;
   filename: string;
   unique_filename: string | null;
   s3_pdf_path: string | null;
   s3_markdown_path: string | null;
-  processing_status: 'pending' | 'processing' | 'completed' | 'failed';
+  /** `metadata_only` = readable but THIN evidence (abstract-only PubMed, a
+   *  registration-only trial). Held out of extraction until accepted. */
+  processing_status: 'pending' | 'processing' | 'completed' | 'failed' | 'needs_pdf' | 'metadata_only';
   processing_error: string | null;
+  doi: string | null;
+  doi_source: 'metadata' | 'text' | 'crossref' | 'none' | null;
+  title: string | null;
   labels: string[];
   created_at: string;
+  // ClinicalTrials.gov / PubMed import (optional — absent/undefined on normal uploads)
+  source_type?: 'upload' | 'ctgov' | 'pubmed' | 'endnote' | 'ris' | null;
+  nct_id?: string | null;
+  trial_status?: string | null;
+  trial_phase?: string | null;
+  pmid?: string | null;
+  /** Only meaningful when processing_status === 'metadata_only': a reviewer has
+   *  accepted this thin-evidence document for extraction. Kept separate from the
+   *  status so "the evidence was thin" survives approval. */
+  metadata_extraction_approved?: boolean;
+}
+
+// ClinicalTrials.gov — normalized trial shape returned by
+// GET /api/v1/trials/{nctId} and the `results[]` of GET /api/v1/trials/search
+// (mirrors backend/app/services/clinical_trials_service.py:normalize()).
+export interface NormalizedTrial {
+  nctId: string;
+  sourceUrl: string | null;
+  title: { brief: string | null; official: string | null };
+  status: {
+    overall: string | null;
+    hasResults: boolean;
+    startDate: string | null;
+    primaryCompletionDate: string | null;
+    completionDate: string | null;
+    firstPostedDate: string | null;
+    resultsFirstPostedDate: string | null;
+    lastUpdatePostedDate: string | null;
+  };
+  sponsor: { lead: string | null; class: string | null; collaborators: (string | null)[] };
+  summary: string | null;
+  conditions: string[];
+  keywords: string[];
+  orgStudyId?: string | null;
+  oversight?: { fdaRegulatedDrug: boolean | null; fdaRegulatedDevice: boolean | null; usExport: boolean | null };
+  meshTerms?: string[];
+  studyType: string | null;
+  phase: string[];
+  design: {
+    allocation: string | null;
+    interventionModel: string | null;
+    masking: string | null;
+    primaryPurpose: string | null;
+  };
+  enrollment: { count: number | null; type: string | null };
+  eligibility: {
+    minAge: string | null;
+    maxAge: string | null;
+    sex: string | null;
+    healthyVolunteers: boolean | null;
+    criteria: string | null;
+  };
+  arms: { label: string | null; type: string | null; description: string | null; interventionNames: string[] }[];
+  interventions: { type: string | null; name: string | null; description: string | null }[];
+  outcomes: {
+    primary: { measure: string | null; description: string | null; timeFrame: string | null }[];
+    secondary: { measure: string | null; description: string | null; timeFrame: string | null }[];
+  };
+  locations: { facility: string | null; city: string | null; state: string | null; country: string | null; zip: string | null }[];
+  references: { pmid: string | null; type: string | null; citation: string | null }[];
+  documents: { label: string | null; url: string; date: string | null; sizeBytes: number | null }[];
+  results: {
+    participantFlow: unknown;
+    outcomeMeasures: unknown[];
+    adverseEvents: unknown;
+  } | null;
+}
+
+export interface TrialSearchResponse {
+  total: number | null;
+  nextPageToken: string | null;
+  results: NormalizedTrial[];
+}
+
+// PubMed — normalized article shape returned by GET /api/v1/pubmed/{pmid}
+// and the `results[]` of GET /api/v1/pubmed/search (mirrors
+// backend/app/services/pubmed_service.py:normalize_summary()/get_article_full()).
+export interface NormalizedArticle {
+  pmid: string;
+  sourceUrl: string | null;
+  title: string | null;
+  authors: string[];
+  journal: string | null;
+  pubDate: string | null;
+  year: string | null;
+  doi: string | null;
+  pubTypes: string[];
+  /** Only present on the full detail fetch (GET /pubmed/{pmid}), not on
+   *  search-result-list rows — abstract requires a separate efetch call. */
+  abstractText?: string | null;
+  /** Pre-import probe — what will an import actually get? Only present on
+   * the full detail fetch, same as abstractText. `'unknown'` means the check
+   * could not be completed (upstream timeout, or the fetch itself failed) and
+   * is deliberately distinct from `'none'`: one says "we couldn't tell", the
+   * other claims nothing is available. `undefined` means still in flight —
+   * never leave it there on an error path, or the UI reports a check that is
+   * no longer running. See backend/app/services/fulltext_service.py:
+   * probe_full_text_availability. */
+  fullTextAvailability?: 'pdf' | 'pmc' | 'none' | 'unknown';
+}
+
+export interface PubmedSearchResponse {
+  total: number;
+  results: NormalizedArticle[];
+}
+
+// Unified literature search (GET /api/v1/literature/search) — fans out to
+// both sources server-side and tags each result so the frontend can
+// dispatch rendering per source without re-deriving which is which.
+export type LiteratureResult =
+  | ({ source: 'ctgov' } & NormalizedTrial)
+  | ({ source: 'pubmed' } & NormalizedArticle);
+
+export interface LiteratureSearchResponse {
+  results: LiteratureResult[];
+  counts: { ctgov: number | null; pubmed: number | null };
+  errors: { ctgov?: string; pubmed?: string };
+  message: string | null;
+  /** Pass back as ctgovPageToken/pubmedOffset on the next search call to
+   * fetch the next page — null once that source is exhausted. counts.* are
+   * the upstream APIs' real total match counts (can be far larger than one
+   * page), so a null here doesn't mean "no more results exist," it means
+   * "no more results FROM THIS QUERY are available." */
+  nextCtgovPageToken: string | null;
+  nextPubmedOffset: number | null;
 }
 
 export interface DocumentUploadResponse {
@@ -145,10 +286,39 @@ export interface FormField {
   examples?: FieldExample[];
   hints?: string[];
   rules?: string[];
-  // Table extraction strategy (only meaningful on array fields).
-  // Mirrors schema_def.output_fields[].extraction_strategy / .anchor_columns.
-  extraction_strategy?: 'single_call' | 'row_then_columns';
+  // Table extraction strategy (only meaningful on array fields) — a per-field
+  // choice made in the form builder; single_call is the default at every
+  // column count. Mirrors schema_def.output_fields[].extraction_strategy.
+  extraction_strategy?: TableFieldExtractionStrategy;
+  // The composite key: the columns whose values identify one row. Being
+  // renamed anchor_columns → key_columns; the backend dual-writes both, so
+  // read with keyColumnsOf() and keep writing anchor_columns.
+  key_columns?: string[];
   anchor_columns?: string[];
+}
+
+/**
+ * How a single TABLE field is extracted — chosen per field in the form
+ * builder, not inferred from column count.
+ *  - single_call:       one DSPy call for the whole table (default)
+ *  - row_then_columns:  two-stage DSPy pipeline (row discovery, then one
+ *                        focused call per row for the value columns)
+ *  - agentic:           the Claude Agent SDK extractor (Claude models only)
+ */
+export type TableFieldExtractionStrategy = 'single_call' | 'row_then_columns' | 'agentic';
+
+/**
+ * Which extractor runs for a form's TABLE fields.
+ *  - standard: the DSPy single-call / row_then_columns pipeline (default)
+ *  - agentic:  the Claude Agent SDK extractor (Claude models only)
+ * Authoritative copy lives in schema_def; forms.metadata carries a mirror for
+ * the builder UI, which never loads schema_def.
+ */
+export type TableExtractionMode = 'standard' | 'agentic';
+
+export interface FormMetadata {
+  table_extraction_mode?: TableExtractionMode;
+  [key: string]: any;
 }
 
 export interface FieldEditUpdate {
@@ -158,7 +328,8 @@ export interface FieldEditUpdate {
   hints?: string[];
   rules?: string[];
   options?: string[];
-  extraction_strategy?: 'single_call' | 'row_then_columns';
+  extraction_strategy?: TableFieldExtractionStrategy;
+  key_columns?: string[];        // see FormField — dual-written during migration
   anchor_columns?: string[];
 }
 
@@ -178,6 +349,11 @@ export interface FieldPrompt {
   rules: string[];
   examples: Array<{ value: string; source_text?: string; note?: string } | string>;
   subform_fields?: Array<{ field_name: string; field_type: string; field_description?: string; hints?: string[]; rules?: string[]; examples?: any[] }>;
+  // Served from schema_def — what the extractor will actually do, as opposed to
+  // the forms.fields mirror the editor used to read. Null when the field is not
+  // a table or carries no stored mode.
+  extraction_strategy?: TableFieldExtractionStrategy | null;
+  key_columns?: string[] | null;
 }
 
 export interface FieldPromptsResponse {
@@ -195,7 +371,10 @@ export interface Form {
   schema_name: string | null;
   statistics: any | null;
   error: string | null;
-  metadata?: any | null; // Workflow state for human review (thread_id, decomposition)
+  metadata?: FormMetadata | null; // thread_id, decomposition, table_extraction_mode
+  /** HITL #1 — pause code generation for decomposition review. Lives in the
+   *  `forms.enable_review` COLUMN, never in `metadata`; read it from here. */
+  enable_review?: boolean;
   created_at: string;
   updated_at: string;
   job_id?: string; // Optional: returned when generating code
@@ -203,12 +382,22 @@ export interface Form {
 
 // ── Pilot Study Types ────────────────────────────────────────────────────────
 
+export interface PilotSubfieldFeedback {
+  rating?: 'correct' | 'incorrect';
+  correct_value?: string;
+  correct_source_text?: string;
+  note?: string;
+}
+
 export interface PilotFieldFeedback {
-  rating: 'correct' | 'incorrect';
+  /** Absent when only individual table columns were rated, not the parent field. */
+  rating?: 'correct' | 'incorrect';
   correct_value?: string;
   correct_source_text?: string;
   note?: string;
   document_id: string;
+  /** Per-table-column thumbs + corrections, keyed by subfield name. */
+  subfield_corrections?: Record<string, PilotSubfieldFeedback>;
 }
 
 export interface PilotIteration {
@@ -515,6 +704,9 @@ export interface MyPermissionsResponse {
   can_qa_review: boolean;
   can_manage_assignments: boolean;
   can_manage_members: boolean;
+  /** Derived server-side (not a project_members column): rename / archive /
+   *  restore. True for owners, global admins, and managers. */
+  can_manage_project?: boolean;
 }
 
 export interface OwnershipTransferRequest {
@@ -536,6 +728,7 @@ export interface PermissionAuditLog {
 export interface ConsensusSummaryDoc {
   document_id: string;
   filename: string;
+  ref_id: number | null;
   has_ai: boolean;
   has_manual: boolean;
   has_consensus: boolean;
@@ -545,7 +738,16 @@ export interface ConsensusSummaryDoc {
   // Dual-reviewer fields
   has_r1: boolean;
   has_r2: boolean;
+  /**
+   * An adjudication row exists — NOT that it is finished. The review screen uses
+   * this to decide whether to fetch saved resolutions back into the form, so it
+   * must stay broad or an in-progress adjudication is lost on reload. Use
+   * `has_adjudication_completed` for "done".
+   */
   has_adjudication: boolean;
+  /** Optional: added alongside `docs_done`; absent from older API responses. */
+  adjudication_status?: 'in_progress' | 'completed' | null;
+  has_adjudication_completed?: boolean;
   r1_r2_agreement_pct: number | null;
 }
 
@@ -559,6 +761,14 @@ export interface ConsensusSummary {
     r1_done: number;
     r2_done: number;
     adjudication_done: number;
+    /**
+     * Documents actually finished, counted once each. A dual-reviewer submit
+     * writes both a consensus row and an adjudication row, so
+     * `consensus_done + adjudication_done` double-counts every one of them —
+     * which is what the dashboard's "Consensus" tile used to show. Optional so
+     * the frontend behaves correctly both before and after the API deploys.
+     */
+    docs_done?: number;
   };
   documents: ConsensusSummaryDoc[];
 }
@@ -659,12 +869,34 @@ export interface AdjudicationResult {
   updated_at: string;
 }
 
+/**
+ * How an adjudicator settled one field — the provenance of `final_value`, which
+ * the data-cleaning surface and every export read. Mirrors the backend's
+ * `ResolutionSource` Literal in `app/models/schemas.py`; the two must stay in
+ * step or a save 422s.
+ *
+ * `ai` and `majority` were being sent by the review screen long before they were
+ * declared here, and neither had a branch in the restore path — so a field
+ * resolved by accepting AI reopened as undecided and the document could never be
+ * re-saved. `suggestion` is a legacy alias for `majority`.
+ */
+export type ResolutionSource =
+  | 'agreed'
+  | 'ai'
+  | 'reviewer_1'
+  | 'reviewer_2'
+  | 'majority'
+  | 'suggestion'
+  | 'custom'
+  | 'not_reported'
+  | 'not_applicable';
+
 export interface FieldResolution {
   reviewer_1_value: any;
   reviewer_2_value: any;
   agreed: boolean;
   final_value: any;
-  resolution_source: 'reviewer_1' | 'reviewer_2' | 'custom' | 'agreed';
+  resolution_source: ResolutionSource;
   adjudicator_note?: string;
 }
 

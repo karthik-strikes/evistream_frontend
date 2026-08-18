@@ -1,5 +1,7 @@
 'use client';
 
+import { EMPTY_DISPLAY_TOKENS, FAILED_LABEL } from '@/lib/absence';
+
 import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { X, Search, Loader2, ThumbsUp, ThumbsDown, Check, RotateCcw, Quote, ScanText } from 'lucide-react';
@@ -112,6 +114,9 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
   const [editingCal, setEditingCal] = useState<UEFCalField | null>(null);
   const [editingFieldPatch, setEditingFieldPatch] = useState<Partial<FormField>>({});
   const [savingFieldEdit, setSavingFieldEdit] = useState(false);
+  // Which subfield card the editor should scroll to (👎 on a table column)
+  const [focusSubfield, setFocusSubfield] = useState<{ name: string; nonce: number } | null>(null);
+  const focusNonceRef = useRef(0);
   // Calibration (description/hints/rules/examples) is loaded from /field-prompts, NOT from form.fields
   const [fieldPrompts, setFieldPrompts] = useState<Record<string, FieldPrompt> | null>(null);
   const [editorLoading, setEditorLoading] = useState(false);
@@ -140,11 +145,17 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     };
   }, [form.fields]);
 
-  const openFieldEditor = useCallback(async (fieldName: string) => {
+  const openFieldEditor = useCallback(async (fieldName: string, subfieldName: string | null = null) => {
     const f = form.fields.find(ff => ff.field_name === fieldName);
     if (!f) return;
     setEditingFieldName(fieldName);
     setEditingFieldPatch({});
+    if (subfieldName) {
+      focusNonceRef.current += 1;
+      setFocusSubfield({ name: subfieldName, nonce: focusNonceRef.current });
+    } else {
+      setFocusSubfield(null);
+    }
     // Show editor immediately with whatever we have, then refine once prompts load
     setEditingCal(calFromPromptOrField(fieldName, fieldPrompts));
     if (!fieldPrompts) {
@@ -163,6 +174,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     setEditingFieldName(null);
     setEditingCal(null);
     setEditingFieldPatch({});
+    setFocusSubfield(null);
   }, []);
 
   const saveFieldEdit = useCallback(async () => {
@@ -220,6 +232,13 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
   const docNames = useMemo(() => {
     const map: Record<string, string> = {};
     documents.forEach((d: Document) => { map[d.id] = d.filename; });
+    return map;
+  }, [documents]);
+
+  // Build doc ref_id lookup
+  const docRefIds = useMemo(() => {
+    const map: Record<string, number> = {};
+    documents.forEach((d: Document) => { if (d.ref_id != null) map[d.id] = d.ref_id; });
     return map;
   }, [documents]);
 
@@ -406,6 +425,36 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     }));
   };
 
+  // Table columns are rated individually — the rating lives under the parent
+  // field's subfield_corrections so the backend can key it as "parent.col".
+  const setSubfieldRating = (
+    parentField: string,
+    colName: string,
+    docId: string,
+    rating: 'correct' | 'incorrect',
+  ) => {
+    setFieldFeedback(prev => {
+      const parent = prev[parentField];
+      return {
+        ...prev,
+        [parentField]: {
+          ...parent,
+          document_id: docId,
+          subfield_corrections: {
+            ...(parent?.subfield_corrections || {}),
+            [colName]: {
+              ...(parent?.subfield_corrections?.[colName] || {}),
+              rating,
+              ...(rating === 'correct'
+                ? { correct_value: undefined, correct_source_text: undefined, note: undefined }
+                : {}),
+            },
+          },
+        },
+      };
+    });
+  };
+
   const setCorrectionField = (fieldName: string, key: keyof PilotFieldFeedback, value: string) => {
     setFieldFeedback(prev => ({
       ...prev,
@@ -449,7 +498,18 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     return Array.from(names);
   }, [latestResults]);
 
-  const reviewedCount = Object.keys(fieldFeedback).length;
+  // Count rated *columns*, not rated entries — one table field can hold a
+  // rating per column under subfield_corrections.
+  const reviewedCount = useMemo(() => {
+    let n = 0;
+    for (const fb of Object.values(fieldFeedback)) {
+      if (fb?.rating) n += 1;
+      for (const col of Object.values(fb?.subfield_corrections || {})) {
+        if (col?.rating) n += 1;
+      }
+    }
+    return n;
+  }, [fieldFeedback]);
   const totalFieldCount = fieldNames.length;
 
   // ── Render ────────────────────────────────────────────────────────────────
@@ -491,7 +551,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
               <p className="text-xs text-gray-500 dark:text-zinc-400 mt-1">
                 {step === 'select' && 'Run extraction on a small sample to verify quality before processing all documents.'}
                 {step === 'running' && 'Extracting from selected papers — this usually takes a minute or two.'}
-                {step === 'review' && 'Review the extracted values. 👍 looks correct, 👎 to refine the field definition.'}
+                {step === 'review' && 'Review the extracted values. 👍 looks correct, 👎 to refine that column’s prompt.'}
               </p>
             </div>
             <div className="flex items-center gap-2 shrink-0">
@@ -647,7 +707,9 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
               document_id: docId,
               extracted_data: (latestResults[docId] as Record<string, any>) || {},
             }));
-            const docsMap = Object.fromEntries(docIds.map(id => [id, { id, filename: shortDocName(id) }]));
+            const docsMap = Object.fromEntries(
+              docIds.map(id => [id, { id, filename: shortDocName(id), ref_id: docRefIds[id] }])
+            );
             const { columns, rows } = transformToLongFormat(pilotResults, form.fields, docsMap);
 
             // Apply user column order (Paper stays pinned at index 0)
@@ -667,16 +729,14 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                 columnToField[f.field_name] = f;
               }
             }
-            // "Primary" column per form-field = first displayed column owned by it.
-            // Only the primary col renders thumbs, so a table with N subfields shows one rating, not N.
-            const primaryColForField: Record<string, string> = {};
-            for (const col of orderedColumns) {
-              if (col === PAPER_COL) continue;
+            // Every column owned by a form field carries its own thumbs. For a
+            // table, the rating is scoped to that subfield (parent.col on the
+            // backend); for a flat field it's scoped to the field itself.
+            const subfieldForCol = (col: string): string | null => {
               const owner = columnToField[col];
-              if (owner && !primaryColForField[owner.field_name]) {
-                primaryColForField[owner.field_name] = col;
-              }
-            }
+              if (!owner) return null;
+              return owner.field_type === 'array' && owner.field_name !== col ? col : null;
+            };
 
             // Detect paper boundaries for visual grouping
             const paperBoundaries = new Set<number>();
@@ -686,7 +746,11 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
 
             // Use original form field names for rating bar
             const ratingFields = form.fields.map(f => f.field_name);
-            const isMissing = (val: string) => !val || val === 'NR' || val === 'N/A' || val === '—' || val === '';
+            // A pipeline failure is not the paper being silent — keep it
+            // visually distinct so calibration is judged on real answers.
+            const isFailed = (val: string) => val === FAILED_LABEL;
+            const isMissing = (val: string) =>
+              !val || val === '—' || val === '' || EMPTY_DISPLAY_TOKENS.has(String(val).trim().toUpperCase());
 
             // Source evidence: every non-Paper cell carrying a source_text, in reading order (for prev/next)
             const chipOrder: Array<{ ri: number; col: string }> = [];
@@ -703,6 +767,8 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
             const goNext = () => { if (hasNext) setActive(chipOrder[activeIndex + 1]); };
             const activeRaw = active ? rows[active.ri]?._rawCells?.[active.col] : null;
             const activeSourceText = getSourceText(activeRaw);
+            const _activeDocId = active ? (rows[active.ri]?._documentId ?? null) : null;
+            const _activeDoc = _activeDocId ? documents.find((d: Document) => d.id === _activeDocId) : undefined;
             const activeData = (active && activeSourceText) ? {
               sourceText: activeSourceText,
               storedValue: rows[active.ri]?.[active.col] != null ? String(rows[active.ri][active.col]) : null,
@@ -710,6 +776,10 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
               documentId: rows[active.ri]?._documentId ?? null,
               documentFilename: docsMap[rows[active.ri]?._documentId]?.filename ?? rows[active.ri]?._paperFilename ?? null,
               fieldLabel: formatFieldName(active.col),
+              hasPdf: !!_activeDoc?.s3_pdf_path,
+              sourceType: _activeDoc?.source_type ?? null,
+              recordId: _activeDoc?.nct_id ?? _activeDoc?.pmid ?? null,
+              doi: _activeDoc?.doi ?? null,
             } : null;
 
             return (
@@ -758,10 +828,19 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                           const isPaper = col === PAPER_COL;
                           const isDragOver = dragOverCol === col && !isPaper;
                           const owner = !isPaper ? columnToField[col] : null;
-                          const hasThumbs = !!owner && primaryColForField[owner.field_name] === col;
+                          const hasThumbs = !!owner;
+                          const subCol = !isPaper ? subfieldForCol(col) : null;
                           const fb = owner ? fieldFeedback[owner.field_name] : undefined;
-                          const isCorrect = fb?.rating === 'correct';
-                          const isIncorrect = fb?.rating === 'incorrect';
+                          const colRating = subCol
+                            ? fb?.subfield_corrections?.[subCol]?.rating
+                            : fb?.rating;
+                          const isCorrect = colRating === 'correct';
+                          const isIncorrect = colRating === 'incorrect';
+                          const rate = (rating: 'correct' | 'incorrect') => {
+                            if (!owner) return;
+                            if (subCol) setSubfieldRating(owner.field_name, subCol, docIds[0], rating);
+                            else setRating(owner.field_name, docIds[0], rating);
+                          };
                           return (
                             <th
                               key={col}
@@ -807,7 +886,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                                       onMouseDown={(e) => e.stopPropagation()}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        setRating(owner.field_name, docIds[0], 'correct');
+                                        rate('correct');
                                       }}
                                       className={cn(
                                         'p-0.5 rounded transition-colors',
@@ -823,14 +902,14 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                                       onMouseDown={(e) => e.stopPropagation()}
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        setRating(owner.field_name, docIds[0], 'incorrect');
-                                        openFieldEditor(owner.field_name);
+                                        rate('incorrect');
+                                        openFieldEditor(owner.field_name, subCol);
                                       }}
                                       className={cn(
                                         'p-0.5 rounded transition-colors',
                                         isIncorrect ? 'text-red-600 dark:text-red-400' : 'text-gray-300 dark:text-zinc-600 hover:text-red-500'
                                       )}
-                                      title="Edit this field"
+                                      title={subCol ? 'Edit this column' : 'Edit this field'}
                                     >
                                       <ThumbsDown className="w-3 h-3" />
                                     </button>
@@ -851,7 +930,8 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                           <tr key={`${row._resultId}-${ri}`}>
                             {orderedColumns.map((col, ci) => {
                               const val = row[col] ?? '';
-                              const missing = isMissing(val);
+                              const failed = isFailed(val);
+                              const missing = !failed && isMissing(val);
                               const isFirstCol = ci === 0;
                               // For flat fields (non-Paper), blank out duplicate rows in same paper group
                               const isFlatField = form.fields.some(f => f.field_type !== 'array' && f.field_name === col);
@@ -864,13 +944,20 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                                   className={cn(
                                     'px-3 py-2 border-b border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 align-top',
                                     isFirstCol && 'sticky left-0 z-10 bg-white dark:bg-[#111111] font-medium text-gray-700 dark:text-zinc-300',
-                                    !isFirstCol && !showBlank && (missing ? 'bg-rose-50 dark:bg-[#1a0d0d]' : 'bg-green-50 dark:bg-[#0d1a10]'),
+                                    !isFirstCol && !showBlank && (failed
+                                      ? 'bg-amber-50 dark:bg-[#1a150d]'
+                                      : missing ? 'bg-rose-50 dark:bg-[#1a0d0d]' : 'bg-green-50 dark:bg-[#0d1a10]'),
                                     !isFirstCol && showBlank && 'bg-white dark:bg-[#111111]',
                                     isNewPaper && 'border-t-2 border-t-gray-400 dark:border-t-zinc-600'
                                   )}
                                 >
-                                  {showBlank ? null : missing && !isFirstCol ? (
-                                    <span className="text-gray-300 dark:text-zinc-700">NR</span>
+                                  {showBlank ? null : failed && !isFirstCol ? (
+                                    <span
+                                      className="text-amber-600 dark:text-amber-500"
+                                      title="Extraction failed for this cell — not a statement about the paper"
+                                    >{val}</span>
+                                  ) : missing && !isFirstCol ? (
+                                    <span className="text-gray-300 dark:text-zinc-700">{val || 'NR'}</span>
                                   ) : cellSource ? (
                                     <div className="flex items-start gap-1.5">
                                       <span className="text-gray-800 dark:text-zinc-200">{val}</span>
@@ -919,10 +1006,20 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                               <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-gray-100 dark:bg-[#1f1f1f] text-gray-500 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] font-mono">
                                 {field.field_name}
                               </span>
+                              {focusSubfield && (
+                                <>
+                                  <span className="text-gray-300 dark:text-zinc-600">/</span>
+                                  <span className="text-[10px] px-1.5 py-0.5 rounded-md bg-red-50 dark:bg-red-950/30 text-red-600 dark:text-red-400 border border-red-200/60 dark:border-red-800/40 font-mono">
+                                    {focusSubfield.name}
+                                  </span>
+                                </>
+                              )}
                               {editorLoading && <Loader2 className="w-3 h-3 animate-spin text-gray-400" />}
                             </div>
                             <p className="text-[11px] text-gray-500 dark:text-zinc-400 mt-0.5">
-                              Refine description, hints, rules, examples — applies to all papers.
+                              {focusSubfield
+                                ? 'Refine this column — description, hints, rules, examples. Applies to all papers.'
+                                : 'Refine description, hints, rules, examples — applies to all papers.'}
                             </p>
                           </div>
                         </div>
@@ -942,6 +1039,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                           cal={editingCal}
                           editable={true}
                           structuralEditable={false}
+                          focusSubfield={focusSubfield}
                           onFieldPatch={(patch) => setEditingFieldPatch((prev) => ({ ...prev, ...patch }))}
                           onCalPatch={(patch) => setEditingCal((prev) => (prev ? { ...prev, ...patch } : prev))}
                         />
@@ -959,6 +1057,10 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                   storedValue={activeData?.storedValue ?? null}
                   fieldLabel={activeData?.fieldLabel}
                   page={activeData?.page ?? null}
+                  hasPdf={activeData?.hasPdf ?? true}
+                  sourceType={activeData?.sourceType ?? null}
+                  recordId={activeData?.recordId ?? null}
+                  doi={activeData?.doi ?? null}
                   onPrev={goPrev}
                   onNext={goNext}
                   hasPrev={hasPrev}
@@ -998,7 +1100,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
           {step === 'review' && (
             <>
               <p className="text-xs text-gray-400">
-                {reviewedCount > 0 ? `${reviewedCount} fields rated` : 'Click thumbs up/down to rate fields'}
+                {reviewedCount > 0 ? `${reviewedCount} rated` : 'Click thumbs up/down on any column to rate it'}
               </p>
               <div className="flex items-center gap-2">
                 {reviewedCount > 0 && (

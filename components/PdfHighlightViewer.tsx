@@ -69,6 +69,17 @@ export interface PdfHighlightViewerProps {
   storedValue?: string | null;
   /** Display-friendly field name (e.g., "Patient age"). */
   fieldLabel?: string | null;
+  /**
+   * 1-indexed page to land on when the quote can't be located — or when there is
+   * no quote at all, only a recorded page.
+   *
+   * The viewer is otherwise steerable only via `sourceText`, which is enough for
+   * the source-evidence drawer but not for the consensus review screen: a field
+   * can carry `source_location.page` with a `source_text` that never matches
+   * (paraphrased, or a value derived from a table). A stored page is still
+   * better than page 1. Never overrides a real match.
+   */
+  initialPage?: number | null;
   onClose?: () => void;
   /** Optional prev/next navigation between sources (rendered inline in
    *  the header next to the close button so the drawer chrome stays a
@@ -124,6 +135,7 @@ export function PdfHighlightViewer({
   sourceText,
   storedValue,
   fieldLabel,
+  initialPage,
   onClose,
   onPrev,
   onNext,
@@ -363,8 +375,13 @@ export function PdfHighlightViewer({
   // hunting for the paragraph).
   const lastScrolledQuoteRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!sourceText) return;
-    if (lastScrolledQuoteRef.current === sourceText) return;
+    // A recorded page is a usable target even with no quote to match, so don't
+    // bail on a missing sourceText when initialPage is set. The dedupe key spans
+    // both, or moving between two quote-less fields on different pages wouldn't
+    // re-scroll.
+    if (!sourceText && !initialPage) return;
+    const scrollKey = `${sourceText ?? ''}::${initialPage ?? ''}`;
+    if (lastScrolledQuoteRef.current === scrollKey) return;
 
     const container = scrollRef.current;
     if (!container) return;
@@ -391,6 +408,10 @@ export function PdfHighlightViewer({
       yWithinPage = textOverlay.match.rects[0].top;
     } else if (textLayerMatch) {
       targetPage = textLayerMatch.page;
+    } else if (initialPage) {
+      // Last resort: the page the extractor recorded. Only reached when no
+      // match was found, so it never overrides real evidence.
+      targetPage = initialPage;
     }
 
     if (!targetPage) return;
@@ -405,13 +426,13 @@ export function PdfHighlightViewer({
       const pageTopInContainer = (pageRect.top - containerRect.top) + container.scrollTop;
       const targetScrollTop = Math.max(0, pageTopInContainer + yWithinPage - 80);
       container.scrollTo({ top: targetScrollTop, behavior: 'smooth' });
-      lastScrolledQuoteRef.current = sourceText;
+      lastScrolledQuoteRef.current = scrollKey;
     } else {
       // Page hasn't rendered dimensions yet — center the page; the effect
       // will re-fire once renderedDims/textOverlay update and refine.
       pageEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
-  }, [bboxMatch, textLayerMatch, textOverlay, renderedDims, sourceText]);
+  }, [bboxMatch, textLayerMatch, textOverlay, renderedDims, sourceText, initialPage]);
 
   // Reset overlay + scroll-tracking on chip change
   useEffect(() => {

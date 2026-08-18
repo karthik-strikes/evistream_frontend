@@ -56,7 +56,10 @@ export function Navbar({ title, description }: NavbarProps) {
   return (
     <>
       <nav className={cn(
-        "sticky top-0 z-30 transition-[background-color,box-shadow,border-color] duration-200",
+        // z-40: above page content, but deliberately BELOW modals/dialogs/toasts
+        // (z-50+) so an open modal still covers the navbar. Raising this to 50+
+        // would put the navbar on top of every dialog.
+        "sticky top-0 z-40 transition-[background-color,box-shadow,border-color] duration-200",
         scrolled
           ? "bg-white/80 dark:bg-[#0a0a0a]/90 backdrop-blur-2xl border-b border-gray-200/60 dark:border-[#1f1f1f] shadow-[0_1px_2px_rgba(0,0,0,0.03),0_2px_8px_rgba(0,0,0,0.04)]"
           : "bg-transparent"

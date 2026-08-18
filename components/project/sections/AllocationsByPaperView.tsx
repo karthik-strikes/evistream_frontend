@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils';
 import { assignmentsService, documentsService, projectMembersService } from '@/services';
 import type { ReviewAssignment, Document, ProjectMember } from '@/types/api';
 import { useToast } from '@/hooks/use-toast';
+import { ROLE_COLORS } from '@/lib/reviewerColors';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -26,9 +27,9 @@ const AVATAR_COLORS = [
 type ReviewerRole = 'reviewer_1' | 'reviewer_2' | 'adjudicator';
 
 const ROLE_DEFS: { key: ReviewerRole; tag: string; label: string; pill: string; dot: string }[] = [
-  { key: 'reviewer_1',  tag: 'R1',  label: 'Reviewer 1',  pill: 'text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-400/15',     dot: 'bg-blue-500'  },
-  { key: 'reviewer_2',  tag: 'R2',  label: 'Reviewer 2',  pill: 'text-violet-600 dark:text-violet-400 bg-violet-100 dark:bg-violet-400/15', dot: 'bg-violet-500' },
-  { key: 'adjudicator', tag: 'Cons', label: 'Consensus reviewer', pill: 'text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15', dot: 'bg-amber-500' },
+  { key: 'reviewer_1',  tag: 'R1',  label: 'Reviewer 1',  pill: ROLE_COLORS.reviewer_1.pill,  dot: ROLE_COLORS.reviewer_1.dot  },
+  { key: 'reviewer_2',  tag: 'R2',  label: 'Reviewer 2',  pill: ROLE_COLORS.reviewer_2.pill,  dot: ROLE_COLORS.reviewer_2.dot  },
+  { key: 'adjudicator', tag: 'Cons', label: 'Consensus reviewer', pill: ROLE_COLORS.adjudicator.pill, dot: ROLE_COLORS.adjudicator.dot },
 ];
 
 type FilterKey = 'all' | 'incomplete' | 'no_r1' | 'no_r2' | 'no_adj';

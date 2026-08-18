@@ -168,8 +168,11 @@ function RunningCard({
   const failedCount = liveProgress
     ? Array.from(liveProgress.papers.values()).filter((s) => s === 'failed').length
     : 0;
-  const processingCount = jobDone < jobTotal ? 1 : 0;
-  const queuedCount = Math.max(0, jobTotal - jobDone - processingCount);
+  // Documents in a job run concurrently (not serially), so there's no real
+  // "queued" subset once a job is active — everything not yet done counts
+  // as processing.
+  const processingCount = Math.max(0, jobTotal - jobDone);
+  const queuedCount = 0;
 
   const isQueued = !runningJob && !!queuedJob;
 
@@ -181,13 +184,37 @@ function RunningCard({
         <span className="text-[10px] font-semibold tracking-widest uppercase mb-2 text-violet-400 dark:text-violet-400">
           {isQueued ? 'QUEUED' : 'LIVE'}
         </span>
-        {isQueued || progressPct === null ? (
+        {/* Nothing finished yet → indeterminate, not "0% · 0 of 47 docs". A run
+            with 47 documents in flight and none done is genuinely working, and
+            zeroes read as stalled. Numbers appear on the first completion.
+            The arc spins only while processing: a queued run holds the same ring
+            still, so "waiting" and "working" don't look identical. */}
+        {isQueued || progressPct === null || !hasJobProgress ? (
           <>
-            <span className="text-2xl font-bold tabular-nums leading-none text-violet-400 dark:text-violet-300/80">
-              ···
-            </span>
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              className={cn('h-7 w-7', !isQueued && 'animate-spin')}
+              role="img"
+              aria-label={isQueued ? 'Queued' : 'Processing'}
+            >
+              <circle
+                cx="12" cy="12" r="9"
+                stroke="currentColor" strokeWidth="2.5"
+                className="text-violet-200 dark:text-violet-500/25"
+              />
+              <path
+                d="M21 12a9 9 0 0 0-9-9"
+                stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"
+                className="text-violet-500 dark:text-violet-300"
+              />
+            </svg>
             <span className="text-[10px] mt-1.5 text-violet-400 dark:text-violet-500">
-              {isQueued ? 'Queued' : 'Starting…'}
+              {isQueued
+                ? 'Queued'
+                : jobTotal > 0
+                  ? `${jobTotal} ${jobTotal === 1 ? 'doc' : 'docs'}`
+                  : 'Starting…'}
             </span>
           </>
         ) : (

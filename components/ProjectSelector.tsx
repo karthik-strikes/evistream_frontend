@@ -1,9 +1,9 @@
 'use client';
 
-import { useProject } from '@/contexts/ProjectContext';
+import { useProject, type Project } from '@/contexts/ProjectContext';
 import { ChevronDown, Plus } from 'lucide-react';
 import { useState, useRef, useEffect } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
 import { createPortal } from 'react-dom';
 
@@ -14,6 +14,40 @@ export function ProjectSelector() {
   const buttonRef = useRef<HTMLButtonElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+  const pathname = usePathname();
+
+  /**
+   * Switching projects re-scopes the page you're already on — it does NOT
+   * bounce you to the project overview. Every project-scoped page keys its
+   * queries on selectedProject.id, so they refetch in place.
+   *
+   * Two routes are addressed by id and can't just stay put:
+   *  - /projects/<id> — swap in the new id, keeping ?tab= so you stay in the
+   *    same section (Extractions, Members, …) for the new project.
+   *  - an entity detail page (e.g. /extractions/<id>) — that record belongs to
+   *    the OLD project, so fall back to the section's list rather than showing
+   *    a record from a project you just switched away from.
+   */
+  const handleSelect = (project: Project) => {
+    setSelectedProject(project);
+    setIsOpen(false);
+
+    const segs = pathname.split('/').filter(Boolean);
+
+    if (segs[0] === 'projects' && segs[1]) {
+      // window.location instead of useSearchParams: this runs only on click, so
+      // it avoids forcing a Suspense boundary on every page using this header.
+      router.push(`/projects/${project.id}${window.location.search}`);
+      return;
+    }
+
+    if (segs.length > 1) {
+      router.push(`/${segs[0]}`);
+      return;
+    }
+
+    // Otherwise: stay exactly where you are.
+  };
 
   useEffect(() => {
     function handleClickOutside(event: MouseEvent) {
@@ -63,11 +97,7 @@ export function ProjectSelector() {
         return (
           <button
             key={project.id}
-            onClick={() => {
-              setSelectedProject(project);
-              router.push(`/projects/${project.id}`);
-              setIsOpen(false);
-            }}
+            onClick={() => handleSelect(project)}
             className={cn(
               "w-full px-3 py-1.5 text-left transition-colors flex items-center gap-2",
               isActive

@@ -1,6 +1,8 @@
 'use client';
 
-import { useMemo, useState } from 'react';
+import { EMPTY_DISPLAY_TOKENS, FAILED_LABEL } from '@/lib/absence';
+
+import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { cn } from '@/lib/utils';
 import type { FormField } from '@/types/api';
 import { transformToLongFormat } from '@/lib/longFormatTransform';
@@ -40,8 +42,21 @@ function getPageRef(data: any): number | null {
 
 interface LongFormatTableProps {
   results: Array<{ id: string; document_id: string; extracted_data: Record<string, any>; created_at?: string }>;
-  documentsMap: Record<string, { id: string; filename: string }>;
+  documentsMap: Record<
+    string,
+    {
+      id: string;
+      filename: string;
+      ref_id?: number | null;
+      source_type?: string | null;
+      s3_pdf_path?: string | null;
+      nct_id?: string | null;
+      pmid?: string | null;
+      doi?: string | null;
+    }
+  >;
   formFields: FormField[];
+  formId?: string;
 }
 
 interface ChipRef {
@@ -49,7 +64,7 @@ interface ChipRef {
   col: string;
 }
 
-export default function LongFormatTable({ results, documentsMap, formFields }: LongFormatTableProps) {
+export default function LongFormatTable({ results, documentsMap, formFields, formId }: LongFormatTableProps) {
   const { columns, rows } = useMemo(
     () => transformToLongFormat(results, formFields, documentsMap),
     [results, formFields, documentsMap]
@@ -57,6 +72,45 @@ export default function LongFormatTable({ results, documentsMap, formFields }: L
 
   const [showEvidence, setShowEvidence] = useState(false);
   const [active, setActive] = useState<ChipRef | null>(null);
+
+  // Column reorder (first/"Paper" column is locked in place)
+  const colOrderKey = formId ? `results-col-order:${formId}` : null;
+  const [columnOrder, setColumnOrder] = useState<string[]>([]);
+  useEffect(() => {
+    if (!colOrderKey) { setColumnOrder([]); return; }
+    try {
+      const raw = localStorage.getItem(colOrderKey);
+      setColumnOrder(raw ? JSON.parse(raw) : []);
+    } catch { setColumnOrder([]); }
+  }, [colOrderKey]);
+  useEffect(() => {
+    if (!colOrderKey) return;
+    try { localStorage.setItem(colOrderKey, JSON.stringify(columnOrder)); } catch {}
+  }, [columnOrder, colOrderKey]);
+  const draggedColRef = useRef<string | null>(null);
+  const [dragOverCol, setDragOverCol] = useState<string | null>(null);
+  const moveColumn = useCallback((dataCols: string[], dragged: string, target: string, lockedCol: string) => {
+    if (dragged === target || dragged === lockedCol || target === lockedCol) return;
+    const next = [...dataCols];
+    const from = next.indexOf(dragged);
+    const to = next.indexOf(target);
+    if (from === -1 || to === -1) return;
+    next.splice(from, 1);
+    next.splice(to, 0, dragged);
+    setColumnOrder(next);
+  }, []);
+  const PAPER_COL = columns[0];
+  const dataCols = useMemo(() => {
+    if (columns.length === 0) return [];
+    const colSet = new Set(columns);
+    const userOrdered = columnOrder.filter(c => colSet.has(c) && c !== PAPER_COL);
+    const remaining = columns.filter(c => c !== PAPER_COL && !userOrdered.includes(c));
+    return [...userOrdered, ...remaining];
+  }, [columns, columnOrder, PAPER_COL]);
+  const orderedColumns = useMemo(
+    () => (columns.length === 0 ? columns : [PAPER_COL, ...dataCols]),
+    [columns, dataCols, PAPER_COL]
+  );
 
   // Flat lookup map: field_name → FormField (includes subform fields)
   const fieldMap = useMemo(() => {
@@ -80,18 +134,19 @@ export default function LongFormatTable({ results, documentsMap, formFields }: L
   }, [results]);
 
   // Ordered list of every cell carrying a source_text. Reading order: row by
-  // row, left to right. Drives prev/next navigation inside the drawer.
+  // row, left to right, following the user's column order. Drives prev/next
+  // navigation inside the drawer.
   const chipOrder = useMemo<ChipRef[]>(() => {
     const list: ChipRef[] = [];
     rows.forEach((row, ri) => {
-      columns.forEach((col, ci) => {
+      orderedColumns.forEach((col, ci) => {
         if (ci === 0) return; // Paper column
         const raw = row._rawCells?.[col] ?? resultDataMap[row._resultId]?.[col];
         if (getSourceText(raw)) list.push({ ri, col });
       });
     });
     return list;
-  }, [rows, columns, resultDataMap]);
+  }, [rows, orderedColumns, resultDataMap]);
 
   // Resolve the currently active chip into drawer-shaped props.
   const activeData = useMemo(() => {
@@ -114,6 +169,10 @@ export default function LongFormatTable({ results, documentsMap, formFields }: L
       documentId: row._documentId,
       documentFilename: doc?.filename ?? row._paperFilename,
       fieldLabel: formatColumnName(active.col),
+      hasPdf: !!doc?.s3_pdf_path,
+      sourceType: doc?.source_type ?? null,
+      recordId: doc?.nct_id ?? doc?.pmid ?? null,
+      doi: doc?.doi ?? null,
     };
   }, [active, rows, resultDataMap, documentsMap]);
 
@@ -144,7 +203,11 @@ export default function LongFormatTable({ results, documentsMap, formFields }: L
     }
   }
 
-  const isMissing = (val: string) => !val || val === 'NR' || val === 'N/A' || val === '—' || val === '';
+  // Three states, not two: a reported value, an absence the paper is
+  // responsible for (NR/NA), and our own failure to read it.
+  const isFailed = (val: string) => val === FAILED_LABEL;
+  const isMissing = (val: string) =>
+    !val || val === '—' || val === '' || EMPTY_DISPLAY_TOKENS.has(String(val).trim().toUpperCase());
 
   return (
     <>
@@ -159,7 +222,8 @@ export default function LongFormatTable({ results, documentsMap, formFields }: L
         </div>
         <div className="flex items-center gap-3 text-[10px] font-medium text-gray-500 dark:text-zinc-500 uppercase tracking-wider ml-auto">
           <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-green-200 dark:bg-green-700 inline-block" />Reported</span>
-          <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-rose-200 dark:bg-rose-700 inline-block" />Not reported</span>
+          <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-rose-200 dark:bg-rose-700 inline-block" />Not reported (NR) / not applicable (NA)</span>
+          <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-amber-200 dark:bg-amber-700 inline-block" />{FAILED_LABEL} Extraction failed — needs a re-run</span>
           {showEvidence && (
             <span className="flex items-center gap-1.5"><Quote className="w-2.5 h-2.5 text-green-500" />Has source — click to view</span>
           )}
@@ -183,8 +247,10 @@ export default function LongFormatTable({ results, documentsMap, formFields }: L
         <table className="w-full text-xs border-separate border-spacing-0">
           <thead>
             <tr>
-              {columns.map((col, ci) => {
+              {orderedColumns.map((col, ci) => {
                 const field = fieldMap[col];
+                const isPaperCol = ci === 0;
+                const isDragOver = dragOverCol === col && !isPaperCol;
                 const tooltipContent = field ? (
                   <div className="space-y-1.5">
                     <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 dark:bg-[#2a2a2a] text-gray-600 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] uppercase tracking-wider">
@@ -218,10 +284,29 @@ export default function LongFormatTable({ results, documentsMap, formFields }: L
                 return (
                   <th
                     key={col}
+                    draggable={!isPaperCol}
+                    onDragStart={() => { if (!isPaperCol) draggedColRef.current = col; }}
+                    onDragOver={(e) => {
+                      if (isPaperCol) return;
+                      e.preventDefault();
+                      if (dragOverCol !== col) setDragOverCol(col);
+                    }}
+                    onDragLeave={() => { if (dragOverCol === col) setDragOverCol(null); }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      const dragged = draggedColRef.current;
+                      draggedColRef.current = null;
+                      setDragOverCol(null);
+                      if (dragged) moveColumn(dataCols, dragged, col, PAPER_COL);
+                    }}
+                    onDragEnd={() => { draggedColRef.current = null; setDragOverCol(null); }}
+                    title={isPaperCol ? undefined : 'Drag to reorder'}
                     className={cn(
-                      'sticky top-0 z-20 bg-gray-50 dark:bg-[#0d0d0d] px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500 border-b-2 border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 whitespace-nowrap',
+                      'sticky top-0 z-20 bg-gray-50 dark:bg-[#0d0d0d] px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500 border-b-2 border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 whitespace-nowrap select-none',
                       ci === 0 && 'sticky left-0 z-40 min-w-[180px]',
-                      ci > 0 && 'min-w-[120px]'
+                      ci > 0 && 'min-w-[120px]',
+                      !isPaperCol && 'cursor-grab active:cursor-grabbing hover:text-gray-600 dark:hover:text-zinc-300',
+                      isDragOver && 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400'
                     )}
                   >
                     <span className="inline-flex items-center gap-1">
@@ -242,9 +327,10 @@ export default function LongFormatTable({ results, documentsMap, formFields }: L
               const isNewPaper = paperBoundaries.has(ri);
               return (
                 <tr key={`${row._resultId}-${ri}`}>
-                  {columns.map((col, ci) => {
+                  {orderedColumns.map((col, ci) => {
                     const val = row[col] ?? '';
-                    const missing = isMissing(val);
+                    const failed = isFailed(val);
+                    const missing = !failed && isMissing(val);
                     const isFirstCol = ci === 0;
 
                     const rawData = !isFirstCol
@@ -259,12 +345,21 @@ export default function LongFormatTable({ results, documentsMap, formFields }: L
                         className={cn(
                           'px-3 py-2.5 border-b border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 align-top',
                           isFirstCol && 'sticky left-0 z-10 bg-white dark:bg-[#111111] font-semibold text-gray-900 dark:text-white',
-                          !isFirstCol && (missing ? 'bg-rose-50 dark:bg-[#1a0d0d]' : 'bg-green-50 dark:bg-[#0d1a10]'),
+                          !isFirstCol && (failed
+                            ? 'bg-amber-50 dark:bg-[#1a150d]'
+                            : missing ? 'bg-rose-50 dark:bg-[#1a0d0d]' : 'bg-green-50 dark:bg-[#0d1a10]'),
                           isNewPaper && 'border-t-2 border-t-gray-300 dark:border-t-zinc-600'
                         )}
                       >
-                        {missing ? (
-                          <span className="font-medium text-gray-400 dark:text-zinc-600">NR</span>
+                        {failed ? (
+                          <span
+                            className="font-medium text-amber-600 dark:text-amber-500"
+                            title="Extraction failed for this cell — not a statement about the paper"
+                          >{val}</span>
+                        ) : missing ? (
+                          // `val` is already the label (NR or NA) — never hardcode
+                          // one, or an inapplicable cell reads as a reporting gap.
+                          <span className="font-medium text-gray-400 dark:text-zinc-600">{val || 'NR'}</span>
                         ) : sourceText ? (
                           <div className="flex items-start gap-1.5">
                             <span className="text-gray-700 dark:text-zinc-300">{val}</span>
@@ -305,6 +400,10 @@ export default function LongFormatTable({ results, documentsMap, formFields }: L
         storedValue={activeData?.storedValue ?? null}
         fieldLabel={activeData?.fieldLabel}
         page={activeData?.page ?? null}
+        hasPdf={activeData?.hasPdf ?? true}
+        sourceType={activeData?.sourceType ?? null}
+        recordId={activeData?.recordId ?? null}
+        doi={activeData?.doi ?? null}
         onPrev={goPrev}
         onNext={goNext}
         hasPrev={hasPrev}

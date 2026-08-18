@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useMemo, useCallback, useRef, Suspense } from 'react';
+import { fieldIsEmpty, fieldIsNotApplicable } from '@/lib/absence';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
@@ -91,25 +92,9 @@ function hasAnyEvidence(data: any): boolean {
   return hasSourceText(data) || !!data.source_location;
 }
 
-// A field counts as "empty" when it has no substantive value — null/blank,
-// an NR-like token, or a cell whose status is not_reported/missing/error.
-// Mirrors the backend's _field_is_empty so card and page counts agree.
-const NR_LIKE = new Set(['', 'NR', 'NA', 'N/A', 'NONE', 'NOT REPORTED', 'NOT_REPORTED', '—', '-']);
-function fieldIsEmpty(v: any): boolean {
-  if (v === null || v === undefined) return true;
-  if (typeof v === 'string') return v.trim() === '' || NR_LIKE.has(v.trim().toUpperCase());
-  if (typeof v === 'number' || typeof v === 'boolean') return false;
-  if (Array.isArray(v)) return v.length === 0 || v.every(fieldIsEmpty);
-  if (typeof v === 'object') {
-    const st = (v as any).status;
-    if (st === 'missing' || st === 'error' || st === 'not_reported') return true;
-    if (st === 'reported') return false;
-    if ('value' in v) return fieldIsEmpty((v as any).value);
-    const vals = Object.values(v);
-    return vals.length === 0 || vals.every(fieldIsEmpty);
-  }
-  return false;
-}
+// "Empty" means a reporting gap. Sourced from lib/absence so it cannot drift
+// from the backend's _field_is_empty — several counts on this page are compared
+// against backend-computed ones.
 
 // Map a stored model_name to a coarse family for the per-model toggle.
 function modelFamily(model?: string | null): 'gpt' | 'claude' | 'gemini' | 'other' {
@@ -289,8 +274,8 @@ function ResultsContent() {
 
   const selectSourceTab = (tab: 'ai' | 'manual' | 'final') => {
     setSourceTab(tab);
-    const params = new URLSearchParams();
-    if (tab !== 'ai') params.set('tab', tab);
+    const params = new URLSearchParams(searchParams.toString());
+    if (tab === 'ai') params.delete('tab'); else params.set('tab', tab);
     router.push(`/results?${params.toString()}`, { scroll: false });
   };
 
@@ -443,24 +428,36 @@ function ResultsContent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedExtraction?.status, selectedJob?.status, effectiveExtractionId, isFormView]);
 
-  // Distinct model families across this form's runs (for the per-model toggle)
+  // Rows for the currently-selected source tab (ai/manual) — 'final' has its
+  // own self-contained data path (FinalDatasetView) and isn't scoped here.
+  const formResultsByType = useMemo(() => {
+    if (!isFormView || sourceTab === 'final') return [] as typeof formResults;
+    return formResults.filter((r) => (r.extraction_type || 'ai') === sourceTab);
+  }, [formResults, isFormView, sourceTab]);
+
+  // Distinct model families across this form's AI runs (for the per-model toggle).
+  // Manual rows have no model_name, so this only makes sense scoped to the AI tab.
   const modelFamiliesInForm = useMemo(() => {
-    if (!isFormView) return [] as string[];
+    if (!isFormView || sourceTab !== 'ai') return [] as string[];
     const present = new Set<string>();
-    for (const r of formResults) present.add(modelFamily(r.model_name));
+    for (const r of formResultsByType) present.add(modelFamily(r.model_name));
     return (['gpt', 'claude', 'gemini', 'other'] as const).filter((f) => present.has(f)) as string[];
-  }, [formResults, isFormView]);
+  }, [formResultsByType, isFormView, sourceTab]);
 
   // Selected model only applies if it actually ran for this form.
   const effectiveModel = selectedModel && modelFamiliesInForm.includes(selectedModel) ? selectedModel : null;
 
-  // Deduplicate form results: keep newest result per document_id. When a model
-  // family is selected, restrict to that family first → latest per paper per model.
+  // Deduplicate form results, scoped to the active source tab. Manual rows are
+  // already unique per (document_id, reviewer_role) at the source — the backend
+  // upserts R1/R2/Adjudicator in place (results.py) — so they're shown as-is,
+  // not merged by document_id. AI rows keep the newest-per-document merge
+  // (optionally restricted to one model family first).
   const deduplicatedFormResults = useMemo(() => {
-    if (!isFormView) return [];
+    if (!isFormView || sourceTab === 'final') return [];
+    if (sourceTab === 'manual') return formResultsByType;
     const source = effectiveModel
-      ? formResults.filter((r) => modelFamily(r.model_name) === effectiveModel)
-      : formResults;
+      ? formResultsByType.filter((r) => modelFamily(r.model_name) === effectiveModel)
+      : formResultsByType;
     const byDoc = new Map<string, typeof formResults[0]>();
     for (const r of source) {
       const existing = byDoc.get(r.document_id);
@@ -469,7 +466,7 @@ function ResultsContent() {
       }
     }
     return Array.from(byDoc.values());
-  }, [formResults, isFormView, effectiveModel]);
+  }, [formResultsByType, isFormView, sourceTab, effectiveModel]);
 
   // Unified results: form view uses deduplicated, extraction view uses per-extraction
   const results = isFormView ? deduplicatedFormResults : extractionResults;
@@ -545,11 +542,13 @@ function ResultsContent() {
   );
 
   const getCompleteness = useCallback((result: ExtractionResult) => {
-    const total = allFieldNames.length;
-    const filled = allFieldNames.filter(f => {
-      const v = extractScalarValue(result.extracted_data[f]);
-      return v && v !== '—' && v !== 'N/A';
-    }).length;
+    // Design-inapplicable fields leave the denominator entirely: they are not
+    // gaps in the paper. Everything else counts as filled only when it is not a
+    // reporting gap — this screen used to count "NR" as filled here while the
+    // flagged-paper logic below counted the same cell as empty.
+    const considered = allFieldNames.filter(f => !fieldIsNotApplicable(result.extracted_data[f]));
+    const total = considered.length;
+    const filled = considered.filter(f => !fieldIsEmpty(result.extracted_data[f])).length;
     return { filled, total, pct: total > 0 ? Math.round((filled / total) * 100) : 0 };
   }, [allFieldNames]);
 
@@ -557,10 +556,13 @@ function ResultsContent() {
   const flaggedOnly = searchParams.get('flagged') === '1';
 
   const isResultFlagged = useCallback((r: ExtractionResult) => {
-    const total = allFieldNames.length;
-    if (total === 0) return false;
-    const empty = allFieldNames.filter(f => fieldIsEmpty(r.extracted_data[f])).length;
-    return empty * 2 > total; // strictly more than half empty
+    // Mirrors the backend's _flagged_more_than_half_empty, including taking
+    // inapplicable fields out of the denominator so a routed form (RoB 2) is
+    // not reported as a badly extracted paper.
+    const considered = allFieldNames.filter(f => !fieldIsNotApplicable(r.extracted_data[f]));
+    if (considered.length === 0) return false;
+    const empty = considered.filter(f => fieldIsEmpty(r.extracted_data[f])).length;
+    return empty * 2 > considered.length; // strictly more than half empty
   }, [allFieldNames]);
 
   const flaggedResults = useMemo(() => results.filter(isResultFlagged), [results, isResultFlagged]);
@@ -936,7 +938,7 @@ function ResultsContent() {
           </div>
 
           {/* Per-model toggle — latest result per paper, by model (All runs view) */}
-          {isFormView && modelFamiliesInForm.length > 1 && (
+          {isFormView && sourceTab === 'ai' && modelFamiliesInForm.length > 1 && (
             <div className="flex items-center gap-7 flex-wrap py-1">
               <span className="text-[11px] text-gray-400 dark:text-zinc-500">
                 {effectiveModel
@@ -996,6 +998,7 @@ function ResultsContent() {
                     results={filteredResults}
                     documentsMap={documentsMap}
                     formFields={formFields}
+                    formId={selectedExtraction?.form_id}
                   />
                 </div>
 

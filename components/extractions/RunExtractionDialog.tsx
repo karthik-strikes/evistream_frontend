@@ -85,7 +85,22 @@ export function RunExtractionDialog({
 
     documentsService
       .getAll(projectId)
-      .then((docs) => setDocuments(docs.filter((d) => d.processing_status === 'completed')))
+      // Mirrors the worker's own rule (extraction_tasks.py): full text, OR thin
+      // evidence a reviewer explicitly accepted. Filtering on `completed` alone
+      // meant accepted documents were never listed, never selectable, and
+      // therefore never sent — the run always posts an explicit document_ids
+      // list. So "Accept for extraction" quietly did nothing for every run
+      // started from this dialog, while the UI showed an Accepted badge and a
+      // toast promising inclusion.
+      .then((docs) =>
+        setDocuments(
+          docs.filter(
+            (d) =>
+              d.processing_status === 'completed' ||
+              (d.processing_status === 'metadata_only' && d.metadata_extraction_approved)
+          )
+        )
+      )
       .catch(() => setDocuments([]));
   }, [isOpen, projectId, initialFormId, initialDocIds]);
 
@@ -428,6 +443,17 @@ export function RunExtractionDialog({
                           {alreadyDone && (
                             <span className="text-[10px] font-medium text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50 px-1.5 py-0.5 rounded-[4px] flex-shrink-0">
                               Extracted
+                            </span>
+                          )}
+                          {/* These are now eligible (they weren't before), so say
+                              so here rather than letting a run quietly include a
+                              document with no full text behind it. */}
+                          {doc.processing_status === 'metadata_only' && (
+                            <span
+                              title="Accepted thin evidence — full-text-only fields will return NR"
+                              className="text-[10px] font-medium text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-900/60 px-1.5 py-0.5 rounded-[4px] flex-shrink-0"
+                            >
+                              {doc.source_type === 'ctgov' ? 'No results' : 'Abstract only'}
                             </span>
                           )}
                         </div>

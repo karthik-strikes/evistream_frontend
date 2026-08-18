@@ -6,7 +6,10 @@ import type { LucideIcon } from 'lucide-react';
 interface ProjectHubCardProps {
   icon: LucideIcon;
   title: string;
-  count: number;
+  /** Omit when the card's subject isn't a collection — pass valueLabel instead. */
+  count?: number;
+  /** Renders in place of `count` for non-countable cards, e.g. 'Set' / 'Not set'. */
+  valueLabel?: string;
   accentColor: string;        // e.g. 'bg-blue-500'
   breakdownLines?: string[];
   actionLabel?: string;
@@ -18,6 +21,7 @@ export function ProjectHubCard({
   icon: Icon,
   title,
   count,
+  valueLabel,
   accentColor,
   breakdownLines = [],
   actionLabel,
@@ -55,10 +59,16 @@ export function ProjectHubCard({
           )}
         </div>
 
-        {/* Count */}
-        <span className="text-2xl font-bold tabular-nums text-gray-900 dark:text-white leading-none">
-          {count}
-        </span>
+        {/* Count, or a state word for cards whose subject isn't countable */}
+        {valueLabel !== undefined ? (
+          <span className="text-base font-semibold text-gray-900 dark:text-white leading-none">
+            {valueLabel}
+          </span>
+        ) : (
+          <span className="text-2xl font-bold tabular-nums text-gray-900 dark:text-white leading-none">
+            {count}
+          </span>
+        )}
 
         {/* Breakdown lines */}
         {breakdownLines.length > 0 && (

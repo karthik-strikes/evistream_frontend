@@ -1,6 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef, Suspense } from 'react';
+import { compareKey, NR_LABEL, NA_LABEL } from '@/lib/absence';
+
+import { useState, useEffect, useCallback, useMemo, useRef, Suspense } from 'react';
+import dynamic from 'next/dynamic';
 import { DashboardLayout } from '@/components/layout';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useProject } from '@/contexts/ProjectContext';
@@ -13,13 +16,36 @@ import type { ConsensusSummary, ConsensusSummaryDoc, Form, FormField } from '@/t
 import { flattenScalarFields, isTableField } from '../manual-extraction/_lib/fieldKinds';
 import {
   ArrowLeft, ArrowRight, FileText, FolderOpen, GripVertical, Loader2, Search,
-  CheckCircle2, Clock, AlertTriangle, Download, ChevronDown, ChevronUp, Info, User, ClipboardList,
+  CheckCircle2, Clock, AlertTriangle, Download, ChevronDown, ChevronRight, ChevronUp, Info, User, ClipboardList,
 } from 'lucide-react';
 import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'react-resizable-panels';
 import { Tooltip } from '@/components/ui/tooltip';
 import { EmptyState } from '@/components/ui';
 import { RingChart } from './_components/RingChart';
-import { UnifiedFieldCard } from './_components/UnifiedFieldCard';
+import { AgreedFieldRow, UnifiedFieldCard, type EvidenceMeta } from './_components/UnifiedFieldCard';
+import {
+  decisionFromResolutionSource,
+  isFieldResolved,
+  isUnfilled,
+  resolveField,
+  type Decision,
+  type SourceKey,
+} from './_lib/resolve';
+import { ROLE_COLORS, sourceColors, STATE_COLORS } from '@/lib/reviewerColors';
+
+// react-pdf pulls in pdfjs-dist, which needs browser-only APIs (DOMMatrix,
+// DOMRect). Lazy-load on the client, exactly as SourceEvidenceDrawer does.
+const PdfHighlightViewer = dynamic(
+  () => import('@/components/PdfHighlightViewer').then(m => m.PdfHighlightViewer),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="flex h-full items-center justify-center text-xs italic text-gray-400 dark:text-zinc-600">
+        Loading PDF viewer…
+      </div>
+    ),
+  },
+);
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -31,23 +57,59 @@ type SourceMeta = { source_text?: string; page?: number; section?: string };
 interface FieldDecision {
   fieldName: string;
   field?: FormField;
+  /** Unwrapped values, for display and for what gets saved. */
   sources: { ai?: any; r1?: any; r2?: any };
+  /**
+   * The same answers with their `{value, source_text, status}` envelopes intact,
+   * used only for agreement comparison.
+   *
+   * Why both: `unwrap()` throws `status` away, so comparing unwrapped values
+   * asked `compareKey` to distinguish a failed extraction from a genuine "not
+   * reported" using nothing but the value text — the one distinction it exists to
+   * make. Two cells that both faulted could read as two reviewers agreeing.
+   * Display still wants the bare value, so the envelope rides alongside rather
+   * than replacing it.
+   */
+  sourceCells: { ai?: any; r1?: any; r2?: any };
   sourceMeta?: { ai?: SourceMeta; r1?: SourceMeta; r2?: SourceMeta };
   agreed: boolean;
   suggestion?: { value: any; source: string; reason: string };
-  decision: string | null;
+  decision: Decision | null;
   customValue: any;
   legacyCorrection: string;
+  /**
+   * The field's declared options. Carried so `resolveField` can recognise a form
+   * author's own spelling of an absence — RoB2's "Not applicable" — as the claim
+   * it is, without rewriting it to the generic token.
+   */
+  options?: string[] | null;
+}
+
+/** The per-document reviewer assignment map, keyed doc → role → who/when. */
+type AssignmentInfo = {
+  name: string;
+  status: string;
+  completed_at: string | null;
+  form_details: Array<{ form_id: string; form_name: string; completed: boolean }>;
+};
+type AssignmentMap = Map<string, Record<string, AssignmentInfo>>;
+
+/** Built in four places from the same rows; one function now. */
+function buildAssignmentMap(rows: any[]): AssignmentMap {
+  const map: AssignmentMap = new Map();
+  for (const a of rows ?? []) {
+    if (!map.has(a.document_id)) map.set(a.document_id, {});
+    map.get(a.document_id)![a.reviewer_role] = {
+      name: a.reviewer_name ?? 'Assigned',
+      status: a.status,
+      completed_at: a.completed_at,
+      form_details: a.form_details ?? [],
+    };
+  }
+  return map;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function agreementBadge(pct: number | null) {
-  if (pct === null) return null;
-  if (pct >= 80) return { label: `${pct}%`, cls: 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400 border border-green-200 dark:border-green-800/40' };
-  if (pct >= 50) return { label: `${pct}%`, cls: 'bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400 border border-amber-200 dark:border-amber-800/40' };
-  return { label: `${pct}%`, cls: 'bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 border border-red-200 dark:border-red-800/40' };
-}
 
 /** Unwrap DSPy-style {value, source_text, ...} or [{rating, ...}] wrappers to native value. */
 function unwrap(raw: any): any {
@@ -67,33 +129,23 @@ function unwrap(raw: any): any {
   return raw;
 }
 
-function valueIsEmpty(v: any): boolean {
-  if (v == null) return true;
-  if (Array.isArray(v)) return v.length === 0;
-  if (typeof v === 'string') {
-    const s = v.trim().toLowerCase();
-    return s === '' || s === 'nr';
-  }
-  return false;
-}
-
-function normalizeForCompare(v: any): string {
-  if (v == null) return '';
-  if (Array.isArray(v)) {
-    return [...v]
-      .map(x => typeof x === 'object' && x !== null ? JSON.stringify(x) : String(x).trim().toLowerCase())
-      .sort()
-      .join('|');
-  }
-  if (typeof v === 'object') return JSON.stringify(v);
-  if (typeof v === 'boolean') return v ? 'true' : 'false';
-  if (typeof v === 'number') return String(v);
-  return String(v).trim().toLowerCase();
-}
-
+/**
+ * Do two sources say the same thing?
+ *
+ * Takes the raw `{value, source_text, status}` cell, not an unwrapped value —
+ * `compareKey` reads `status` to keep a failed extraction from reading as
+ * agreement with a genuine "not reported", and unwrapping first threw that away.
+ * Mirrors `values_agree` in the backend's `utils/value_compare.py`.
+ *
+ * `isUnfilled` first: nothing-recorded is not a claim, so two blanks do not
+ * agree — while two explicit NRs do.
+ */
 function valuesMatch(a: any, b: any): boolean {
-  if (valueIsEmpty(a) || valueIsEmpty(b)) return false;
-  return normalizeForCompare(a) === normalizeForCompare(b);
+  if (isUnfilled(unwrap(a)) || isUnfilled(unwrap(b))) return false;
+  const ka = compareKey(a);
+  const kb = compareKey(b);
+  if (ka === null || kb === null) return false;
+  return ka === kb;
 }
 
 /** Treat has_manual as equivalent to has_r1 for unified view */
@@ -161,35 +213,156 @@ function extractMeta(raw: any): SourceMeta | undefined {
   return { ...(text && { source_text: text }), ...(page && { page }), ...(section && { section }) };
 }
 
-/** Compute majority suggestion when 2+ sources agree */
-function computeSuggestion(sources: { ai?: any; r1?: any; r2?: any }): { value: any; source: string; reason: string } | undefined {
-  const entries: { key: string; val: any }[] = [];
-  if (!valueIsEmpty(sources.ai)) entries.push({ key: 'AI', val: sources.ai });
-  if (!valueIsEmpty(sources.r1)) entries.push({ key: 'R1', val: sources.r1 });
-  if (!valueIsEmpty(sources.r2)) entries.push({ key: 'R2', val: sources.r2 });
+/**
+ * When some but not all sources agree, which value has the majority behind it.
+ *
+ * Takes envelopes (so the comparison keeps `status`) and returns the unwrapped
+ * value, which is what actually gets saved. `reason` is rendered verbatim on the
+ * majority bar — the affordance that made this function reachable at all; it had
+ * been computed, stored and counted in the summary for a value the user could
+ * never see or click.
+ */
+function computeSuggestion(cells: { ai?: any; r1?: any; r2?: any }): { value: any; source: string; reason: string } | undefined {
+  const entries = (['ai', 'r1', 'r2'] as SourceKey[])
+    .filter(k => !isUnfilled(unwrap(cells[k])))
+    .map(k => ({ key: sourceColors(k).short, cell: cells[k] }));
 
   if (entries.length < 2) return undefined;
 
-  // Check each pair
   for (let i = 0; i < entries.length; i++) {
     for (let j = i + 1; j < entries.length; j++) {
-      if (valuesMatch(entries[i].val, entries[j].val)) {
-        const matchingKeys = [entries[i].key, entries[j].key];
-        // Check if a third also matches
-        for (let k = 0; k < entries.length; k++) {
-          if (k !== i && k !== j && valuesMatch(entries[k].val, entries[i].val)) {
-            matchingKeys.push(entries[k].key);
-          }
+      if (!valuesMatch(entries[i].cell, entries[j].cell)) continue;
+      const agreeing = [entries[i].key, entries[j].key];
+      for (let k = 0; k < entries.length; k++) {
+        if (k !== i && k !== j && valuesMatch(entries[k].cell, entries[i].cell)) {
+          agreeing.push(entries[k].key);
         }
-        return {
-          value: entries[i].val,
-          source: matchingKeys.join(' + '),
-          reason: `${matchingKeys.join(' + ')} agree (${matchingKeys.length}/${entries.length})`,
-        };
       }
+      return {
+        value: unwrap(entries[i].cell),
+        source: agreeing.join(' + '),
+        reason: `${agreeing.join(' + ')} agree (${agreeing.length} of ${entries.length})`,
+      };
     }
   }
   return undefined;
+}
+
+/**
+ * The AI / R1 / R2 status dot in a document row, with its detail popover.
+ *
+ * Declared at module scope deliberately. It used to be defined *inside* the
+ * `filteredDocs.map` callback, so React saw a brand-new component type for every
+ * row on every render and remounted all of them — on every keystroke in the
+ * search box, among other things.
+ *
+ * The popover also flips above the dot when there isn't room below. Fixed at
+ * `top-6`, the last rows in a long list opened their popover past the bottom of
+ * the card, where it was clipped.
+ */
+function DotPopover({
+  role, present, assignment, adjudicatorName, isOpen, onToggle, onClose,
+}: {
+  role: 'ai' | 'reviewer_1' | 'reviewer_2';
+  present: boolean;
+  assignment?: AssignmentInfo;
+  adjudicatorName?: string;
+  isOpen: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+}) {
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const [flipUp, setFlipUp] = useState(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    const rect = btnRef.current?.getBoundingClientRect();
+    // ~230px of popover; open upward when that would run off the viewport.
+    if (rect) setFlipUp(window.innerHeight - rect.bottom < 230);
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [isOpen, onClose]);
+
+  const c = ROLE_COLORS[role];
+  const roleLabel = role === 'ai' ? 'AI Extraction' : c.label;
+  const formStatus: 'completed' | 'in_progress' | 'pending' =
+    present ? 'completed' : assignment?.status === 'pending' ? 'pending' : 'in_progress';
+
+  return (
+    <div className="relative flex items-center">
+      <button
+        ref={btnRef}
+        aria-label={`${roleLabel}: ${present ? 'completed' : 'pending'}`}
+        aria-expanded={isOpen}
+        onClick={e => { e.stopPropagation(); onToggle(); }}
+        className={cn(
+          'h-3 w-3 rounded-full border-2 transition-all hover:scale-125 focus:outline-none',
+          present ? cn(c.dot, 'border-transparent') : cn('bg-transparent', c.border),
+        )}
+      />
+      {isOpen && (
+        <div
+          className={cn(
+            'absolute left-0 z-30 w-56 rounded-xl border border-gray-200 bg-white p-3.5 text-left shadow-xl dark:border-[#2a2a2a] dark:bg-[#1a1a1a]',
+            flipUp ? 'bottom-6' : 'top-6',
+          )}
+          onClick={e => e.stopPropagation()}
+        >
+          <div className="mb-2.5 text-[10px] font-bold uppercase tracking-wider text-gray-400 dark:text-zinc-500">
+            {roleLabel}
+          </div>
+
+          {role === 'ai' ? (
+            <>
+              <span className={cn(
+                'rounded-md px-2 py-0.5 text-[11px] font-semibold',
+                present ? c.pill : 'bg-gray-100 text-gray-500 dark:bg-[#2a2a2a] dark:text-zinc-400',
+              )}>
+                {present ? 'Completed' : 'Pending'}
+              </span>
+              <div className="mt-2 text-[11px] text-gray-400 dark:text-zinc-500">Automated extraction by AI model</div>
+            </>
+          ) : assignment ? (
+            <>
+              <div className="mb-2 flex items-center gap-2">
+                <div className={cn('flex h-7 w-7 shrink-0 items-center justify-center rounded-full', c.pill)}>
+                  <User className="h-3.5 w-3.5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="truncate text-xs font-semibold text-gray-800 dark:text-zinc-200">{assignment.name}</div>
+                </div>
+              </div>
+              <span className={cn(
+                'rounded-md px-2 py-0.5 text-[11px] font-semibold',
+                formStatus === 'completed'
+                  ? cn(STATE_COLORS.resolved.bg, STATE_COLORS.resolved.text)
+                  : formStatus === 'in_progress'
+                    ? cn(STATE_COLORS.active.bg, STATE_COLORS.active.text)
+                    : 'bg-gray-100 text-gray-500 dark:bg-[#2a2a2a] dark:text-zinc-400',
+              )}>
+                {formStatus === 'completed' ? 'Completed' : formStatus === 'in_progress' ? 'In progress' : 'Pending'}
+              </span>
+              {assignment.completed_at && formStatus === 'completed' && (
+                <div className="mt-1.5 text-[10px] text-gray-400 dark:text-zinc-500">
+                  {new Date(assignment.completed_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
+                </div>
+              )}
+            </>
+          ) : (
+            <div className="text-xs text-gray-400 dark:text-zinc-500">Unassigned</div>
+          )}
+
+          {role !== 'ai' && (
+            <div className="mt-3 border-t border-gray-100 pt-2.5 text-[11px] text-gray-400 dark:border-[#2a2a2a] dark:text-zinc-500">
+              Consensus reviewer:{' '}
+              <span className="font-semibold text-gray-700 dark:text-zinc-300">{adjudicatorName ?? 'Unassigned'}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
 }
 
 // ─── Main Component ───────────────────────────────────────────────────────────
@@ -217,7 +390,17 @@ function ConsensusContent() {
   const [submitting, setSubmitting] = useState(false);
   const [loadingDocId, setLoadingDocId] = useState<string | null>(null);
   const [agreedCollapsed, setAgreedCollapsed] = useState(true);
-  const [pdfUrl, setPdfUrl] = useState('');
+  /**
+   * The quote the PDF pane is showing.
+   *
+   * Replaces the old `pdfUrl` blob-URL state entirely: PdfHighlightViewer takes a
+   * documentId and owns its own fetch and module-level blob cache, which also
+   * retires the four separate revoke sites this page had — two of which could
+   * revoke the same URL twice.
+   */
+  const [evidenceFocus, setEvidenceFocus] = useState<
+    { source: SourceKey; fieldLabel: string; meta: EvidenceMeta; value: any } | null
+  >(null);
 
   // Track what sources are present for this doc
   const [hasR1R2, setHasR1R2] = useState(false);
@@ -233,7 +416,7 @@ function ConsensusContent() {
   const reviewSeqRef = useRef(0);
 
   // Reviewer assignment map: document_id → { reviewer_1?, reviewer_2?, adjudicator? }
-  const [assignmentMap, setAssignmentMap] = useState<Map<string, Record<string, { name: string; status: string; completed_at: string | null; form_details: Array<{ form_id: string; form_name: string; completed: boolean }> }>>>(new Map());
+  const [assignmentMap, setAssignmentMap] = useState<AssignmentMap>(new Map());
   // Active dot popover: { docId, role }
   const [activePopover, setActivePopover] = useState<{ docId: string; role: string } | null>(null);
 
@@ -255,17 +438,7 @@ function ConsensusContent() {
             assignmentsService.getProjectAssignments(selectedProject.id).catch(() => [] as any[]),
           ]);
           setSummary(summaryData);
-          const map = new Map<string, Record<string, { name: string; status: string; completed_at: string | null; form_details: Array<{ form_id: string; form_name: string; completed: boolean }> }>>();
-          for (const a of (assignments as any[])) {
-            if (!map.has(a.document_id)) map.set(a.document_id, {});
-            map.get(a.document_id)![a.reviewer_role] = {
-              name: a.reviewer_name ?? 'Assigned',
-              status: a.status,
-              completed_at: a.completed_at,
-              form_details: a.form_details ?? [],
-            };
-          }
-          setAssignmentMap(map);
+          setAssignmentMap(buildAssignmentMap(assignments as any[]));
         } catch { /* silent — user can retry by picking form manually */ } finally {
           setLoadingSummary(false);
         }
@@ -287,22 +460,12 @@ function ConsensusContent() {
       resultsService.getConsensusSummary(selectedProject.id, selectedForm.id)
         .then(d => setSummary(d)).catch(() => {});
       assignmentsService.getProjectAssignments(selectedProject.id)
-        .then((asgs: any[]) => {
-          const map = new Map<string, Record<string, { name: string; status: string; completed_at: string | null; form_details: Array<{ form_id: string; form_name: string; completed: boolean }> }>>();
-          for (const a of asgs) {
-            if (!map.has(a.document_id)) map.set(a.document_id, {});
-            map.get(a.document_id)![a.reviewer_role] = { name: a.reviewer_name ?? 'Assigned', status: a.status, completed_at: a.completed_at, form_details: a.form_details ?? [] };
-          }
-          setAssignmentMap(map);
-        }).catch(() => {});
+        .then((asgs: any[]) => setAssignmentMap(buildAssignmentMap(asgs)))
+        .catch(() => {});
     };
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
   }, [selectedProject?.id, selectedForm?.id]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  useEffect(() => {
-    return () => { if (pdfUrl.startsWith('blob:')) URL.revokeObjectURL(pdfUrl); };
-  }, [pdfUrl]);
 
   // URL → state: handles deep links and browser back/forward
   useEffect(() => {
@@ -331,8 +494,7 @@ function ConsensusContent() {
 
     // URL has no doc but we're in review → return to dashboard
     if (!urlDoc && screen === 'review') {
-      if (pdfUrl.startsWith('blob:')) URL.revokeObjectURL(pdfUrl);
-      setPdfUrl('');
+      setEvidenceFocus(null);
       setReviewDoc(null);
       setFields([]);
       setActiveField(null);
@@ -382,17 +544,7 @@ function ConsensusContent() {
         assignmentsService.getProjectAssignments(selectedProject!.id).catch(() => [] as any[]),
       ]);
       setSummary(data);
-      const map = new Map<string, Record<string, { name: string; status: string; completed_at: string | null; form_details: Array<{ form_id: string; form_name: string; completed: boolean }> }>>();
-      for (const a of (assignments as any[])) {
-        if (!map.has(a.document_id)) map.set(a.document_id, {});
-        map.get(a.document_id)![a.reviewer_role] = {
-          name: a.reviewer_name ?? 'Assigned',
-          status: a.status,
-          completed_at: a.completed_at,
-          form_details: a.form_details ?? [],
-        };
-      }
-      setAssignmentMap(map);
+      setAssignmentMap(buildAssignmentMap(assignments as any[]));
     } catch {
       toast({ title: 'Failed to load consensus summary', variant: 'error' });
     } finally {
@@ -408,21 +560,9 @@ function ConsensusContent() {
     const isCurrent = () => seq === reviewSeqRef.current;
 
     try {
-      // Get PDF
-      let blobUrl = '';
-      try {
-        const presignedUrl = await documentsService.getDownloadUrl(doc.document_id);
-        if (!isCurrent()) return;
-        const resp = await fetch(presignedUrl);
-        if (resp.ok && isCurrent()) {
-          const blob = await resp.blob();
-          if (pdfUrl.startsWith('blob:')) URL.revokeObjectURL(pdfUrl);
-          blobUrl = URL.createObjectURL(blob);
-          setPdfUrl(blobUrl);
-        }
-      } catch { /* PDF unavailable */ }
-
-      if (!isCurrent()) return;
+      // No PDF fetch here any more — PdfHighlightViewer takes the documentId and
+      // owns the download, the blocks sidecar and its own blob cache.
+      setEvidenceFocus(null);
 
       // Check for existing consensus/adjudication
       let existingConsensus: any = null;
@@ -494,21 +634,26 @@ function ConsensusContent() {
 
       const built: FieldDecision[] = [];
       for (const { name: fn, field } of orderedFields) {
+        // Envelopes for comparison, unwrapped values for display and saving.
+        const sourceCells: FieldDecision['sourceCells'] = {};
+        if (fn in normalizedAiData) sourceCells.ai = normalizedAiData[fn];
+        if (fn in r1Data) sourceCells.r1 = r1Data[fn];
+        if (fn in r2Data) sourceCells.r2 = r2Data[fn];
+
         const sources: FieldDecision['sources'] = {};
-        if (fn in normalizedAiData) sources.ai = unwrap(normalizedAiData[fn]);
-        if (fn in r1Data) sources.r1 = unwrap(r1Data[fn]);
-        if (fn in r2Data) sources.r2 = unwrap(r2Data[fn]);
+        for (const k of ['ai', 'r1', 'r2'] as SourceKey[]) {
+          if (k in sourceCells) sources[k] = unwrap(sourceCells[k]);
+        }
 
-        // Agreement: ≥2 non-empty sources matching (single-source is NOT auto-agreed)
-        const presentVals: any[] = [];
-        if (sources.ai !== undefined && !valueIsEmpty(sources.ai)) presentVals.push(sources.ai);
-        if (sources.r1 !== undefined && !valueIsEmpty(sources.r1)) presentVals.push(sources.r1);
-        if (sources.r2 !== undefined && !valueIsEmpty(sources.r2)) presentVals.push(sources.r2);
-        const agreed = presentVals.length >= 2 && presentVals.every(v => valuesMatch(v, presentVals[0]));
+        // Agreement: ≥2 recorded sources matching (single-source is NOT auto-agreed)
+        const presentCells = (['ai', 'r1', 'r2'] as SourceKey[])
+          .filter(k => sourceCells[k] !== undefined && !isUnfilled(sources[k]))
+          .map(k => sourceCells[k]);
+        const agreed = presentCells.length >= 2 && presentCells.every(c => valuesMatch(c, presentCells[0]));
 
-        const suggestion = (!agreed && presentVals.length >= 2) ? computeSuggestion(sources) : undefined;
+        const suggestion = (!agreed && presentCells.length >= 2) ? computeSuggestion(sourceCells) : undefined;
 
-        let decision: string | null = agreed ? 'agreed' : null;
+        let decision: Decision | null = agreed ? 'agreed' : null;
         let customValue: any = '';
         let legacyCorrection = '';
 
@@ -517,23 +662,36 @@ function ConsensusContent() {
           if (ed.status === 'correct') decision = 'correct';
           else if (ed.status === 'incorrect') { decision = 'incorrect'; legacyCorrection = ed.correction ?? ''; }
           else if (ed.decision) {
-            decision = ed.decision;
+            decision = ed.decision as Decision;
             if (ed.decision === 'custom') customValue = ed.final_value ?? '';
           }
         }
         if (existingResolutions[fn]) {
+          // Every resolution_source now has a branch. `ai` and `majority` had
+          // none, so a field settled by accepting AI came back undecided and
+          // canSubmit() blocked the document from ever being re-saved.
           const res = existingResolutions[fn];
-          if (res.agreed) decision = 'agreed';
-          else if (res.resolution_source === 'reviewer_1') decision = 'accept_r1';
-          else if (res.resolution_source === 'reviewer_2') decision = 'accept_r2';
-          else if (res.resolution_source === 'custom') { decision = 'custom'; customValue = res.final_value ?? ''; }
+          const restored = decisionFromResolutionSource(res.resolution_source, res.final_value);
+          if (restored) {
+            decision = restored.decision;
+            if (restored.customValue !== undefined) customValue = restored.customValue;
+          } else if (res.agreed) {
+            decision = 'agreed';
+          }
         }
 
         const sm: FieldDecision['sourceMeta'] = {};
-        if (fn in normalizedAiData) { const m = extractMeta(normalizedAiData[fn]); if (m) sm.ai = m; }
-        if (fn in r1Data) { const m = extractMeta(r1Data[fn]); if (m) sm.r1 = m; }
-        if (fn in r2Data) { const m = extractMeta(r2Data[fn]); if (m) sm.r2 = m; }
-        built.push({ fieldName: fn, field, sources, sourceMeta: Object.keys(sm).length ? sm : undefined, agreed, suggestion, decision, customValue, legacyCorrection });
+        for (const k of ['ai', 'r1', 'r2'] as SourceKey[]) {
+          if (k in sourceCells) { const m = extractMeta(sourceCells[k]); if (m) sm[k] = m; }
+        }
+        built.push({
+          fieldName: fn, field, sources, sourceCells,
+          sourceMeta: Object.keys(sm).length ? sm : undefined,
+          // The resolver needs the declared options to recognise a form author's
+          // own spelling of an absence without rewriting it.
+          options: field?.options,
+          agreed, suggestion, decision, customValue, legacyCorrection,
+        });
       }
 
       // Restore draft from localStorage
@@ -541,18 +699,39 @@ function ConsensusContent() {
       try {
         const saved = localStorage.getItem(lsKey);
         if (saved) {
-          const draft: Array<{ fieldName: string; decision: string | null; customValue: any; legacyCorrection: string }> = JSON.parse(saved);
+          const draft: Array<{ fieldName: string; decision: Decision | null; customValue: any; legacyCorrection: string }> = JSON.parse(saved);
           const draftMap = new Map(draft.map(d => [d.fieldName, d]));
           for (const b of built) {
             const d = draftMap.get(b.fieldName);
             if (d && d.decision !== null) {
-              b.decision = d.decision;
+              // Drafts written before the rename still say accept_suggestion.
+              b.decision = d.decision === ('accept_suggestion' as Decision) ? 'accept_majority' : d.decision;
               b.customValue = d.customValue;
               b.legacyCorrection = d.legacyCorrection;
             }
           }
         }
       } catch {}
+
+      // The NR/NA buttons are gone, so a stored or drafted `decision: 'nr'|'na'`
+      // has no control to render — the reviewer would see a "Not reported" pill
+      // above an empty card. Move them into the value editor, where absence now
+      // lives. Placed after every restore (saved decisions, saved resolutions,
+      // and the localStorage draft) so one loop covers all three sources.
+      for (const b of built) {
+        if (b.decision === 'nr') { b.decision = 'custom'; b.customValue = NR_LABEL; }
+        else if (b.decision === 'na') { b.decision = 'custom'; b.customValue = NA_LABEL; }
+      }
+
+      // The NR/NA buttons are gone, so a stored or drafted `decision: 'nr'|'na'`
+      // has no control to render — the reviewer would see a "Not reported" pill
+      // above a card with nothing on it. Move them into the value editor, where
+      // absence now lives. Placed after every restore (saved decisions, saved
+      // resolutions, the localStorage draft) so one loop covers all three.
+      for (const b of built) {
+        if (b.decision === 'nr') { b.decision = 'custom'; b.customValue = NR_LABEL; }
+        else if (b.decision === 'na') { b.decision = 'custom'; b.customValue = NA_LABEL; }
+      }
 
       setFields(built);
       setActiveField(null);
@@ -567,30 +746,39 @@ function ConsensusContent() {
   };
 
   // ── Field update helpers ──────────────────────────────────────────────────────
-  const updateFieldDecision = (idx: number, decision: string) => {
-    setFields(prev => prev.map((f, i) => {
+  const updateFieldDecision = (idx: number, decision: Decision) => {
+    // Build the next array first and advance from *that*. The old version read
+    // the pre-update `fields` closure right after setFields, so fast keyboard use
+    // could pick the advance target from stale state.
+    const next = fields.map((f, i) => {
       if (i !== idx) return f;
-      // For AI-only correct, auto-advance to next
-      if (decision === 'correct' || decision === 'incorrect') {
-        return { ...f, decision, legacyCorrection: decision === 'correct' ? '' : f.legacyCorrection };
-      }
-      // For accept_suggestion, map to the underlying source
-      if (decision === 'accept_suggestion' && f.suggestion) {
-        // Keep as accept_suggestion so we can track it in summary
-        return { ...f, decision: 'accept_suggestion' };
-      }
+      if (decision === 'correct') return { ...f, decision, legacyCorrection: '' };
       return { ...f, decision };
-    }));
-    // Auto-advance for AI-only correct
-    if (decision === 'correct') {
-      const next = fields.findIndex((f, i) => i > idx && f.decision === null);
-      setActiveField(next >= 0 ? next : idx);
-    } else if (decision === 'incorrect') {
+    });
+    setFields(next);
+
+    // 'custom' and 'incorrect' open a text box that needs to keep focus, so they
+    // stay put; everything else moves to the next field still awaiting a call.
+    if (decision === 'custom' || decision === 'incorrect') {
+      setActiveField(idx);
+      return;
+    }
+    const visible = isAiOnly ? next : next.filter(f => !f.agreed);
+    const order = visible.map(f => next.indexOf(f));
+    const here = order.indexOf(idx);
+    const upcoming = [...order.slice(here + 1), ...order.slice(0, Math.max(here, 0))];
+    const target = upcoming.find(i => !isFieldResolved(next[i]));
+    if (target !== undefined) {
+      setActiveField(target);
+      document.getElementById(`field-card-${target}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    } else {
       setActiveField(idx);
     }
   };
 
-  const updateCustomValue = (idx: number, val: string) => {
+  // `any`, not `string`: the table and multi-select editors send arrays, so the
+  // old annotation was simply false.
+  const updateCustomValue = (idx: number, val: any) => {
     setFields(prev => prev.map((f, i) => i === idx ? { ...f, customValue: val } : f));
   };
 
@@ -599,52 +787,25 @@ function ConsensusContent() {
   };
 
   // ── Submit validation ──────────────────────────────────────────────────────────
-  const canSubmit = () => {
-    if (fields.length === 0) return false;
-    return fields.every(f => {
-      if (f.agreed) return true;
-      if (f.decision === null) return false;
-      if (f.decision === 'custom') return !valueIsEmpty(f.customValue);
-      return true;
-    });
-  };
+  // Memoized: this was called three times per render. isFieldResolved also
+  // requires a non-empty correction for 'incorrect', which submission used to
+  // allow — and the resolver then saved the value the reviewer had just rejected.
+  const canSubmit = useMemo(
+    () => fields.length > 0 && fields.every(isFieldResolved),
+    [fields],
+  );
 
-  // ── Keyboard navigation ─────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (screen !== 'review') return;
-    const visibleFields = isAiOnly ? fields : fields.filter(f => !f.agreed);
-    const handler = (e: KeyboardEvent) => {
-      const tag = (e.target as HTMLElement).tagName.toLowerCase();
-      if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
-      if (e.metaKey || e.ctrlKey || e.altKey) return;
-      const visibleIndices = visibleFields.map(f => fields.indexOf(f));
-      const curPos = activeField !== null ? visibleIndices.indexOf(activeField) : -1;
-      if (e.key === 'j' || e.key === 'ArrowDown') {
-        e.preventDefault();
-        const next = curPos + 1 < visibleIndices.length ? visibleIndices[curPos + 1] : visibleIndices[0];
-        if (next !== undefined) { setActiveField(next); document.getElementById(`field-card-${next}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
-      } else if (e.key === 'k' || e.key === 'ArrowUp') {
-        e.preventDefault();
-        const prev = curPos > 0 ? visibleIndices[curPos - 1] : visibleIndices[visibleIndices.length - 1];
-        if (prev !== undefined) { setActiveField(prev); document.getElementById(`field-card-${prev}`)?.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }
-      } else if (activeField !== null) {
-        const f = fields[activeField];
-        if (!f) return;
-        if (e.key === 'a') {
-          if (isAiOnly) updateFieldDecision(activeField, 'correct');
-          else if (f.sources.ai !== undefined) updateFieldDecision(activeField, 'accept_ai');
-        } else if (e.key === '1' && f.sources.r1 !== undefined) {
-          updateFieldDecision(activeField, 'accept_r1');
-        } else if (e.key === '2' && f.sources.r2 !== undefined) {
-          updateFieldDecision(activeField, 'accept_r2');
-        } else if (e.key === 'n') {
-          updateFieldDecision(activeField, 'nr');
-        }
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [screen, isAiOnly, fields, activeField]); // eslint-disable-line react-hooks/exhaustive-deps
+  // No keyboard shortcuts on this screen, by decision.
+  //
+  // There used to be a window-level keydown handler where a single unmodified
+  // letter committed a decision to the active field — `a` accepted AI, `n` set
+  // "not reported", and so on, with no confirmation and no undo beyond picking
+  // again. That is a lot of authority for a keystroke on a screen whose output is
+  // the study's canonical answer, and it fires whenever focus happens to be off
+  // an input. Decisions are click-only now.
+  //
+  // If shortcuts come back, they should be opt-in and should not include the
+  // keys that write a value.
 
   // ── Autosave draft to localStorage ──────────────────────────────────────────────
   useEffect(() => {
@@ -658,31 +819,29 @@ function ConsensusContent() {
 
   // ── Submit ──────────────────────────────────────────────────────────────────────
   const handleSubmit = async () => {
-    if (!canSubmit() || !reviewDoc || !selectedForm) return;
+    if (!canSubmit || !reviewDoc || !selectedForm) return;
     setSubmitting(true);
     try {
-      let agreedCount = 0;
-      let disputedCount = 0;
+      // Resolve every field ONCE. `final_value` and `resolution_source` come out
+      // of the same call, so they cannot disagree — they used to be two separate
+      // decision trees, which is where the agreed-override and empty-correction
+      // bugs lived. The counts come from the same pass too; the adjudication loop
+      // used to compute a pair of counters and then throw them away.
+      const resolved = fields.map(f => ({ f, r: resolveField(f) }));
+      const agreedCount = resolved.filter(({ r }) => r.agreed).length;
+      const disputedCount = resolved.length - agreedCount;
 
       // If R1/R2 data is involved, save adjudication
       if (hasR1R2) {
         const fieldResolutions: Record<string, any> = {};
-        for (const f of fields) {
-          const finalVal = resolveFieldValue(f);
+        for (const { f, r } of resolved) {
           fieldResolutions[f.fieldName] = {
             reviewer_1_value: f.sources.r1 ?? '',
             reviewer_2_value: f.sources.r2 ?? '',
-            agreed: f.agreed || f.decision === 'agreed',
-            final_value: finalVal,
-            resolution_source: f.agreed || f.decision === 'agreed' ? 'agreed'
-              : f.decision === 'accept_r1' ? 'reviewer_1'
-              : f.decision === 'accept_r2' ? 'reviewer_2'
-              : f.decision === 'accept_ai' ? 'ai'
-              : f.decision === 'accept_suggestion' ? 'suggestion'
-              : 'custom',
+            agreed: r.agreed,
+            final_value: r.finalValue,
+            resolution_source: r.source,
           };
-          if (f.agreed || f.decision === 'agreed') agreedCount++;
-          else disputedCount++;
         }
 
         await adjudicationService.resolve({
@@ -696,31 +855,29 @@ function ConsensusContent() {
 
       // Always save consensus record
       const fieldDecisions: Record<string, any> = {};
-      agreedCount = 0;
-      disputedCount = 0;
 
-      for (const f of fields) {
-        const finalVal = resolveFieldValue(f);
+      for (const { f, r } of resolved) {
         if (isAiOnly) {
-          // AI-only mode: correct/incorrect
           fieldDecisions[f.fieldName] = {
             ai_value: f.sources.ai ?? '',
             status: f.decision === 'correct' ? 'correct' : f.decision === 'incorrect' ? 'incorrect' : null,
             correction: f.legacyCorrection || null,
-            final_value: finalVal,
+            // `decision` was missing from this shape, and the restore path needs
+            // it for anything that isn't correct/incorrect — so nr / na / custom
+            // on an AI-only document came back as "Pending" on reopen.
+            decision: f.decision,
+            resolution_source: r.source,
+            final_value: r.finalValue,
           };
-          if (f.decision === 'correct') agreedCount++;
-          else disputedCount++;
         } else {
           fieldDecisions[f.fieldName] = {
             ai_value: f.sources.ai ?? '',
             r1_value: f.sources.r1 ?? null,
             r2_value: f.sources.r2 ?? null,
             decision: f.decision,
-            final_value: finalVal,
+            resolution_source: r.source,
+            final_value: r.finalValue,
           };
-          if (f.agreed || f.decision === 'agreed') agreedCount++;
-          else disputedCount++;
         }
       }
 
@@ -745,14 +902,7 @@ function ConsensusContent() {
           assignmentsService.getProjectAssignments(selectedProject!.id),
         ]);
         if (freshSummary.status === 'fulfilled') setSummary(freshSummary.value);
-        if (freshAsgs.status === 'fulfilled') {
-          const map = new Map<string, Record<string, { name: string; status: string; completed_at: string | null; form_details: Array<{ form_id: string; form_name: string; completed: boolean }> }>>();
-          for (const a of (freshAsgs.value as any[])) {
-            if (!map.has(a.document_id)) map.set(a.document_id, {});
-            map.get(a.document_id)![a.reviewer_role] = { name: a.reviewer_name ?? 'Assigned', status: a.status, completed_at: a.completed_at, form_details: a.form_details ?? [] };
-          }
-          setAssignmentMap(map);
-        }
+        if (freshAsgs.status === 'fulfilled') setAssignmentMap(buildAssignmentMap(freshAsgs.value as any[]));
       } catch {}
 
       setLastReviewDoc(reviewDoc);
@@ -766,29 +916,8 @@ function ConsensusContent() {
     }
   };
 
-  /** Resolve the final value for a field based on its decision */
-  function resolveFieldValue(f: FieldDecision): any {
-    const pickPresent = () => {
-      if (f.sources.ai !== undefined && !valueIsEmpty(f.sources.ai)) return f.sources.ai;
-      if (f.sources.r1 !== undefined && !valueIsEmpty(f.sources.r1)) return f.sources.r1;
-      if (f.sources.r2 !== undefined && !valueIsEmpty(f.sources.r2)) return f.sources.r2;
-      return null;
-    };
-    if (f.agreed || f.decision === 'agreed') return pickPresent();
-    if (f.decision === 'accept_ai') return f.sources.ai ?? null;
-    if (f.decision === 'accept_r1') return f.sources.r1 ?? null;
-    if (f.decision === 'accept_r2') return f.sources.r2 ?? null;
-    if (f.decision === 'accept_suggestion' && f.suggestion) return f.suggestion.value;
-    if (f.decision === 'custom') return f.customValue;
-    if (f.decision === 'correct') return f.sources.ai ?? null;
-    if (f.decision === 'incorrect') return f.legacyCorrection || f.sources.ai || null;
-    if (f.decision === 'nr') return null;
-    return null;
-  }
-
   const goBackToDashboard = () => {
-    if (pdfUrl.startsWith('blob:')) URL.revokeObjectURL(pdfUrl);
-    setPdfUrl('');
+    setEvidenceFocus(null);
     setReviewDoc(null);
     setFields([]);
     setActiveField(null);
@@ -846,7 +975,7 @@ function ConsensusContent() {
     const acceptAi = reviewedFields.filter(f => f.decision === 'accept_ai').length;
     const acceptR1 = reviewedFields.filter(f => f.decision === 'accept_r1').length;
     const acceptR2 = reviewedFields.filter(f => f.decision === 'accept_r2').length;
-    const acceptSuggestion = reviewedFields.filter(f => f.decision === 'accept_suggestion').length;
+    const acceptSuggestion = reviewedFields.filter(f => f.decision === 'accept_majority').length;
     const customCount = reviewedFields.filter(f => f.decision === 'custom').length;
     const correctedCount = reviewedFields.filter(f => f.decision === 'incorrect').length;
 
@@ -935,12 +1064,12 @@ function ConsensusContent() {
             <div className="divide-y divide-gray-100 dark:divide-[#1f1f1f]">
               {reviewedFields.map((f, i) => {
                 const isAgreed = f.agreed || f.decision === 'agreed' || f.decision === 'correct';
-                const finalVal = resolveFieldValue(f);
+                const finalVal = resolveField(f).finalValue;
                 const decisionLabel =
                   f.decision === 'accept_ai' ? 'Accepted AI' :
                   f.decision === 'accept_r1' ? 'Accepted R1' :
                   f.decision === 'accept_r2' ? 'Accepted R2' :
-                  f.decision === 'accept_suggestion' ? 'Auto-accepted (majority)' :
+                  f.decision === 'accept_majority' ? 'Accepted majority' :
                   f.decision === 'custom' ? 'Custom' :
                   f.decision === 'incorrect' ? 'Corrected' : null;
 
@@ -959,7 +1088,7 @@ function ConsensusContent() {
                         {f.fieldName.replace(/_/g, ' ')}
                       </div>
                       <div className="text-sm text-gray-700 dark:text-zinc-300">
-                        {valueIsEmpty(finalVal)
+                        {isUnfilled(finalVal)
                           ? <span className="text-gray-300 dark:text-zinc-600 italic text-xs">empty</span>
                           : Array.isArray(finalVal)
                             ? (finalVal.every((x: any) => typeof x !== 'object' || x === null)
@@ -1007,104 +1136,88 @@ function ConsensusContent() {
     const agreedFields = fields.filter(f => f.agreed);
     const totalDisputed = disputedFields.length;
 
-    // Progress: for AI-only mode count all fields, else count disputed
-    let reviewedCount: number;
-    let progressDenominator: number;
-    if (isAiOnly) {
-      reviewedCount = fields.filter(f => f.decision !== null).length;
-      progressDenominator = totalFields;
-    } else {
-      reviewedCount = disputedFields.filter(f => f.decision !== null).length;
-      progressDenominator = totalDisputed;
-    }
+    // Progress: for AI-only mode count all fields, else count disputed.
+    // Counted with isFieldResolved, so a half-finished "needs correction" no
+    // longer reads as reviewed while submission is still blocked on it.
+    const reviewPool = isAiOnly ? fields : disputedFields;
+    const reviewedCount = reviewPool.filter(isFieldResolved).length;
+    const progressDenominator = reviewPool.length;
     const progressPct = progressDenominator > 0 ? (reviewedCount / progressDenominator) * 100 : 0;
-
-    // Count source-specific resolutions for split progress bar
-    const sourceResolved = disputedFields.filter(f =>
-      f.decision === 'accept_ai' || f.decision === 'accept_r1' || f.decision === 'accept_r2' || f.decision === 'accept_suggestion'
-    ).length;
-    const customResolved = disputedFields.filter(f => f.decision === 'custom').length;
+    const remaining = progressDenominator - reviewedCount;
 
     return (
-      <DashboardLayout title="Consensus" description="Corpus-level consensus review">
+      <DashboardLayout title="Consensus" description="Corpus-level consensus review" fullHeight>
         {/* Header */}
-        <div className="flex items-center gap-2 mb-3">
+        <div className="mb-3 flex flex-shrink-0 items-center gap-2">
           <button
             onClick={goBackToDashboard}
-            className="flex items-center gap-1.5 text-xs font-medium text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-zinc-200 bg-transparent border-none cursor-pointer transition-colors"
+            className="flex cursor-pointer items-center gap-1.5 border-none bg-transparent text-xs font-medium text-gray-500 transition-colors hover:text-gray-700 dark:text-zinc-400 dark:hover:text-zinc-200"
           >
-            <ArrowLeft className="w-3.5 h-3.5" /> Back
+            <ArrowLeft className="h-3.5 w-3.5" /> Back
           </button>
-          <span className="text-gray-300 dark:text-zinc-700 text-xs">·</span>
-          <span className="text-xs font-medium text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] px-2 py-0.5 rounded-md">{selectedForm?.form_name}</span>
-          <span className="text-gray-300 dark:text-zinc-700 text-xs">·</span>
-          <span className="text-xs font-medium text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] px-2 py-0.5 rounded-md truncate max-w-[200px]">{reviewDoc.filename}</span>
-          <span className="text-gray-300 dark:text-zinc-700 text-xs">·</span>
-          <span className="text-xs text-gray-400 dark:text-zinc-500">{totalFields} fields · {totalDisputed} disputed</span>
+          <span className="text-xs text-gray-300 dark:text-zinc-700">·</span>
+          <span className="rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500 dark:bg-[#1a1a1a] dark:text-zinc-400">{selectedForm?.form_name}</span>
+          <span className="text-xs text-gray-300 dark:text-zinc-700">·</span>
+          <span className="max-w-[200px] truncate rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500 dark:bg-[#1a1a1a] dark:text-zinc-400">{reviewDoc.filename}</span>
+          <span className="text-xs text-gray-300 dark:text-zinc-700">·</span>
+          <span className="text-xs text-gray-400 dark:text-zinc-500">{totalFields} fields · {totalDisputed} need review</span>
+          <div className="flex-1" />
+          <span className="text-xs font-semibold tabular-nums text-gray-500 dark:text-zinc-400">
+            {reviewedCount} of {progressDenominator} resolved
+          </span>
+          <div className="h-1.5 w-28 overflow-hidden rounded-full bg-gray-100 dark:bg-[#1a1a1a]">
+            <div
+              className={cn(
+                'h-full rounded-full transition-all duration-300',
+                remaining === 0 ? 'bg-emerald-500' : 'bg-gray-800 dark:bg-zinc-300',
+              )}
+              style={{ width: `${progressPct}%` }}
+            />
+          </div>
         </div>
 
-        <PanelGroup orientation="horizontal" className="gap-0">
-          {/* PDF Panel */}
-          <Panel defaultSize={60} minSize={30}>
-            <div
-              className="flex flex-col rounded-xl border border-gray-200 dark:border-[#1f1f1f] overflow-hidden bg-white dark:bg-[#111111]"
-              style={{ height: 'calc(100vh - 160px)' }}
-            >
-              <div className="flex items-center justify-between px-4 py-2.5 border-b border-gray-100 dark:border-[#1f1f1f] shrink-0">
-                <div className="flex items-center gap-2">
-                  <FileText className="w-3.5 h-3.5 text-gray-400" />
-                  <span className="text-xs font-medium text-gray-600 dark:text-zinc-400 truncate max-w-[260px]">{reviewDoc.filename}</span>
-                </div>
-                <span className="text-xs text-gray-400">{reviewedCount}/{progressDenominator} reviewed</span>
-              </div>
-              <div className="flex-1 relative min-h-0">
-                {pdfUrl
-                  ? <iframe src={pdfUrl} className="w-full h-full border-0" title="PDF viewer" />
-                  : <div className="absolute inset-0 flex items-center justify-center text-sm text-gray-400">No PDF available</div>
+        {/* min-h-0 + the layout's fullHeight is what replaced `calc(100vh - 160px)`:
+            the panes now measure themselves instead of assuming a navbar height. */}
+        <PanelGroup orientation="horizontal" className="min-h-0 flex-1 gap-0">
+          {/* Source document */}
+          <Panel defaultSize={54} minSize={30}>
+            <div className="h-full min-h-0">
+              <PdfHighlightViewer
+                documentId={reviewDoc.document_id}
+                filename={reviewDoc.filename}
+                sourceText={evidenceFocus?.meta.source_text ?? null}
+                initialPage={evidenceFocus?.meta.page ?? null}
+                storedValue={
+                  evidenceFocus ? (typeof evidenceFocus.value === 'string' ? evidenceFocus.value : JSON.stringify(evidenceFocus.value)) : null
                 }
-              </div>
+                fieldLabel={
+                  evidenceFocus ? `${evidenceFocus.fieldLabel} · ${sourceColors(evidenceFocus.source).label}` : null
+                }
+              />
             </div>
           </Panel>
 
-          <PanelResizeHandle className="w-2 mx-1 flex items-center justify-center group cursor-col-resize">
-            <div className="w-1 h-full rounded-full bg-gray-200 dark:bg-[#2a2a2a] group-hover:bg-gray-400 dark:group-hover:bg-zinc-600 transition-colors flex items-center justify-center">
-              <GripVertical className="h-4 w-4 text-gray-400 opacity-0 group-hover:opacity-100 transition-opacity" />
+          <PanelResizeHandle className="group mx-1 flex w-2 cursor-col-resize items-center justify-center">
+            <div className="flex h-full w-1 items-center justify-center rounded-full bg-gray-200 transition-colors group-hover:bg-gray-400 dark:bg-[#2a2a2a] dark:group-hover:bg-zinc-600">
+              <GripVertical className="h-4 w-4 text-gray-400 opacity-0 transition-opacity group-hover:opacity-100" />
             </div>
           </PanelResizeHandle>
 
-          {/* Fields Panel */}
-          <Panel defaultSize={40} minSize={25}>
-            <div
-              className="flex flex-col rounded-xl border border-gray-200 dark:border-[#1f1f1f] overflow-hidden bg-white dark:bg-[#111111]"
-              style={{ height: 'calc(100vh - 160px)' }}
-            >
-              {/* Progress bar */}
-              <div className="px-4 py-2.5 border-b border-gray-100 dark:border-[#1f1f1f] shrink-0">
-                <div className="flex items-center justify-between mb-1.5">
-                  <span className="text-xs font-semibold text-gray-700 dark:text-zinc-300">
-                    {isAiOnly ? 'Review fields' : reviewedCount === totalDisputed && totalDisputed > 0 ? 'All conflicts resolved' : `Resolve ${totalDisputed - reviewedCount} conflict${totalDisputed - reviewedCount !== 1 ? 's' : ''}`}
-                  </span>
-                  <span className="text-xs text-gray-400">{reviewedCount}/{progressDenominator}</span>
-                </div>
-                {isAiOnly ? (
-                  <div className="h-1 bg-gray-100 dark:bg-[#1a1a1a] rounded-full overflow-hidden">
-                    <div
-                      className="h-full bg-gray-800 dark:bg-zinc-300 rounded-full transition-all duration-300"
-                      style={{ width: `${progressPct}%` }}
-                    />
-                  </div>
-                ) : (
-                  <div className="h-1.5 bg-gray-100 dark:bg-[#1a1a1a] rounded-full overflow-hidden flex">
-                    <div
-                      className="h-full bg-green-500 transition-all duration-300"
-                      style={{ width: `${totalDisputed > 0 ? (sourceResolved / totalDisputed) * 100 : 0}%` }}
-                    />
-                    <div
-                      className="h-full bg-amber-400 transition-all duration-300"
-                      style={{ width: `${totalDisputed > 0 ? (customResolved / totalDisputed) * 100 : 0}%` }}
-                    />
-                  </div>
-                )}
+          {/* Fields */}
+          <Panel defaultSize={46} minSize={25}>
+            <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-xl border border-gray-200 bg-white dark:border-[#1f1f1f] dark:bg-[#111111]">
+              {/* Panel title */}
+              <div className="flex flex-shrink-0 items-center justify-between border-b border-gray-100 px-4 py-2.5 dark:border-[#1f1f1f]">
+                <span className="text-sm font-bold text-gray-900 dark:text-white">
+                  {isAiOnly
+                    ? 'Review fields'
+                    : remaining === 0 && progressDenominator > 0
+                      ? 'All conflicts resolved'
+                      : `Resolve ${remaining} conflict${remaining === 1 ? '' : 's'}`}
+                </span>
+                <span className="text-xs tabular-nums text-gray-400 dark:text-zinc-500">
+                  {reviewedCount}/{progressDenominator}
+                </span>
               </div>
 
               {/* Field list */}
@@ -1127,52 +1240,43 @@ function ConsensusContent() {
                   </div>
                 )}
 
-                {/* Agreed fields section (collapsible) */}
+                {/* Fields every source agreed on — one quiet line each, not cards. */}
                 {agreedFields.length > 0 && !isAiOnly && (
                   <div>
                     <button
                       onClick={() => setAgreedCollapsed(c => !c)}
-                      className="w-full flex items-center justify-between px-4 py-2.5 text-xs text-gray-400 dark:text-zinc-500 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors"
+                      className="flex w-full items-center gap-2 border-b border-gray-100 bg-gray-50/60 px-4 py-2.5 text-left transition-colors hover:bg-gray-100/60 dark:border-[#1a1a1a] dark:bg-[#0a0a0a] dark:hover:bg-[#141414]"
                     >
-                      <span className="flex items-center gap-1.5">
-                        {agreedCollapsed ? <ChevronDown className="w-3 h-3" /> : <ChevronUp className="w-3 h-3" />}
-                        <CheckCircle2 className="w-3 h-3 text-green-500" />
-                        {agreedFields.length} agreed field{agreedFields.length !== 1 ? 's' : ''}
+                      {agreedCollapsed
+                        ? <ChevronRight className="h-3 w-3 text-gray-400" />
+                        : <ChevronDown className="h-3 w-3 text-gray-400" />}
+                      <span className={cn('flex h-4 w-4 items-center justify-center rounded-full', STATE_COLORS.resolved.bg, STATE_COLORS.resolved.text)}>
+                        <CheckCircle2 className="h-3 w-3" />
+                      </span>
+                      <span className="text-xs font-semibold text-gray-500 dark:text-zinc-400">
+                        {agreedFields.length} field{agreedFields.length === 1 ? '' : 's'} agree — no action needed
                       </span>
                     </button>
-                    {!agreedCollapsed && agreedFields.map((f) => {
+                    {!agreedCollapsed && agreedFields.map(f => {
                       const realIdx = fields.indexOf(f);
                       return (
-                        <UnifiedFieldCard
+                        <AgreedFieldRow
                           key={realIdx}
-                          id={`field-card-${realIdx}`}
                           fieldName={f.fieldName}
                           field={f.field}
                           sources={f.sources}
-                          sourceMeta={f.sourceMeta}
-                          agreed={f.agreed}
-                          suggestion={f.suggestion}
                           decision={f.decision}
                           customValue={f.customValue}
-                          legacyCorrection={f.legacyCorrection}
-                          onDecision={(d) => updateFieldDecision(realIdx, d)}
-                          onCustomValue={(v) => updateCustomValue(realIdx, v)}
-                          onCorrection={(v) => updateCorrection(realIdx, v)}
-                          isActive={activeField === realIdx}
-                          onClick={() => setActiveField(realIdx)}
+                          onDecision={d => updateFieldDecision(realIdx, d)}
+                          onCustomValue={v => updateCustomValue(realIdx, v)}
                         />
                       );
                     })}
-                    {totalDisputed > 0 && (
-                      <div className="px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-gray-400 dark:text-zinc-600 bg-gray-50/60 dark:bg-[#0a0a0a]">
-                        {totalDisputed} field{totalDisputed !== 1 ? 's' : ''} need{totalDisputed === 1 ? 's' : ''} your decision
-                      </div>
-                    )}
                   </div>
                 )}
 
-                {/* Disputed / AI-only fields */}
-                {(isAiOnly ? fields : disputedFields).map((f) => {
+                {/* Fields that need a decision */}
+                {(isAiOnly ? fields : disputedFields).map(f => {
                   const realIdx = fields.indexOf(f);
                   return (
                     <UnifiedFieldCard
@@ -1187,40 +1291,46 @@ function ConsensusContent() {
                       decision={f.decision}
                       customValue={f.customValue}
                       legacyCorrection={f.legacyCorrection}
-                      onDecision={(d) => updateFieldDecision(realIdx, d)}
-                      onCustomValue={(v) => updateCustomValue(realIdx, v)}
-                      onCorrection={(v) => updateCorrection(realIdx, v)}
+                      onDecision={d => updateFieldDecision(realIdx, d)}
+                      onCustomValue={v => updateCustomValue(realIdx, v)}
+                      onCorrection={v => updateCorrection(realIdx, v)}
                       isActive={activeField === realIdx}
                       onClick={() => setActiveField(realIdx)}
+                      onJumpToEvidence={(source, meta) => {
+                        setActiveField(realIdx);
+                        setEvidenceFocus({
+                          source,
+                          fieldLabel: f.field?.display_name || f.fieldName.replace(/_/g, ' '),
+                          meta,
+                          value: f.sources[source],
+                        });
+                      }}
                     />
                   );
                 })}
               </div>
 
               {/* Submit */}
-              <div className="px-4 py-3 border-t border-gray-100 dark:border-[#1f1f1f] bg-gray-50/60 dark:bg-[#0a0a0a] shrink-0">
+              <div className="flex-shrink-0 border-t border-gray-100 px-4 py-3 dark:border-[#1f1f1f]">
                 <button
                   onClick={handleSubmit}
-                  disabled={submitting || !canSubmit()}
+                  disabled={submitting || !canSubmit}
                   className={cn(
-                    'w-full text-sm font-semibold rounded-lg py-2.5 transition-colors',
-                    canSubmit() && !submitting
-                      ? 'bg-gray-900 dark:bg-zinc-100 text-white dark:text-gray-900 hover:bg-gray-700 dark:hover:bg-white'
-                      : 'bg-gray-100 dark:bg-[#1a1a1a] text-gray-400 dark:text-zinc-600 cursor-not-allowed'
+                    'w-full rounded-lg py-2.5 text-sm font-bold transition-colors',
+                    canSubmit && !submitting
+                      ? 'bg-gray-900 text-white hover:bg-gray-700 dark:bg-zinc-100 dark:text-gray-900 dark:hover:bg-white'
+                      : 'cursor-not-allowed bg-gray-100 text-gray-400 dark:bg-[#1a1a1a] dark:text-zinc-600',
                   )}
                 >
                   {submitting
-                    ? 'Saving...'
+                    ? 'Saving…'
                     : fields.length === 0
                     ? 'Nothing to review'
-                    : !canSubmit()
-                    ? isAiOnly
-                      ? `${totalFields - reviewedCount} fields left`
-                      : `${totalDisputed - reviewedCount} conflicts left`
+                    : !canSubmit
+                    ? `${remaining} decision${remaining === 1 ? '' : 's'} left`
                     : (reviewDoc.has_consensus || reviewDoc.has_adjudication)
                     ? 'Update consensus'
-                    : 'Submit consensus'
-                  }
+                    : 'Submit consensus'}
                 </button>
               </div>
             </div>
@@ -1250,7 +1360,7 @@ function ConsensusContent() {
       results.forEach(r => { if (r) Object.keys(r.field_decisions).forEach(f => allFields.add(f)); });
       const fieldNames = Array.from(allFields).sort();
 
-      const header = ['document', ...fieldNames];
+      const header = ['document', 'ref_id', ...fieldNames];
       const formatCsv = (v: any): string => {
         if (v == null) return '';
         if (Array.isArray(v)) {
@@ -1262,7 +1372,7 @@ function ConsensusContent() {
       };
       const rows = results.map((r, i) => {
         if (!r) return null;
-        const row: string[] = [reviewedDocs[i].filename];
+        const row: string[] = [reviewedDocs[i].filename, String(reviewedDocs[i].ref_id ?? '')];
         fieldNames.forEach(f => {
           const d = r.field_decisions[f];
           const val = d?.final_value ?? d?.correction ?? '';
@@ -1295,12 +1405,17 @@ function ConsensusContent() {
     : sortedDocs;
   const filteredDocs = filterDocs(searchedDocs, filterTab);
 
-  const consensusDone = summary?.summary.consensus_done ?? 0;
-  const adjDone = summary?.summary.adjudication_done ?? 0;
-  const totalDone = consensusDone + adjDone;
-  const totalDocs = summary?.summary.total_docs ?? 0;
-  const needsReviewCount = summary ? tabCount(sortedDocs, 'needs_review') : 0;
-  const doneCount = summary ? tabCount(sortedDocs, 'done') : 0;
+  /**
+   * Documents finished, counted once each.
+   *
+   * This used to be `consensus_done + adjudication_done`, and a dual-reviewer
+   * submit writes BOTH rows — so four finished papers displayed as "Consensus 8",
+   * a number that can exceed the paper count. The backend now returns `docs_done`
+   * (has_consensus OR a *completed* adjudication); the fallback keeps this correct
+   * against an API that hasn't been redeployed yet, since a consensus row is
+   * always written.
+   */
+  const docsDone = summary?.summary.docs_done ?? summary?.summary.consensus_done ?? 0;
   const avgAgreement = summary?.summary.avg_agreement_pct ?? null;
   // When any dual-reviewer assignments exist, unroled manual extractions should NOT
   // be counted under R1 Done — they belong to a role we can't determine without the DB.
@@ -1386,12 +1501,17 @@ function ConsensusContent() {
         {summary && (
           <div className="grid grid-cols-6 divide-x divide-gray-100 dark:divide-[#1f1f1f] rounded-xl overflow-hidden">
             {([
+              // Role tiles read their hue from lib/reviewerColors, so a role is
+              // the same colour here as in the field cards, the queue and the
+              // allocation views. Only the non-role tiles carry literals.
               { label: 'Papers',    value: summary.summary.total_docs,                                                                                         color: 'text-gray-700 dark:text-zinc-300',         bar: 'bg-gray-400' },
-              { label: 'AI Done',   value: summary.summary.ai_done,                                                                                            color: 'text-blue-500 dark:text-blue-400',         bar: 'bg-blue-500' },
-              { label: 'R1 Done',   value: hasDualReviewerAssignments ? summary.summary.r1_done : summary.summary.r1_done + summary.summary.manual_done,       color: 'text-orange-500 dark:text-orange-400',     bar: 'bg-orange-500' },
-              { label: 'R2 Done',   value: summary.summary.r2_done,                                                                                            color: 'text-green-500 dark:text-green-400',       bar: 'bg-green-500' },
-              { label: 'Consensus', value: totalDone || summary.summary.consensus_done,                                                                        color: 'text-emerald-700 dark:text-emerald-500',   bar: 'bg-emerald-600' },
-              { label: 'Agreement', value: avgAgreement,                                                                                                       color: 'text-purple-500 dark:text-purple-400',     bar: 'bg-purple-500', suffix: '%' },
+              { label: 'AI Done',   value: summary.summary.ai_done,                                                                                            color: ROLE_COLORS.ai.text,                        bar: ROLE_COLORS.ai.dot },
+              { label: 'R1 Done',   value: hasDualReviewerAssignments ? summary.summary.r1_done : summary.summary.r1_done + summary.summary.manual_done,       color: ROLE_COLORS.reviewer_1.text,                bar: ROLE_COLORS.reviewer_1.dot },
+              { label: 'R2 Done',   value: summary.summary.r2_done,                                                                                            color: ROLE_COLORS.reviewer_2.text,                bar: ROLE_COLORS.reviewer_2.dot },
+              { label: 'Consensus', value: docsDone,                                                                                                          color: STATE_COLORS.resolved.text,                 bar: 'bg-emerald-600' },
+              // Agreement is a metric, not a role or a state — neutral, so it
+              // doesn't read as "R2" (purple) or "done" (green).
+              { label: 'Agreement', value: avgAgreement,                                                                                                       color: 'text-gray-900 dark:text-white',            bar: 'bg-gray-800 dark:bg-zinc-300', suffix: '%' },
             ] as { label: string; value: number | null; color: string; bar: string; suffix?: string }[]).map(({ label, value, color, bar, suffix }) => {
               const hasValue = value !== null && value > 0;
               return (
@@ -1474,9 +1594,9 @@ function ConsensusContent() {
               style={{ gridTemplateColumns: '1fr 52px 52px 52px 120px 130px 96px' }}
             >
               <span className="text-[11px] font-semibold uppercase tracking-wide text-gray-400 dark:text-zinc-500">Document</span>
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-blue-600 dark:text-blue-400">AI</span>
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-orange-500 dark:text-orange-400">R1</span>
-              <span className="text-[11px] font-semibold uppercase tracking-wide text-green-500 dark:text-green-400">R2</span>
+              <span className={cn('text-[11px] font-semibold uppercase tracking-wide', ROLE_COLORS.ai.text)}>AI</span>
+              <span className={cn('text-[11px] font-semibold uppercase tracking-wide', ROLE_COLORS.reviewer_1.text)}>R1</span>
+              <span className={cn('text-[11px] font-semibold uppercase tracking-wide', ROLE_COLORS.reviewer_2.text)}>R2</span>
               <span className="inline-flex items-center gap-1 text-[11px] font-semibold uppercase tracking-wide text-gray-400 dark:text-zinc-500">
                 Agreement
                 <Tooltip side="bottom" align="end" className="rounded-xl shadow-xl border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] text-gray-700 dark:text-zinc-300 text-[11px] p-3.5 w-56 whitespace-normal leading-relaxed" content="Cross-source agreement percentage across all available extractions.">
@@ -1495,96 +1615,19 @@ function ConsensusContent() {
                 const isLoading = loadingDocId === doc.document_id;
                 const docAssignments = assignmentMap.get(doc.document_id) ?? {};
 
-                const DotPopover = ({ role, color, present }: { role: string; color: string; present: boolean }) => {
-                  const isOpen = activePopover?.docId === doc.document_id && activePopover.role === role;
-                  const assignment = role !== 'ai' ? docAssignments[role] : undefined;
-                  const adj = role !== 'ai' ? docAssignments['adjudicator'] : undefined;
-
-                  const dotColor = role === 'ai'
-                    ? (present ? 'bg-blue-500 border-blue-500' : 'bg-transparent border-blue-200 dark:border-blue-900')
-                    : role === 'reviewer_1'
-                      ? (present ? 'bg-orange-500 border-orange-500' : 'bg-transparent border-orange-300 dark:border-orange-800')
-                      : (present ? 'bg-green-500 border-green-500' : 'bg-transparent border-green-300 dark:border-green-800');
-
-                  const avatarColor = role === 'reviewer_1'
-                    ? 'bg-orange-100 dark:bg-orange-900/20 text-orange-500'
-                    : 'bg-green-100 dark:bg-green-900/20 text-green-500';
-
-                  return (
-                    <div className="relative flex items-center">
-                      <button
-                        onClick={e => { e.stopPropagation(); setActivePopover(p => p?.docId === doc.document_id && p.role === role ? null : { docId: doc.document_id, role }); }}
-                        className={cn('w-3 h-3 rounded-full border-2 transition-all hover:scale-125 focus:outline-none', dotColor)}
-                      />
-                      {isOpen && (
-                        <div
-                          className="absolute left-0 top-6 z-30 bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-xl shadow-xl p-3.5 w-56 text-left"
-                          onClick={e => e.stopPropagation()}
-                        >
-                          <div className="text-[10px] font-bold uppercase tracking-wider text-gray-400 dark:text-zinc-500 mb-2.5">
-                            {role === 'ai' ? 'AI Extraction' : role === 'reviewer_1' ? 'Reviewer 1' : 'Reviewer 2'}
-                          </div>
-
-                          {role === 'ai' ? (
-                            <>
-                              <span className={cn('text-[11px] font-semibold px-2 py-0.5 rounded-md',
-                                present
-                                  ? 'bg-blue-50 dark:bg-blue-900/20 text-blue-600 dark:text-blue-400'
-                                  : 'bg-gray-100 dark:bg-[#2a2a2a] text-gray-500 dark:text-zinc-400'
-                              )}>
-                                {present ? 'Completed' : 'Pending'}
-                              </span>
-                              <div className="text-[11px] text-gray-400 dark:text-zinc-500 mt-2">Automated extraction by AI model</div>
-                            </>
-                          ) : assignment ? (
-                            (() => {
-                              const formEntry = selectedForm
-                                ? assignment.form_details?.find(f => f.form_id === selectedForm.id)
-                                : undefined;
-                              const formStatus: 'completed' | 'in_progress' | 'pending' =
-                                present
-                                  ? 'completed'
-                                  : assignment.status === 'pending' ? 'pending' : 'in_progress';
-                              return (
-                                <>
-                                  <div className="flex items-center gap-2 mb-2">
-                                    <div className={cn('w-7 h-7 rounded-full flex items-center justify-center shrink-0', avatarColor)}>
-                                      <User className="w-3.5 h-3.5" />
-                                    </div>
-                                    <div className="min-w-0">
-                                      <div className="text-xs font-semibold text-gray-800 dark:text-zinc-200 truncate">{assignment.name}</div>
-                                    </div>
-                                  </div>
-                                  <span className={cn('text-[11px] font-semibold px-2 py-0.5 rounded-md',
-                                    formStatus === 'completed'   ? 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-400'
-                                    : formStatus === 'in_progress' ? 'bg-amber-50 dark:bg-amber-900/20 text-amber-700 dark:text-amber-400'
-                                    : 'bg-gray-100 dark:bg-[#2a2a2a] text-gray-500 dark:text-zinc-400'
-                                  )}>
-                                    {formStatus === 'completed' ? 'Completed' : formStatus === 'in_progress' ? 'In progress' : 'Pending'}
-                                  </span>
-                                  {assignment.completed_at && formStatus === 'completed' && (
-                                    <div className="text-[10px] text-gray-400 dark:text-zinc-500 mt-1.5">
-                                      {new Date(assignment.completed_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}
-                                    </div>
-                                  )}
-                                </>
-                              );
-                            })()
-                          ) : (
-                            <div className="text-xs text-gray-400 dark:text-zinc-500">Unassigned</div>
-                          )}
-
-                          {role !== 'ai' && (
-                            <div className="mt-3 pt-2.5 border-t border-gray-100 dark:border-[#2a2a2a] text-[11px] text-gray-400 dark:text-zinc-500">
-                              Consensus reviewer:{' '}
-                              <span className="font-semibold text-gray-700 dark:text-zinc-300">{adj?.name ?? 'Unassigned'}</span>
-                            </div>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  );
-                };
+                const dotFor = (role: 'ai' | 'reviewer_1' | 'reviewer_2', present: boolean) => (
+                  <DotPopover
+                    role={role}
+                    present={present}
+                    assignment={role === 'ai' ? undefined : docAssignments[role]}
+                    adjudicatorName={docAssignments['adjudicator']?.name}
+                    isOpen={activePopover?.docId === doc.document_id && activePopover.role === role}
+                    onToggle={() => setActivePopover(p =>
+                      p?.docId === doc.document_id && p.role === role ? null : { docId: doc.document_id, role },
+                    )}
+                    onClose={() => setActivePopover(null)}
+                  />
+                );
 
                 return (
                   <div
@@ -1592,8 +1635,10 @@ function ConsensusContent() {
                     className={cn(
                       'grid gap-3 items-center px-5 py-3.5 transition-colors',
                       !hasAnySource ? 'opacity-40' : 'hover:bg-gray-50/40 dark:hover:bg-[rgba(255,255,255,0.01)]',
-                      status.type === 'conflicts' && 'border-l-2 border-orange-400',
-                      status.type === 'done'      && 'border-l-2 border-green-500',
+                      // Amber = needs you, emerald = settled. Orange used to mean
+                      // "conflicts" here while also meaning R1 two columns over.
+                      status.type === 'conflicts' && 'border-l-2 border-amber-500',
+                      status.type === 'done'      && 'border-l-2 border-emerald-500',
                     )}
                     style={{ gridTemplateColumns: '1fr 52px 52px 52px 120px 130px 96px' }}
                   >
@@ -1606,14 +1651,14 @@ function ConsensusContent() {
                     </div>
 
                     {/* AI dot */}
-                    <DotPopover role="ai"         color="blue"   present={!!doc.has_ai} />
+                    {dotFor('ai', !!doc.has_ai)}
                     {/* R1 dot: in dual-reviewer mode, only fill when role-tagged R1 data exists */}
                     {(() => {
                       const isDualReviewer = !!docAssignments['reviewer_1'] || !!docAssignments['reviewer_2'];
-                      return <DotPopover role="reviewer_1" color="orange" present={isDualReviewer ? !!doc.has_r1 : docHasR1(doc)} />;
+                      return dotFor('reviewer_1', isDualReviewer ? !!doc.has_r1 : docHasR1(doc));
                     })()}
                     {/* R2 dot */}
-                    <DotPopover role="reviewer_2" color="green"  present={!!doc.has_r2} />
+                    {dotFor('reviewer_2', !!doc.has_r2)}
 
                     {/* Agreement bar */}
                     <div className="flex items-center gap-2">
