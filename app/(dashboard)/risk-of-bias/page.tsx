@@ -24,6 +24,7 @@ import {
 import {
   presetFormDescription, presetFormFields, presetFormName, TOOLS, type RobTool,
 } from './_lib/robTools';
+import { buildLabelMap } from '@/lib/documentLabel';
 
 /** Which extraction a document's judgments should be read from, best first. */
 const SOURCE_RANK: Record<string, number> = { consensus: 3, manual: 2, ai: 1 };
@@ -139,6 +140,9 @@ export default function RiskOfBiasPage() {
     return m;
   }, [docs]);
 
+  // Study IDs ("Raslan 2021") for the assessment grid's row labels.
+  const docLabels = useMemo(() => buildLabelMap(docs as Document[]), [docs]);
+
   const statusByDoc = useMemo(() => {
     const m = new Map<string, ReturnType<typeof assessmentStatus>>();
     for (const d of summary?.documents ?? []) {
@@ -207,14 +211,15 @@ export default function RiskOfBiasPage() {
       const status = statusByDoc.get(documentId) ?? (result ? 'draft' : 'none');
       return {
         documentId,
-        label: (docMap[documentId]?.filename ?? documentId).replace(/\.pdf$/i, ''),
+        label: docLabels[documentId] ?? documentId,
+        labels: docMap[documentId]?.labels ?? [],
         severities,
         overall: overallSeverity(severities),
         status,
         isDraft: status === 'draft',
       };
     }).sort((a, b) => a.label.localeCompare(b.label));
-  }, [bound, tool, displayByDoc, summary, statusByDoc, docMap, outcome]);
+  }, [bound, tool, displayByDoc, summary, statusByDoc, docMap, docLabels, outcome]);
 
   const progressText = useMemo(() => {
     const counts = { agreed: 0, awaiting: 0, conflict: 0, draft: 0, none: 0 };

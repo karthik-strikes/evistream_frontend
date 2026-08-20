@@ -8,10 +8,22 @@
  */
 
 import { fieldIsEmpty } from '@/lib/absence';
-import type { EffectMeasure } from '@/lib/metaAnalysis';
+import { PRECOMPUTED_MEASURES, type EffectMeasure } from '@/lib/metaAnalysis';
+import type { ProportionMethod } from '@/lib/singleGroupMeta';
 import type { LongFormatRow } from '@/lib/longFormatTransform';
 
-export type OutcomeKind = 'dichotomous' | 'continuous';
+/**
+ * `effect` is the third entry path: the table holds an already-computed effect
+ * (an adjusted odds ratio, a hazard ratio) with its own CI or standard error,
+ * and no arm data at all. It is always `wide` — an effect is already a contrast,
+ * so there is no second row to pair it with.
+ */
+/**
+ * `proportion` and `correlation` are the single-group shapes: one row is one
+ * study's own prevalence, or its own correlation, with nothing to compare against.
+ * Both are always `wide` — there is no second row to pair with.
+ */
+export type OutcomeKind = 'dichotomous' | 'continuous' | 'effect' | 'proportion' | 'correlation';
 export type TableLayout = 'wide' | 'long';
 
 /** What the backend can say about a form. */
@@ -25,6 +37,11 @@ export type SlotKey =
   | 'mean_comparator' | 'sd_comparator' | 'n_comparator'
   // long
   | 'value' | 'variability' | 'denominator'
+  // pre-computed effect
+  | 'effect_value' | 'effect_se' | 'effect_ci_lower' | 'effect_ci_upper'
+  // single group
+  | 'prop_events' | 'prop_total'
+  | 'corr_r' | 'corr_n'
   // identity
   | 'arm' | 'outcome' | 'timepoint';
 
@@ -64,18 +81,51 @@ const REQUIRED: Record<string, SlotKey[]> = {
   ],
   'dichotomous|long': ['value', 'denominator', 'arm', 'outcome'],
   'continuous|long': ['value', 'variability', 'denominator', 'arm', 'outcome'],
+  // Precision is required too, but it can come from either the SE column or
+  // both CI bounds — `missingSlots` handles that choice rather than this table.
+  'effect|wide': ['effect_value', 'outcome'],
+  'proportion|wide': ['prop_events', 'prop_total', 'outcome'],
+  'correlation|wide': ['corr_r', 'corr_n', 'outcome'],
 };
 
 export function requiredSlots(kind: OutcomeKind, layout: TableLayout): SlotKey[] {
   return REQUIRED[`${kind}|${layout}`] ?? [];
 }
 
+/**
+ * Which precision columns are mapped for a pre-computed effect.
+ *
+ * A CI is preferred over an SE because it needs no assumption about the scale
+ * the SE was reported on, but either is enough to pool. Both mapped is fine —
+ * `buildStudies` uses the CI and keeps the SE as a fallback per row.
+ */
+export function precisionSources(mapping: Mapping): { se: boolean; ci: boolean } {
+  return {
+    se: !!mapping.effect_se,
+    ci: !!mapping.effect_ci_lower && !!mapping.effect_ci_upper,
+  };
+}
+
+export function precisionConfirmed(mapping: Mapping): boolean {
+  const seOk = mapping.effect_se?.status === 'confirmed';
+  const ciOk =
+    mapping.effect_ci_lower?.status === 'confirmed' &&
+    mapping.effect_ci_upper?.status === 'confirmed';
+  return !!seOk || !!ciOk;
+}
+
 export function allConfirmed(mapping: Mapping, kind: OutcomeKind, layout: TableLayout): boolean {
-  return requiredSlots(kind, layout).every(k => mapping[k]?.status === 'confirmed');
+  const required = requiredSlots(kind, layout).every(k => mapping[k]?.status === 'confirmed');
+  if (kind !== 'effect') return required;
+  return required && precisionConfirmed(mapping);
 }
 
 export function missingSlots(mapping: Mapping, kind: OutcomeKind, layout: TableLayout): SlotKey[] {
-  return requiredSlots(kind, layout).filter(k => !mapping[k]);
+  const missing = requiredSlots(kind, layout).filter(k => !mapping[k]);
+  if (kind !== 'effect') return missing;
+  const { se, ci } = precisionSources(mapping);
+  // Neither precision route is mapped, so name the simpler of the two.
+  return se || ci ? missing : [...missing, 'effect_se'];
 }
 
 export function suggestedCount(mapping: Mapping): number {
@@ -101,6 +151,14 @@ export const SLOT_LABEL: Record<SlotKey, string> = {
   arm: 'Arm column',
   outcome: 'Outcome column',
   timepoint: 'Timepoint column',
+  effect_value: 'Effect estimate',
+  effect_se: 'Standard error',
+  effect_ci_lower: 'CI lower bound',
+  effect_ci_upper: 'CI upper bound',
+  prop_events: 'Events',
+  prop_total: 'Total assessed (n)',
+  corr_r: 'Correlation (r)',
+  corr_n: 'Sample size (n)',
 };
 
 /** Paired rows for the wide layout: one label, one slot per arm. */
@@ -135,6 +193,36 @@ export function longSlots(kind: OutcomeKind): Array<{ key: SlotKey; label: strin
       ];
 }
 
+/**
+ * The columns of a pre-computed effect. The estimate is required; precision can
+ * arrive as an SE or as both CI bounds, which is why all three are offered
+ * rather than one shape being forced.
+ */
+export function effectSlots(): Array<{ key: SlotKey; label: string; hint: string }> {
+  return [
+    { key: 'effect_value', label: 'Effect estimate', hint: 'As the paper reports it — e.g. an adjusted OR of 1.42' },
+    { key: 'effect_se', label: 'Standard error', hint: 'Optional if both CI bounds are mapped' },
+    { key: 'effect_ci_lower', label: 'CI lower bound', hint: 'Preferred over an SE — no scale assumption needed' },
+    { key: 'effect_ci_upper', label: 'CI upper bound', hint: 'Preferred over an SE — no scale assumption needed' },
+  ];
+}
+
+/** The two columns a single-group proportion needs. */
+export function proportionSlots(): Array<{ key: SlotKey; label: string; hint: string }> {
+  return [
+    { key: 'prop_events', label: 'Events', hint: 'How many had the outcome — a count, not a percentage' },
+    { key: 'prop_total', label: 'Total assessed (n)', hint: 'How many were assessed for it' },
+  ];
+}
+
+/** The two columns a correlation needs. */
+export function correlationSlots(): Array<{ key: SlotKey; label: string; hint: string }> {
+  return [
+    { key: 'corr_r', label: 'Correlation (r)', hint: 'Strictly between -1 and 1, as reported' },
+    { key: 'corr_n', label: 'Sample size (n)', hint: 'At least 4 - the variance of Fisher z is 1/(n-3)' },
+  ];
+}
+
 /** Which columns name the outcome and, in a long table, which arm a row is. */
 export function identitySlots(layout: TableLayout): Array<{ key: SlotKey; label: string }> {
   const shared: Array<{ key: SlotKey; label: string }> = [
@@ -151,8 +239,27 @@ export function identityHeader(layout: TableLayout): string {
 }
 
 export function effectOptions(kind: OutcomeKind): EffectMeasure[] {
-  return kind === 'dichotomous' ? ['RR', 'OR', 'RD'] : ['MD', 'SMD'];
+  if (kind === 'dichotomous') return ['RR', 'OR', 'RD'];
+  if (kind === 'continuous') return ['MD', 'SMD'];
+  // A single group has exactly one thing it can be pooled as. The choice that
+  // matters for a proportion is the transform, not the measure.
+  if (kind === 'proportion') return ['PROP'];
+  if (kind === 'correlation') return ['R'];
+  // A pre-computed effect is whatever the paper computed — including measures
+  // (HR, a rate ratio) that no arm-based path on this screen can produce.
+  return PRECOMPUTED_MEASURES;
 }
+
+/**
+ * Which scale the reported effect column is printed on.
+ *
+ * Papers print ratios on the natural scale (OR 1.42), so that is the default and
+ * `buildStudies` logs them. A form that stores log values already — some do, for
+ * exactly this reason — needs the other setting, and getting it wrong is
+ * catastrophic rather than subtle: ln(1.42) = 0.35 pooled as if it were a ratio
+ * of 1.42 is a different conclusion.
+ */
+export type EffectScale = 'natural' | 'log';
 
 // ── Coverage ─────────────────────────────────────────────────────────────────
 
@@ -214,6 +321,12 @@ export interface StoredMapping {
   layout: TableLayout;
   mapping: Mapping;
   comparatorValue?: string;
+  /** Only meaningful when kind is 'effect'. */
+  effectScale?: EffectScale;
+  /** Minimal important difference as typed, on the natural scale. */
+  mid?: string;
+  /** Only meaningful when kind is 'proportion'. */
+  proportionMethod?: ProportionMethod;
   unitActions?: Record<string, string>;
   centralTendencyActions?: Record<string, string>;
   /** Timepoint synonym merges, and which of them the reviewer has confirmed. */

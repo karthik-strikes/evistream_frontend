@@ -21,6 +21,7 @@ import { documentsService } from '@/services/documents.service';
 import {
   parseBlocks,
   findQuoteInBlocks,
+  findBlockByImageFile,
   bboxToViewport,
   type BlocksDocument,
   type QuoteMatch,
@@ -88,6 +89,11 @@ export interface PdfHighlightViewerProps {
   onNext?: () => void;
   hasPrev?: boolean;
   hasNext?: boolean;
+  /** Filename of the figure this quote actually came from, set when the quote
+   *  was lifted from Datalab's automatic description of that figure. When
+   *  present the viewer highlights the picture itself, because that — not the
+   *  caption prose — is the evidence the reviewer needs to check. */
+  captionImage?: string | null;
 }
 
 interface TextLayerMatchMeta {
@@ -141,6 +147,7 @@ export function PdfHighlightViewer({
   onNext,
   hasPrev,
   hasNext,
+  captionImage,
 }: PdfHighlightViewerProps) {
   // ── PDF blob ─────────────────────────────────────────────────────────────
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
@@ -223,11 +230,27 @@ export function PdfHighlightViewer({
 
   // ── Bbox match (preferred when blocks JSON exists) ───────────────────────
   const bboxMatch: QuoteMatch | null = useMemo(() => {
-    if (!blocksDoc || !sourceText) return null;
+    if (!blocksDoc) return null;
+    // A quote lifted from an automatic figure description is evidence about the
+    // FIGURE. Highlight the picture by filename rather than hunting for the
+    // caption text: the markdown caption and the blocks caption are separate
+    // Datalab generations, worded differently, so a text search would often
+    // miss and fall through to the "derived value" callout with no highlight.
+    if (captionImage) {
+      const byImage = findBlockByImageFile(blocksDoc.blocks, captionImage);
+      if (byImage) {
+        dbg('figure match by image file', {
+          documentId, fieldLabel, captionImage,
+          page: byImage.block.pageId + 1, blockType: byImage.block.blockType,
+        });
+        return byImage;
+      }
+    }
+    if (!sourceText) return null;
     const m = findQuoteInBlocks(blocksDoc.blocks, sourceText);
     dbg('bbox match', { documentId, fieldLabel, sourceText: sourceText?.slice(0, 80), match: m ? { page: m.block.pageId + 1, confidence: m.confidence, blockType: m.block.blockType } : null });
     return m;
-  }, [blocksDoc, sourceText, documentId, fieldLabel]);
+  }, [blocksDoc, sourceText, documentId, fieldLabel, captionImage]);
 
   // ── Text-layer page-level match (fallback when no bbox match) ────────────
   const [textLayerMatch, setTextLayerMatch] = useState<TextLayerMatchMeta | null>(null);

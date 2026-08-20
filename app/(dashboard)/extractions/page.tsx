@@ -21,6 +21,7 @@ import {
   FormCoverageRow,
   type PaperProgressState,
 } from '@/components/extractions';
+import { buildLabelMap } from '@/lib/documentLabel';
 
 export default function ExtractionsPage() {
   const { selectedProject } = useProject();
@@ -70,11 +71,13 @@ export default function ExtractionsPage() {
     enabled: !!selectedProject,
   });
 
-  // Build docNamesMap from all documents for the running card to show filenames
+  // Study IDs ("Raslan 2021") for the running card — one map for the whole
+  // project so the a/b suffixes match every other screen.
   const docNamesMap = useMemo(() => {
+    const labels = buildLabelMap(allDocuments);
     const map = new Map<string, string>();
     for (const doc of allDocuments) {
-      map.set(doc.id, doc.filename || doc.id);
+      map.set(doc.id, labels[doc.id] || doc.filename || doc.id);
     }
     return map;
   }, [allDocuments]);

@@ -13,6 +13,9 @@ import { cn } from '@/lib/utils';
 import { PermissionGate } from '@/components/ui/permission-gate';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 import type { ConsensusSummary, ConsensusSummaryDoc, Form, FormField } from '@/types/api';
+import { DocumentTags, TagFilterBar } from '@/components/documents/DocumentTags';
+import { useTagFilter } from '@/hooks/useTagFilter';
+import { docMatchesQuery } from '@/lib/documentTags';
 import { flattenScalarFields, isTableField } from '../manual-extraction/_lib/fieldKinds';
 import {
   ArrowLeft, ArrowRight, FileText, FolderOpen, GripVertical, Loader2, Search,
@@ -382,6 +385,16 @@ function ConsensusContent() {
   const [summary, setSummary] = useState<ConsensusSummary | null>(null);
   const [filterTab, setFilterTab] = useState<FilterTab>('all');
   const [searchQuery, setSearchQuery] = useState('');
+  /**
+   * Document tags, keyed by document id.
+   *
+   * Fetched separately because the consensus summary payload is built from
+   * extraction_results and carries no `labels`. Read from the documents endpoint
+   * rather than widening that payload: tags are a property of the document, and
+   * one more GET here beats a second place that has to remember to join them.
+   */
+  const [docTags, setDocTags] = useState<Record<string, string[]>>({});
+  const { activeTags, toggleTag, clearTags, matchesTags } = useTagFilter();
 
   // Review state
   const [reviewDoc, setReviewDoc] = useState<ConsensusSummaryDoc | null>(null);
@@ -433,11 +446,13 @@ function ConsensusContent() {
         setSelectedForm(preferred);
         setLoadingSummary(true);
         try {
-          const [summaryData, assignments] = await Promise.all([
+          const [summaryData, assignments, docs] = await Promise.all([
             resultsService.getConsensusSummary(selectedProject.id, preferred.id),
             assignmentsService.getProjectAssignments(selectedProject.id).catch(() => [] as any[]),
+            documentsService.getAll(selectedProject.id).catch(() => [] as any[]),
           ]);
           setSummary(summaryData);
+          setDocTags(Object.fromEntries((docs as any[]).map(d => [d.id, d.labels ?? []])));
           setAssignmentMap(buildAssignmentMap(assignments as any[]));
         } catch { /* silent — user can retry by picking form manually */ } finally {
           setLoadingSummary(false);
@@ -988,7 +1003,7 @@ function ConsensusContent() {
               <div className="min-w-0">
                 <div className="text-sm font-semibold text-gray-900 dark:text-white">Consensus Saved</div>
                 <div className="text-xs text-gray-400 dark:text-zinc-500 mt-0.5 truncate">
-                  {lastReviewDoc.filename} · {selectedForm?.form_name}
+                  {lastReviewDoc.study_label || lastReviewDoc.filename} · {selectedForm?.form_name}
                 </div>
               </div>
               <RingChart size={96} strokeWidth={8} green={agreedCount} amber={resolvedCount} total={total} centerLabel={`${pct}%`} />
@@ -1158,7 +1173,7 @@ function ConsensusContent() {
           <span className="text-xs text-gray-300 dark:text-zinc-700">·</span>
           <span className="rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500 dark:bg-[#1a1a1a] dark:text-zinc-400">{selectedForm?.form_name}</span>
           <span className="text-xs text-gray-300 dark:text-zinc-700">·</span>
-          <span className="max-w-[200px] truncate rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500 dark:bg-[#1a1a1a] dark:text-zinc-400">{reviewDoc.filename}</span>
+          <span className="max-w-[200px] truncate rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500 dark:bg-[#1a1a1a] dark:text-zinc-400" title={reviewDoc.filename}>{reviewDoc.study_label || reviewDoc.filename}</span>
           <span className="text-xs text-gray-300 dark:text-zinc-700">·</span>
           <span className="text-xs text-gray-400 dark:text-zinc-500">{totalFields} fields · {totalDisputed} need review</span>
           <div className="flex-1" />
@@ -1184,7 +1199,7 @@ function ConsensusContent() {
             <div className="h-full min-h-0">
               <PdfHighlightViewer
                 documentId={reviewDoc.document_id}
-                filename={reviewDoc.filename}
+                filename={reviewDoc.study_label || reviewDoc.filename}
                 sourceText={evidenceFocus?.meta.source_text ?? null}
                 initialPage={evidenceFocus?.meta.page ?? null}
                 storedValue={
@@ -1372,7 +1387,7 @@ function ConsensusContent() {
       };
       const rows = results.map((r, i) => {
         if (!r) return null;
-        const row: string[] = [reviewedDocs[i].filename, String(reviewedDocs[i].ref_id ?? '')];
+        const row: string[] = [reviewedDocs[i].study_label || reviewedDocs[i].filename, String(reviewedDocs[i].ref_id ?? '')];
         fieldNames.forEach(f => {
           const d = r.field_decisions[f];
           const val = d?.final_value ?? d?.correction ?? '';
@@ -1400,9 +1415,11 @@ function ConsensusContent() {
   };
 
   const sortedDocs = summary ? sortDocs(summary.documents) : [];
-  const searchedDocs = searchQuery
-    ? sortedDocs.filter(d => d.filename.toLowerCase().includes(searchQuery.toLowerCase()))
-    : sortedDocs;
+  const searchedDocs = sortedDocs.filter(
+    d =>
+      docMatchesQuery([d.study_label, d.filename], docTags[d.document_id], searchQuery) &&
+      matchesTags(docTags[d.document_id]),
+  );
   const filteredDocs = filterDocs(searchedDocs, filterTab);
 
   /**
@@ -1552,12 +1569,13 @@ function ConsensusContent() {
               <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
               <input
                 type="text"
-                placeholder="Search documents..."
+                placeholder="Search documents or tags..."
                 value={searchQuery}
                 onChange={e => setSearchQuery(e.target.value)}
                 className="h-8 pl-8 pr-3 text-xs rounded-lg border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-700 dark:text-zinc-300 placeholder-gray-400 dark:placeholder-zinc-500 focus:outline-none focus:ring-1 focus:ring-gray-300 dark:focus:ring-zinc-600 w-48"
               />
             </div>
+            <TagFilterBar activeTags={activeTags} onToggleTag={toggleTag} onClear={clearTags} />
             <div className="flex items-center gap-1">
               {(['all', 'needs_review', 'disputed', 'done'] as FilterTab[]).map(tab => {
                 const count = tabCount(searchedDocs, tab);
@@ -1644,9 +1662,14 @@ function ConsensusContent() {
                   >
                     {/* Filename */}
                     <div className="min-w-0">
-                      <div className="flex items-center gap-2">
+                      <div className="flex min-w-0 items-center gap-2">
                         <FileText className="w-3.5 h-3.5 text-gray-300 dark:text-zinc-600 flex-shrink-0" />
-                        <span className="text-sm text-gray-800 dark:text-zinc-200 truncate">{doc.filename}</span>
+                        <span className="min-w-0 text-sm text-gray-800 dark:text-zinc-200 truncate" title={doc.filename}>{doc.study_label || doc.filename}</span>
+                        <DocumentTags
+                          labels={docTags[doc.document_id]}
+                          activeTags={activeTags}
+                          onToggleTag={toggleTag}
+                        />
                       </div>
                     </div>
 

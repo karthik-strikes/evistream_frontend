@@ -2,8 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
-import { AlertTriangle, BarChart3, FileCheck, FolderOpen } from 'lucide-react';
-import Link from 'next/link';
+import { BarChart3, FileCheck, FolderOpen } from 'lucide-react';
 
 import { DashboardLayout } from '@/components/layout';
 import { EmptyState, Spinner } from '@/components/ui';
@@ -11,8 +10,11 @@ import { useProject } from '@/contexts/ProjectContext';
 import { documentsService, formsService, resultsService, synthesisService } from '@/services';
 import { transformToLongFormat, classifyFields } from '@/lib/longFormatTransform';
 import {
-  runMetaAnalysis, type EffectMeasure, type PoolingModel, type StudyEffect,
+  isRatioMeasure, isSingleGroupMeasure, poolingMethodsFor, runMetaAnalysis,
+  type EffectMeasure, type PoolingModel, type StudyEffect,
 } from '@/lib/metaAnalysis';
+import type { ProportionMethod } from '@/lib/singleGroupMeta';
+import { designGuards } from './_lib/designGuards';
 import type { Document, ExtractionResult, Form } from '@/types/api';
 
 import { StepNav, type Step } from './_components/StepNav';
@@ -22,11 +24,15 @@ import { ComparisonStep } from './_components/ComparisonStep';
 import { ForestPlot } from './_components/ForestPlot';
 import { EvidenceDrawer } from './_components/EvidenceDrawer';
 import { NotPoolableExplainer } from './_components/NotPoolableExplainer';
+import { CorpusBar } from './_components/CorpusBar';
+import { AbsoluteEffectCard } from './_components/AbsoluteEffectCard';
+import { MethodsPanel } from './_components/MethodsPanel';
+import { DesignGuardCard } from './_components/DesignGuardCard';
 import { DiagnosticsStep } from './_components/DiagnosticsStep';
 import { HarmonizeCard, DirectionCard } from './_components/ReconcileCards';
 import {
   allConfirmed, columnCoverage, effectOptions, loadMapping, saveMapping,
-  type Mapping, type OutcomeKind, type SlotKey, type TableLayout,
+  type EffectScale, type Mapping, type OutcomeKind, type SlotKey, type TableLayout,
 } from './_lib/mapping';
 import {
   ALL_COMPARISONS, buildPairings, buildStudies,
@@ -52,6 +58,14 @@ export default function SynthesisPage() {
   const [formId, setFormId] = useState('');
   const [kind, setKind] = useState<OutcomeKind>('dichotomous');
   const [layout, setLayout] = useState<TableLayout>('wide');
+  /** Only read when kind is 'effect' — which scale the reported effect column is on. */
+  const [effectScale, setEffectScale] = useState<EffectScale>('natural');
+  /** Minimal important difference, as typed, on the natural scale. '' means none. */
+  const [mid, setMid] = useState('');
+  /** Assumed comparator risk for the absolute effect, as typed (percent). '' = use the corpus. */
+  const [assumedRisk, setAssumedRisk] = useState('');
+  /** How a proportion corpus is pooled. Only read when the measure is PROP. */
+  const [proportionMethod, setProportionMethod] = useState<ProportionMethod>('glmm');
   const [mapping, setMapping] = useState<Mapping>({});
   const [comparatorValue, setComparatorValue] = useState('');
   const [variabilityActions, setVariabilityActions] = useState<Record<string, VariabilityAction>>({});
@@ -148,10 +162,17 @@ export default function SynthesisPage() {
    * counts documents whose contributing row is a human one.
    */
   const provenance = useMemo(() => {
-    let reviewed = 0;
-    for (const r of chosen) if ((SOURCE_RANK[r.extraction_type] ?? 0) >= 2) reviewed++;
+    let consensus = 0;
+    let manual = 0;
+    for (const r of chosen) {
+      if (r.extraction_type === 'consensus') consensus++;
+      else if ((SOURCE_RANK[r.extraction_type] ?? 0) >= 2) manual++;
+    }
+    const reviewed = consensus + manual;
     const total = consensusSummary?.summary.total_docs ?? chosen.length;
     return {
+      consensus,
+      manual,
       reviewed,
       aiOnly: chosen.length - reviewed,
       withData: chosen.length,
@@ -214,6 +235,9 @@ export default function SynthesisPage() {
     if (stored) {
       setKind(stored.kind);
       setLayout(stored.layout);
+      if (stored.effectScale) setEffectScale(stored.effectScale);
+      if (stored.mid != null) setMid(stored.mid);
+      if (stored.proportionMethod) setProportionMethod(stored.proportionMethod);
       setMapping(stored.mapping);
       setComparatorValue(stored.comparatorValue ?? '');
       setVariabilityActions((stored.unitActions ?? {}) as Record<string, VariabilityAction>);
@@ -238,7 +262,8 @@ export default function SynthesisPage() {
 
   useEffect(() => {
     if (!suggestion || !activeFormId) return;
-    if (suggestion.verdict !== 'dichotomous' && suggestion.verdict !== 'continuous') return;
+    const mappable = ['dichotomous', 'continuous', 'effect', 'proportion', 'correlation'];
+    if (!mappable.includes(suggestion.verdict)) return;
     // A saved mapping is the reviewer's own work and outranks a fresh suggestion,
     // unless they explicitly asked for a new one.
     if (loadMapping(activeFormId) && suggestNonce === 0) return;
@@ -251,23 +276,26 @@ export default function SynthesisPage() {
         why: suggestion.per_slot_reasoning[role],
       };
     }
-    setKind(suggestion.verdict);
-    setLayout(suggestion.layout ?? 'wide');
+    setKind(suggestion.verdict as OutcomeKind);
+    setLayout(suggestion.verdict === 'dichotomous' || suggestion.verdict === 'continuous'
+      ? suggestion.layout ?? 'wide'
+      : 'wide');
     setMapping(next);
     if (suggestion.comparator_value) setComparatorValue(suggestion.comparator_value);
-    setMeasure(suggestion.verdict === 'dichotomous' ? 'RR' : 'MD');
+    setMeasure(effectOptions(suggestion.verdict as OutcomeKind)[0]);
   }, [suggestion, activeFormId, suggestNonce]);
 
   useEffect(() => {
     if (!activeFormId || Object.keys(mapping).length === 0) return;
     saveMapping(activeFormId, {
-      kind, layout, mapping, comparatorValue,
+      kind, layout, mapping, comparatorValue, effectScale, mid, proportionMethod,
       unitActions: variabilityActions,
       centralTendencyActions: centralActions,
       harmonizeChoices, harmonizeConfirmed, directionChoices, directionConfirmed,
     });
-  }, [activeFormId, kind, layout, mapping, comparatorValue, variabilityActions, centralActions,
-    harmonizeChoices, harmonizeConfirmed, directionChoices, directionConfirmed]);
+  }, [activeFormId, kind, layout, mapping, comparatorValue, effectScale, mid, proportionMethod,
+    variabilityActions, centralActions, harmonizeChoices, harmonizeConfirmed, directionChoices,
+    directionConfirmed]);
 
   // ── Derived columns ────────────────────────────────────────────────────────
 
@@ -383,6 +411,8 @@ export default function SynthesisPage() {
   const built = useMemo(
     () => buildStudies(selected, {
       kind, layout, mapping,
+      measure,
+      effectScale,
       variabilityMeasureColumn,
       centralTendencyMeasureColumn: centralMeasureColumn,
       variabilityActions,
@@ -391,14 +421,115 @@ export default function SynthesisPage() {
       directions: effectiveDirections,
       directionsConfirmed: directionConfirmed,
     }),
-    [selected, kind, layout, mapping, variabilityMeasureColumn, centralMeasureColumn,
-      variabilityActions, centralActions, scaleColumn, effectiveDirections, directionConfirmed],
+    [selected, kind, layout, mapping, measure, effectScale, variabilityMeasureColumn,
+      centralMeasureColumn, variabilityActions, centralActions, scaleColumn, effectiveDirections,
+      directionConfirmed],
   );
 
+  /** Typed as a percent, used as a proportion. Blank leaves the corpus's own rate. */
+  const assumedRiskValue = useMemo(() => {
+    const n = Number(assumedRisk.replace('%', '').trim());
+    return assumedRisk.trim() !== '' && Number.isFinite(n) && n > 0 && n < 100 ? n / 100 : null;
+  }, [assumedRisk]);
+
+  /**
+   * Where a study design is recorded.
+   *
+   * Almost never the form being synthesised: in this corpus the outcome tables and
+   * the study-characteristics tables are separate forms, so a guard that only read
+   * the mapped table would never fire on real data. This looks across the
+   * project's forms for a design-ish field, preferring one with declared options
+   * (a select carries a controlled vocabulary; free text does not) and preferring
+   * the current form if it happens to have one.
+   */
+  const designSource = useMemo(() => {
+    const named = /(^|_)(design|study_type|study_design|trial_design|study_kind)(_|$)/i;
+    const candidates: Array<{ formId: string; formName: string; field: string; score: number }> = [];
+    for (const f of forms as Form[]) {
+      for (const field of (f.fields ?? [])) {
+        if (!field || typeof field !== 'object') continue;
+        const name = (field as any).field_name as string | undefined;
+        if (!name || !named.test(name)) continue;
+        const hasOptions = Array.isArray((field as any).options) && (field as any).options.length > 0;
+        candidates.push({
+          formId: f.id,
+          formName: f.form_name,
+          field: name,
+          score: (f.id === activeFormId ? 4 : 0) + (hasOptions ? 2 : 0) + 1,
+        });
+      }
+    }
+    candidates.sort((a, b) => b.score - a.score);
+    return candidates[0] ?? null;
+  }, [forms, activeFormId]);
+
+  const { data: designResults = [] } = useQuery({
+    queryKey: ['synthesis-design', projectId, designSource?.formId],
+    queryFn: () => resultsService.getAllForForm(projectId, designSource!.formId),
+    enabled: !!projectId && !!designSource && designSource.formId !== activeFormId,
+    retry: false,
+  });
+
+  /**
+   * Document id -> design string, taking the highest-trust extraction per document
+   * exactly as the plotted values do (adjudicated over manual over AI), so the
+   * design a guard reasons about is the one a reviewer would have signed off.
+   */
+  const designByDocument = useMemo(() => {
+    if (!designSource) return {};
+    const rows = designSource.formId === activeFormId ? results : designResults;
+    const best = new Map<string, { rank: number; value: string }>();
+    for (const r of rows as ExtractionResult[]) {
+      const rank = SOURCE_RANK[r.extraction_type] ?? 0;
+      const data = (r.extracted_data ?? {}) as Record<string, any>;
+      const cell = data[designSource.field];
+      const raw = cell && typeof cell === 'object' && 'value' in cell ? cell.value : cell;
+      const value = raw == null ? '' : String(raw).trim();
+      if (!value) continue;
+      const current = best.get(r.document_id);
+      if (!current || rank > current.rank) best.set(r.document_id, { rank, value });
+    }
+    return Object.fromEntries([...best.entries()].map(([doc, v]) => [doc, v.value]));
+  }, [designSource, activeFormId, results, designResults]);
+
   const meta = useMemo(
-    () => runMetaAnalysis(built.studies, measure, model),
-    [built.studies, measure, model],
+    () => runMetaAnalysis(built.studies, measure, model, {
+      comparatorRisk: assumedRiskValue,
+      proportionMethod,
+    }),
+    [built.studies, measure, model, assumedRiskValue, proportionMethod],
   );
+
+  /**
+   * The MID on the analysis scale, or null. Entered on the natural scale because
+   * that is how a clinical threshold is discussed ("an RR of 1.25"), and logged
+   * here for the ratio measures — the one place that conversion happens.
+   */
+  const midValue = useMemo(() => {
+    const raw = Number(mid.trim());
+    if (mid.trim() === '' || !Number.isFinite(raw)) return null;
+    if (isRatioMeasure(measure)) return raw > 0 ? raw : null;
+    return raw !== 0 ? Math.abs(raw) : null;
+  }, [mid, measure]);
+
+  /**
+   * A pooling method the reviewer selected but which cannot run keeps the old
+   * selection out of the way rather than leaving a dropdown pointing at nothing:
+   * the refusal is shown, and the plot shows no pooled estimate.
+   */
+  const designChecks = useMemo(
+    () => designGuards(meta.studies, designByDocument, measure),
+    [meta.studies, designByDocument, measure],
+  );
+
+  const modelOptions = useMemo(
+    () => poolingMethodsFor(measure, built.studies.every(st => !st.precomputed)),
+    [measure, built.studies],
+  );
+
+  useEffect(() => {
+    if (!modelOptions.includes(model)) setModel('random');
+  }, [modelOptions, model]);
 
   // Studies the statistics could not use are exclusions too — merge them in so
   // the ledger total always reconciles with what the plot shows.
@@ -499,7 +630,11 @@ export default function SynthesisPage() {
 
   const exportCsv = useCallback(() => {
     const binary = kind === 'dichotomous';
-    const header = binary
+    const precomputed = kind === 'effect';
+    const header = precomputed
+      ? ['Study', 'Reported estimate', 'Reported CI / SE', `${measure} (analysis scale)`, 'SE (analysis scale)',
+         measure, 'CI lower', 'CI upper', 'Weight %']
+      : binary
       ? ['Study', 'Events (treatment)', 'Total (treatment)', 'Events (comparator)', 'Total (comparator)',
          measure, 'CI lower', 'CI upper', 'Weight %']
       : ['Study', 'Mean (treatment)', 'SD (treatment)', 'N (treatment)',
@@ -515,14 +650,21 @@ export default function SynthesisPage() {
     for (const s of meta.studies) {
       const t = s.treatment as any;
       const c = s.comparator as any;
-      const cells = binary
+      const pc = s.precomputed;
+      const cells = precomputed && pc
+        ? [s.label, pc.reported.est,
+           pc.reported.lo != null && pc.reported.hi != null
+             ? `${pc.reported.lo} to ${pc.reported.hi}`
+             : pc.reported.se != null ? `SE ${pc.reported.se}` : '',
+           +pc.y.toFixed(6), +pc.se.toFixed(6)]
+        : binary
         ? [s.label, t.events, t.total, c.events, c.total]
         : [s.label, t.mean, t.sd, t.n, c.mean, c.sd, c.n];
       lines.push([...cells, s.est.toFixed(4), s.lo.toFixed(4), s.hi.toFixed(4),
         s.weightPct.toFixed(2)].map(esc).join(','));
     }
     if (meta.pooled) {
-      const blanks = binary ? 4 : 6;
+      const blanks = precomputed ? 4 : binary ? 4 : 6;
       lines.push(['Total', ...Array(blanks).fill(''),
         meta.pooled.est.toFixed(4), meta.pooled.lo.toFixed(4), meta.pooled.hi.toFixed(4), '100.00',
       ].map(esc).join(','));
@@ -540,10 +682,27 @@ export default function SynthesisPage() {
   // ── Render ─────────────────────────────────────────────────────────────────
 
   const loading = formsLoading || resultsLoading;
-  const poolable = suggestion?.verdict === 'dichotomous' || suggestion?.verdict === 'continuous';
+  // The model classifies for arm data, so a table holding only a published effect
+  // comes back not_poolable. `kind === 'effect'` is the reviewer having said
+  // otherwise on the explainer's own escape hatch, and it outranks the verdict —
+  // the classifier is advice, not a gate.
+  const poolable = suggestion?.verdict === 'dichotomous'
+    || suggestion?.verdict === 'continuous'
+    || suggestion?.verdict === 'effect'
+    || suggestion?.verdict === 'proportion'
+    || suggestion?.verdict === 'correlation'
+    || kind === 'effect' || kind === 'proportion' || kind === 'correlation';
 
-  const treatmentHeading = kind === 'dichotomous' ? 'Treatment n/N' : 'Treatment N';
-  const comparatorHeading = kind === 'dichotomous' ? 'Comparator n/N' : 'Comparator N';
+  // A pre-computed effect has no arms, so those two columns carry what the source
+  // reported and how precise it said that was (see studyDataCells).
+  const treatmentHeading = kind === 'effect' ? 'As reported'
+    : kind === 'proportion' ? 'Events / n'
+    : kind === 'correlation' ? 'r'
+    : kind === 'dichotomous' ? 'Treatment n/N' : 'Treatment N';
+  const comparatorHeading = kind === 'effect' ? 'Precision'
+    : kind === 'proportion' ? 'Observed'
+    : kind === 'correlation' ? 'Sample'
+    : kind === 'dichotomous' ? 'Comparator n/N' : 'Comparator N';
 
   let body: React.ReactNode;
 
@@ -582,7 +741,16 @@ export default function SynthesisPage() {
             ))}
           </select>
         </div>
-        <NotPoolableExplainer suggestion={suggestion} formName={form?.form_name ?? 'This form'} />
+        <NotPoolableExplainer
+          suggestion={suggestion}
+          formName={form?.form_name ?? 'This form'}
+          onUseReportedEffect={() => {
+            setKind('effect');
+            setLayout('wide');
+            setMeasure('OR');
+            setStep(1);
+          }}
+        />
       </>
     );
   } else {
@@ -590,22 +758,15 @@ export default function SynthesisPage() {
       <>
         <StepNav step={step} furthest={furthest} onGo={go} />
 
-        {provenance.withData > 0 && provenance.reviewed < provenance.total && (
-          <div className="flex items-center gap-2.5 border border-amber-200 bg-amber-50 rounded-lg px-3.5 py-2.5 mb-4 dark:border-amber-900/60 dark:bg-amber-500/5">
-            <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-500 flex-shrink-0" />
-            <span className="text-[13px] text-amber-900 dark:text-amber-200 flex-1">
-              {provenance.reviewed} of {provenance.total} documents contribute reviewer-checked
-              values.
-              {provenance.aiOnly > 0 && ` ${provenance.aiOnly} contribute unreviewed AI extractions.`}
-              {provenance.missing > 0 && ` ${provenance.missing} have no extraction for this form yet.`}
-            </span>
-            <Link
-              href={`/consensus?form=${encodeURIComponent(activeFormId)}`}
-              className="text-[13px] font-medium text-amber-800 dark:text-amber-300 whitespace-nowrap hover:underline"
-            >
-              Go to Consensus →
-            </Link>
-          </div>
+        {provenance.withData > 0 && (
+          <CorpusBar
+            consensus={provenance.consensus}
+            manual={provenance.manual}
+            aiOnly={provenance.aiOnly}
+            missing={provenance.missing}
+            total={provenance.total}
+            href={`/consensus?form=${encodeURIComponent(activeFormId)}`}
+          />
         )}
 
         {step === 1 && (
@@ -631,8 +792,17 @@ export default function SynthesisPage() {
             columnNames={selectableColumns}
             kind={kind}
             layout={layout}
-            onKind={k => { setKind(k); setMeasure(k === 'dichotomous' ? 'RR' : 'MD'); }}
+            onKind={k => {
+              setKind(k);
+              setMeasure(effectOptions(k)[0]);
+              // An effect, a prevalence and a correlation are each already one row
+              // per study — there is no second row to pair against, so the long
+              // layout cannot apply to any of them.
+              if (k !== 'dichotomous' && k !== 'continuous') setLayout('wide');
+            }}
             onLayout={setLayout}
+            effectScale={effectScale}
+            onEffectScale={setEffectScale}
             mapping={mapping}
             onSelect={setSlot}
             onConfirm={confirmSlot}
@@ -727,7 +897,11 @@ export default function SynthesisPage() {
                 : mapping.arm?.col ?? null
             }
             measure={measure} onMeasure={setMeasure} measureOptions={effectOptions(kind)}
-            model={model} onModel={setModel}
+            model={model} onModel={setModel} modelOptions={modelOptions}
+            mid={mid} onMid={setMid}
+            proportionMethod={proportionMethod} onProportionMethod={setProportionMethod}
+            sparseDataWarning={meta.sparseDataWarning}
+            poolingMethodRefusal={meta.poolingMethodRefusal}
             ledger={{
               matched: selected.length,
               included: meta.studies.length,
@@ -750,16 +924,49 @@ export default function SynthesisPage() {
               description="Every matching study was excluded. Step back to the ledger to see why."
             />
           ) : (
-            <ForestPlot
-              result={meta}
-              outcomeLabel={outcome || 'All outcomes'}
-              comparisonLabel={comparison || ALL_COMPARISONS}
-              treatmentHeading={treatmentHeading}
-              comparatorHeading={comparatorHeading}
-              onOpenStudy={setDrawer}
-              onExport={exportCsv}
-              onDiagnostics={() => go(4)}
-            />
+            <>
+              <ForestPlot
+                result={meta}
+                outcomeLabel={outcome || 'All outcomes'}
+                comparisonLabel={comparison || ALL_COMPARISONS}
+                treatmentHeading={treatmentHeading}
+                comparatorHeading={comparatorHeading}
+                onOpenStudy={setDrawer}
+                onExport={exportCsv}
+                onDiagnostics={() => go(4)}
+                fileBase={`${form?.form_name ?? 'synthesis'}-${measure}`}
+                mid={midValue}
+              />
+              {/*
+                The reading comes first: it is the one thing here a reviewer will
+                quote. The absolute effect and the design check fold to a single
+                line each, so four stacked essays became a plot plus three
+                conclusions.
+              */}
+              <MethodsPanel
+                result={meta}
+                outcomeLabel={outcome || 'All outcomes'}
+                comparisonLabel={comparison || ALL_COMPARISONS}
+              />
+              {/*
+                A single-group measure has no comparator risk to translate
+                against, so the card would have nothing to say — and a card whose
+                only content is "not applicable" is noise, not information.
+              */}
+              {meta.pooled && !isSingleGroupMeasure(meta.measure) && (
+                <AbsoluteEffectCard
+                  result={meta}
+                  assumedRisk={assumedRisk}
+                  onAssumedRisk={setAssumedRisk}
+                />
+              )}
+              <DesignGuardCard
+                checks={designChecks}
+                sourceLabel={designSource
+                  ? `${designSource.field} on ${designSource.formName}`
+                  : null}
+              />
+            </>
           )
         )}
 

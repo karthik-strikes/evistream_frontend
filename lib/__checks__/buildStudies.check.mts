@@ -23,6 +23,7 @@ import {
   facetsOf,
   groupExclusions,
   parseNumber,
+  precomputedFromCells,
   toStandardDeviation,
   type Pairing,
 } from '../../app/(dashboard)/synthesis/_lib/buildStudies.ts';
@@ -535,6 +536,180 @@ const confirmed = (cols: Record<string, string>): Mapping =>
   check('the comparator label column is found', arms.comparator === 'arm2_label');
   const none = detectArmLabelColumns(['events_n', 'n_analyzed']);
   check('no arm labels is honest about it', none.treatment === null && none.comparator === null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pre-computed effects — reading a published estimate and its precision
+//
+// Hand-computed throughout, because this is where a scale mistake would be
+// invisible: an OR of 1.42 with a CI of 1.05 to 1.92 has ln(1.42) = 0.35066 and
+// SE = (ln 1.92 - ln 1.05)/3.92 = (0.65233 - 0.04879)/3.92 = 0.15396. Pooling
+// 1.42 unlogged instead would be a different meta-analysis entirely.
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const ci = precomputedFromCells(1.42, { lo: 1.05, hi: 1.92 }, null, true, 'natural');
+  check('a natural-scale ratio with a CI is usable', ci.ok);
+  if (ci.ok) {
+    close('the ratio is logged for the analysis scale', ci.effect.y, 0.3506569, 1e-6);
+    close('the SE comes from the logged CI width', ci.effect.se, 0.1539625, 1e-6);
+    check('the CI route is recorded', ci.effect.reported.derivedFrom === 'ci');
+    check('what the paper printed is kept', ci.effect.reported.est === 1.42
+      && ci.effect.reported.lo === 1.05 && ci.effect.reported.hi === 1.92);
+  }
+
+  // An already-logged column is used as it stands. Getting this wrong in either
+  // direction changes the pooled estimate, so both settings are pinned.
+  const logged = precomputedFromCells(0.2, { lo: -0.2, hi: 0.6 }, null, true, 'log');
+  check('a log-scale effect is not logged again', logged.ok && logged.effect.y === 0.2);
+  if (logged.ok) close('a log-scale CI width divides by 3.92', logged.effect.se, 0.2040816, 1e-6);
+
+  // A difference is never logged, whichever scale setting is in force.
+  const diff = precomputedFromCells(3, { lo: 1, hi: 5 }, null, false, 'natural');
+  check('a difference keeps its own scale', diff.ok && diff.effect.y === 3);
+  if (diff.ok) close('a difference CI width divides by 3.92', diff.effect.se, 4 / 3.92, 1e-9);
+
+  // SE route. For a natural-scale ratio the SE has to be moved onto the log
+  // scale, and the approximation is named rather than hidden.
+  const delta = precomputedFromCells(2, null, 0.4, true, 'natural');
+  check('a natural-scale ratio SE converts by SE / estimate',
+    delta.ok && Math.abs(delta.effect.se - 0.2) < 1e-12);
+  check('the delta-method route is recorded', delta.ok && delta.effect.reported.derivedFrom === 'se-delta');
+  const plainSe = precomputedFromCells(3, null, 0.5, false, 'natural');
+  check('a difference SE is used as it stands',
+    plainSe.ok && plainSe.effect.se === 0.5 && plainSe.effect.reported.derivedFrom === 'se');
+
+  // A CI is preferred when both routes are mapped — no scale assumption needed.
+  const both = precomputedFromCells(1.42, { lo: 1.05, hi: 1.92 }, 0.9, true, 'natural');
+  check('a CI outranks an SE', both.ok && both.effect.reported.derivedFrom === 'ci');
+
+  // ...but a broken CI falls back to the SE rather than losing the study.
+  const fallback = precomputedFromCells(2, { lo: 3, hi: 1 }, 0.4, true, 'natural');
+  check('a reversed CI falls back to the SE',
+    fallback.ok && fallback.effect.reported.derivedFrom === 'se-delta');
+  const noFallback = precomputedFromCells(2, { lo: 3, hi: 1 }, null, true, 'natural');
+  check('a reversed CI with no SE is refused',
+    !noFallback.ok && noFallback.reason === 'ci_bounds_invalid');
+
+  // Refusals.
+  const zeroRatio = precomputedFromCells(0, { lo: 0, hi: 2 }, null, true, 'natural');
+  check('a ratio of zero cannot be logged',
+    !zeroRatio.ok && zeroRatio.reason === 'non_positive_ratio');
+  const negRatio = precomputedFromCells(-1.2, null, 0.3, true, 'natural');
+  check('a negative ratio is refused',
+    !negRatio.ok && negRatio.reason === 'non_positive_ratio');
+  const nothing = precomputedFromCells(1.42, null, null, true, 'natural');
+  check('an effect with no precision is refused',
+    !nothing.ok && nothing.reason === 'no_precision');
+  const zeroSe = precomputedFromCells(1.42, null, 0, true, 'natural');
+  check('a zero SE is refused', !zeroSe.ok && zeroSe.reason === 'no_precision');
+  // A negative log-scale value is perfectly ordinary — ln(0.7) is negative.
+  const negLog = precomputedFromCells(-0.35, null, 0.15, true, 'log');
+  check('a negative effect on the log scale is fine', negLog.ok && negLog.effect.y === -0.35);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// buildStudies with kind 'effect' — every row still accounted for
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const rows = [
+    row('d1', 'Alpha 2021', { est: '1.42', lo: '1.05', hi: '1.92', outcome: 'Failure' }),
+    row('d2', 'Beta 2022', { est: '0.80', lo: '0.60', hi: '1.07', outcome: 'Failure' }),
+    row('d3', 'Gamma 2023', { est: 'NR', lo: '', hi: '', outcome: 'Failure' }),
+    row('d4', 'Delta 2024', { est: '1.10', lo: '', hi: '', outcome: 'Failure' }),
+  ];
+  const mapping = confirmed({
+    effect_value: 'est', effect_ci_lower: 'lo', effect_ci_upper: 'hi', outcome: 'outcome',
+  });
+  const { pairings } = buildPairings(rows, mapping, 'wide', '', null,
+    { treatment: null, comparator: null });
+  const { studies, excluded } = buildStudies(pairings, {
+    kind: 'effect', layout: 'wide', mapping,
+    measure: 'OR', effectScale: 'natural',
+    variabilityMeasureColumn: null, centralTendencyMeasureColumn: null,
+    variabilityActions: {}, centralTendencyActions: {},
+  });
+
+  check('every row is either a study or a ledger entry',
+    studies.length + excluded.length === pairings.length,
+    `${studies.length} + ${excluded.length} vs ${pairings.length}`);
+  check('two rows became studies', studies.length === 2, String(studies.length));
+  check('a study carries a pre-computed effect, not arms',
+    !!studies[0].precomputed && !studies[0].treatment);
+  close('the first study is on the log scale', studies[0].precomputed!.y, 0.3506569, 1e-6);
+  check('an NR estimate is reported as not reported',
+    excluded.some(e => e.documentId === 'd3' && e.reason === 'not_reported'));
+  check('an estimate with no precision is reported as such',
+    excluded.some(e => e.documentId === 'd4' && e.reason === 'no_precision'));
+  check('the outcome travels with the study',
+    (studies[0].evidence as any).outcome === 'Failure');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Single-group shapes — a prevalence and a correlation per row
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const rows = [
+    row('d1', 'Aziz 2019', { cases: '12', assessed: '150', outcome: 'Peri-implantitis' }),
+    row('d2', 'Brenner 2020', { cases: '0', assessed: '90', outcome: 'Peri-implantitis' }),
+    row('d3', 'Cho 2021', { cases: 'NR', assessed: '120', outcome: 'Peri-implantitis' }),
+    row('d4', 'Duarte 2022', { cases: '200', assessed: '150', outcome: 'Peri-implantitis' }),
+    row('d5', 'Eze 2023', { cases: '9', assessed: '0', outcome: 'Peri-implantitis' }),
+  ];
+  const mapping = confirmed({ prop_events: 'cases', prop_total: 'assessed', outcome: 'outcome' });
+  const { pairings } = buildPairings(rows, mapping, 'wide', '', null,
+    { treatment: null, comparator: null });
+  const { studies, excluded } = buildStudies(pairings, {
+    kind: 'proportion', layout: 'wide', mapping,
+    variabilityMeasureColumn: null, centralTendencyMeasureColumn: null,
+    variabilityActions: {}, centralTendencyActions: {},
+  });
+
+  check('every prevalence row is a study or a ledger entry',
+    studies.length + excluded.length === pairings.length);
+  check('two studies survive', studies.length === 2, String(studies.length));
+  check('a study carries its counts, not arms',
+    !!studies[0].proportion && !studies[0].treatment && !studies[0].precomputed);
+  check('the counts are the ones mapped',
+    studies[0].proportion!.events === 12 && studies[0].proportion!.total === 150);
+  check('a zero count is a real observation, not an absence',
+    studies.some(st => st.proportion!.events === 0));
+  check('NR is reported as not reported',
+    excluded.some(e => e.documentId === 'd3' && e.reason === 'not_reported'));
+  check('a count above its denominator is impossible, not unusual',
+    excluded.some(e => e.documentId === 'd4' && e.reason === 'proportion_impossible'));
+  check('an empty denominator is refused',
+    excluded.some(e => e.documentId === 'd5' && e.reason === 'proportion_impossible'));
+}
+
+{
+  const rows = [
+    row('d1', 'Aziz 2019', { r: '0.42', n: '88', outcome: 'Plaque vs bleeding' }),
+    row('d2', 'Brenner 2020', { r: '-0.31', n: '120', outcome: 'Plaque vs bleeding' }),
+    row('d3', 'Cho 2021', { r: '1.0', n: '64', outcome: 'Plaque vs bleeding' }),
+    row('d4', 'Duarte 2022', { r: '0.28', n: '3', outcome: 'Plaque vs bleeding' }),
+    row('d5', 'Eze 2023', { r: 'NA', n: '210', outcome: 'Plaque vs bleeding' }),
+  ];
+  const mapping = confirmed({ corr_r: 'r', corr_n: 'n', outcome: 'outcome' });
+  const { pairings } = buildPairings(rows, mapping, 'wide', '', null,
+    { treatment: null, comparator: null });
+  const { studies, excluded } = buildStudies(pairings, {
+    kind: 'correlation', layout: 'wide', mapping,
+    variabilityMeasureColumn: null, centralTendencyMeasureColumn: null,
+    variabilityActions: {}, centralTendencyActions: {},
+  });
+
+  check('every correlation row is accounted for',
+    studies.length + excluded.length === pairings.length);
+  check('two correlations survive', studies.length === 2, String(studies.length));
+  check('a negative correlation is fine',
+    studies.some(st => st.correlation!.r === -0.31));
+  check('the sample size travels with it', studies[0].correlation!.n === 88);
+  check('a correlation of exactly 1 is impossible to pool',
+    excluded.some(e => e.documentId === 'd3' && e.reason === 'correlation_impossible'));
+  check('three observations are too few',
+    excluded.some(e => e.documentId === 'd4' && e.reason === 'sample_too_small'));
+  check('NA is an absence state, not a zero correlation',
+    excluded.some(e => e.documentId === 'd5' && e.reason === 'not_applicable'));
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

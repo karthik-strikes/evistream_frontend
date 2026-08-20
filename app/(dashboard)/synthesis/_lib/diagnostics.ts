@@ -11,11 +11,10 @@
  * over-reading is a diagnostic that produces false confidence.
  */
 
+import { chiSquareUpperP, studentTTwoSidedP } from '@/lib/distributions';
 import {
-  chiSquareUpperP,
   isRatioMeasure,
   MIN_POOLABLE,
-  normalTwoSidedP,
   runMetaAnalysis,
   type EffectMeasure,
   type MetaResult,
@@ -205,6 +204,8 @@ export interface EggerResult {
   intercept: number;
   se: number;
   t: number;
+  /** Residual degrees of freedom of the regression, k − 2. */
+  df: number;
   p: number;
   /**
    * False below MIN_ASYMMETRY_TEST studies. The numbers are still returned so
@@ -276,12 +277,17 @@ function eggerTest(result: MetaResult): EggerResult | null {
   const se = Math.sqrt((rss / (n - 2)) * (sumXSquared / (n * sxx)));
   if (!(se > 0)) return null;
 
+  // The statistic is an OLS t on n − 2 residual degrees of freedom, so its
+  // p-value comes off the t distribution. Reading it off the normal understates
+  // it by 1.5–3x at the ten-study floor above (t = 2.31, n = 10: 0.0497, not
+  // 0.021) — enough to turn a borderline funnel into a confident claim of bias.
   const t = intercept / se;
   return {
     intercept,
     se,
     t,
-    p: normalTwoSidedP(t),
+    df: n - 2,
+    p: studentTTwoSidedP(t, n - 2),
     interpretable: n >= MIN_ASYMMETRY_TEST,
   };
 }

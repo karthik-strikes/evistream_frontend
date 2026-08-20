@@ -15,6 +15,7 @@ import { transformToLongFormat } from '@/lib/longFormatTransform';
 import type { Form, Document, PilotState, PilotFieldFeedback, FormField, FieldPrompt } from '@/types/api';
 import { FieldEditorPane, type UEFCalField, type UEFEditableField } from '@/components/forms/FieldEditorPane';
 import { SourceEvidenceDrawer } from '@/components/source-evidence/SourceEvidenceDrawer';
+import { buildLabelMap, documentLabel } from '@/lib/documentLabel';
 
 type Step = 'select' | 'running' | 'review';
 
@@ -44,6 +45,14 @@ function getPageRef(data: any): number | null {
   const loc = data.source_location;
   if (loc && typeof loc === 'object' && loc.page) return Number(loc.page);
   return null;
+}
+function getSyntheticCaption(data: any): boolean {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  return data.source_location?.synthetic_caption === true;
+}
+function getCaptionImage(data: any): string | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return data.source_location?.caption_image ?? null;
 }
 
 const formatFieldName = (f: string) =>
@@ -222,18 +231,18 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
     [documents]
   );
 
+  // Study IDs across the whole project (not just completedDocs) so a pilot's
+  // "Polat 2005b" is the same string the Documents screen shows.
+  const docLabels = useMemo(() => buildLabelMap(documents), [documents]);
+
   const filteredDocs = useMemo(() => {
     if (!docSearch.trim()) return completedDocs;
     const q = docSearch.toLowerCase();
-    return completedDocs.filter((d: Document) => d.filename.toLowerCase().includes(q));
-  }, [completedDocs, docSearch]);
+    return completedDocs.filter((d: Document) => (docLabels[d.id] ?? d.filename).toLowerCase().includes(q));
+  }, [completedDocs, docSearch, docLabels]);
 
   // Build doc name lookup
-  const docNames = useMemo(() => {
-    const map: Record<string, string> = {};
-    documents.forEach((d: Document) => { map[d.id] = d.filename; });
-    return map;
-  }, [documents]);
+  const docNames = docLabels;
 
   // Build doc ref_id lookup
   const docRefIds = useMemo(() => {
@@ -661,7 +670,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                             }}
                             className="accent-gray-900 dark:accent-white shrink-0"
                           />
-                          <span className="text-xs text-gray-700 dark:text-zinc-300 truncate">{doc.filename}</span>
+                          <span className="text-xs text-gray-700 dark:text-zinc-300 truncate" title={doc.filename}>{docLabels[doc.id] ?? doc.filename}</span>
                         </label>
                       ))
                     )}
@@ -773,6 +782,8 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
               sourceText: activeSourceText,
               storedValue: rows[active.ri]?.[active.col] != null ? String(rows[active.ri][active.col]) : null,
               page: getPageRef(activeRaw),
+              syntheticCaption: getSyntheticCaption(activeRaw),
+              captionImage: getCaptionImage(activeRaw),
               documentId: rows[active.ri]?._documentId ?? null,
               documentFilename: docsMap[rows[active.ri]?._documentId]?.filename ?? rows[active.ri]?._paperFilename ?? null,
               fieldLabel: formatFieldName(active.col),
@@ -924,8 +935,6 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                     <tbody>
                       {rows.map((row, ri) => {
                         const isNewPaper = paperBoundaries.has(ri);
-                        // For visual grouping: only show Paper + flat fields on first row of each paper
-                        const isFirstRowOfPaper = ri === 0 || isNewPaper;
                         return (
                           <tr key={`${row._resultId}-${ri}`}>
                             {orderedColumns.map((col, ci) => {
@@ -933,10 +942,11 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                               const failed = isFailed(val);
                               const missing = !failed && isMissing(val);
                               const isFirstCol = ci === 0;
-                              // For flat fields (non-Paper), blank out duplicate rows in same paper group
-                              const isFlatField = form.fields.some(f => f.field_type !== 'array' && f.field_name === col);
-                              const showBlank = !isFirstCol && isFlatField && !isFirstRowOfPaper;
-                              const cellSource = showEvidence && !isFirstCol && !showBlank ? getSourceText(row._rawCells?.[col]) : null;
+                              // A flat field's value covers the whole paper, so the transform
+                              // repeats it on every exploded row and we render it on every row.
+                              // Blanking the duplicates (the old behaviour) made a reported
+                              // value read as a gap on every row after the first.
+                              const cellSource = showEvidence && !isFirstCol ? getSourceText(row._rawCells?.[col]) : null;
 
                               return (
                                 <td
@@ -944,14 +954,13 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                                   className={cn(
                                     'px-3 py-2 border-b border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 align-top',
                                     isFirstCol && 'sticky left-0 z-10 bg-white dark:bg-[#111111] font-medium text-gray-700 dark:text-zinc-300',
-                                    !isFirstCol && !showBlank && (failed
+                                    !isFirstCol && (failed
                                       ? 'bg-amber-50 dark:bg-[#1a150d]'
                                       : missing ? 'bg-rose-50 dark:bg-[#1a0d0d]' : 'bg-green-50 dark:bg-[#0d1a10]'),
-                                    !isFirstCol && showBlank && 'bg-white dark:bg-[#111111]',
                                     isNewPaper && 'border-t-2 border-t-gray-400 dark:border-t-zinc-600'
                                   )}
                                 >
-                                  {showBlank ? null : failed && !isFirstCol ? (
+                                  {failed && !isFirstCol ? (
                                     <span
                                       className="text-amber-600 dark:text-amber-500"
                                       title="Extraction failed for this cell — not a statement about the paper"
@@ -1061,6 +1070,8 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                   sourceType={activeData?.sourceType ?? null}
                   recordId={activeData?.recordId ?? null}
                   doi={activeData?.doi ?? null}
+                  syntheticCaption={activeData?.syntheticCaption ?? false}
+                  captionImage={activeData?.captionImage ?? null}
                   onPrev={goPrev}
                   onNext={goNext}
                   hasPrev={hasPrev}

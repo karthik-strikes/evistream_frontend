@@ -10,17 +10,25 @@ import {
 import {
   funnelAndEgger, leaveOneOut, MIN_ASYMMETRY_TEST, MIN_LEAVE_ONE_OUT, subgroupAnalysis,
 } from '../_lib/diagnostics';
+import { fragilitySummary, fragilityTable } from '../_lib/fragility';
 
-type Tab = 'sensitivity' | 'subgroups' | 'funnel';
+type Tab = 'sensitivity' | 'subgroups' | 'funnel' | 'fragility';
 
 const TABS: Array<{ id: Tab; label: string }> = [
   { id: 'sensitivity', label: 'Sensitivity' },
   { id: 'subgroups', label: 'Subgroups' },
   { id: 'funnel', label: 'Funnel plot' },
+  { id: 'fragility', label: 'Fragility' },
 ];
 
+/**
+ * Every panel in here holds a fixed-column table (leave-one-out, subgroups,
+ * fragility), so the card scrolls rather than letting a narrow viewport squash the
+ * numbers into each other.
+ */
 const cardClass =
-  'border border-border rounded-lg bg-white p-4 dark:bg-[#111111] dark:border-[#1f1f1f]';
+  'border border-border rounded-lg bg-white p-4 overflow-x-auto '
+  + 'dark:bg-[#111111] dark:border-[#1f1f1f]';
 
 /**
  * Step 4 — the stress tests.
@@ -58,6 +66,7 @@ export function DiagnosticsStep({
     [studies, measure, model, subgroupColumn],
   );
   const funnel = useMemo(() => funnelAndEgger(result), [result]);
+  const fragility = useMemo(() => fragilityTable(result.studies), [result.studies]);
   const axis = useMemo(() => buildAxis(result), [result]);
 
   return (
@@ -88,15 +97,33 @@ export function DiagnosticsStep({
             <div className="text-[12.5px] text-gray-500 dark:text-zinc-400 mt-1">
               Does the conclusion depend on the model choice?
             </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-3 max-w-[560px]">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5 mt-3 max-w-[840px]">
               <Stat label="Random effects (DL)" value={estText(random)} active={model === 'random'} />
               <Stat label="Fixed effect (IV)" value={estText(fixed)} active={model === 'fixed'} />
+              <Stat
+                label="Random effects (HKSJ)"
+                value={random.hksj
+                  ? `${random.hksj.est.toFixed(2)} [${random.hksj.lo.toFixed(2)}, ${random.hksj.hi.toFixed(2)}]`
+                  : '—'}
+                active={false}
+              />
             </div>
             {random.pooled && fixed.pooled && (
               <div className="text-xs text-gray-500 dark:text-zinc-500 mt-2.5 leading-relaxed">
                 {agreementNote(random, fixed, measure)}
               </div>
             )}
+            {random.hksj ? (
+              <div className="text-xs text-gray-500 dark:text-zinc-500 mt-2 leading-relaxed">
+                {hksjNote(random)}
+              </div>
+            ) : random.pooled ? (
+              <div className="text-xs text-gray-500 dark:text-zinc-500 mt-2 leading-relaxed">
+                No HKSJ interval here: its variance comes from how much the studies disagree, and
+                these agree so closely that the factor is zero — the interval would have no width.
+                The standard interval is the one to read.
+              </div>
+            ) : null}
           </div>
 
           <div className={cardClass}>
@@ -308,7 +335,7 @@ export function DiagnosticsStep({
 
           <div className="text-[12.5px] text-gray-700 dark:text-zinc-300 mt-3 tabular-nums">
             {funnel.egger
-              ? `Egger's test: intercept ${funnel.egger.intercept.toFixed(2)} (SE ${funnel.egger.se.toFixed(2)}), p = ${formatP(funnel.egger.p)}`
+              ? `Egger's test: intercept ${funnel.egger.intercept.toFixed(2)} (SE ${funnel.egger.se.toFixed(2)}), t = ${funnel.egger.t.toFixed(2)} on ${funnel.egger.df} df, p = ${formatP(funnel.egger.p)}`
               : "Egger's test needs at least 3 studies."}
           </div>
           {funnel.egger && !funnel.egger.interpretable && (
@@ -327,9 +354,68 @@ export function DiagnosticsStep({
           )}
         </div>
       )}
+      {tab === 'fragility' && (
+        <div className={cardClass}>
+          <div className="text-[15px] font-semibold dark:text-white">
+            Fragility of the contributing trials
+          </div>
+          <div className="text-[12.5px] text-gray-500 dark:text-zinc-400 mt-1 leading-relaxed max-w-[720px]">
+            How many patients&rsquo; outcomes would have to change before each trial stopped being
+            significant on its own (Walsh et al. 2014, by Fisher&rsquo;s exact test). A pooled estimate
+            inherits its significance from its studies, and a corpus of trials that each turn on two or
+            three patients is a different kind of evidence from one whose trials turn on fifty — a
+            difference no confidence interval on the plot shows.
+          </div>
+
+          {fragilitySummary(fragility) && (
+            <div className="text-[13px] text-gray-700 dark:text-zinc-300 mt-3 leading-relaxed">
+              {fragilitySummary(fragility)}
+            </div>
+          )}
+
+          <div className={cn(FRAG_GRID, 'mt-3.5 pb-1.5 border-b border-gray-200 dark:border-[#2a2a2a]')}>
+            <Th>Study</Th>
+            <Th right>Exact p</Th>
+            <Th right>Fragility</Th>
+            <Th>Reading</Th>
+          </div>
+          {fragility.map(r => (
+            <div key={r.key} className={cn(FRAG_GRID, 'items-center h-8')}>
+              <span className="text-[12.5px] text-gray-700 dark:text-zinc-300 pl-1.5 truncate" title={r.label}>
+                {r.label}
+              </span>
+              <span className="text-[12.5px] text-right tabular-nums text-gray-700 dark:text-zinc-300">
+                {r.p != null ? formatP(r.p) : '—'}
+              </span>
+              <span className="text-[12.5px] text-right tabular-nums font-semibold dark:text-zinc-100">
+                {r.outcome.kind === 'fragile' ? r.outcome.index : '—'}
+              </span>
+              <span className="text-[12px] text-gray-500 dark:text-zinc-500 truncate">
+                {r.outcome.kind === 'fragile'
+                  ? `${r.outcome.index} ${r.outcome.index === 1 ? 'outcome' : 'outcomes'} flipped `
+                    + `(FQ ${r.outcome.quotient.toFixed(3)}) takes p to ${formatP(r.outcome.finalP)}`
+                  : r.outcome.kind === 'not_significant'
+                  ? 'not significant on its own, so no index is defined'
+                  : r.outcome.kind === 'not_computable'
+                  ? 'stayed significant through every possible flip'
+                  : 'no 2×2 counts — fragility does not apply to this shape'}
+              </span>
+            </div>
+          ))}
+
+          <div className="text-xs text-gray-400 dark:text-zinc-600 mt-3 leading-relaxed">
+            There is no agreed threshold for &ldquo;fragile&rdquo;. Read the index against the
+            trial&rsquo;s size — the quotient (index ÷ participants) is there for that — and against how
+            plausible it is that that many outcomes could have gone the other way.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
+
+const FRAG_GRID =
+  'grid grid-cols-[minmax(140px,1fr)_90px_90px_minmax(200px,1.4fr)] gap-x-3 min-w-[560px]';
 
 // ── Bits ─────────────────────────────────────────────────────────────────────
 
@@ -349,6 +435,34 @@ function agreementNote(random: MetaResult, fixed: MetaResult, measure: EffectMea
   return sameSide
     ? 'Both models reach the same conclusion, so the result does not hinge on that choice.'
     : 'The two models disagree about whether the effect is distinguishable from no effect — say which you pre-specified, and why.';
+}
+
+/**
+ * What the HKSJ interval adds, in the reviewer's terms.
+ *
+ * The standard random-effects interval treats the between-study variance as if it
+ * were known; HKSJ refers the same estimate to t on k−1 df with a variance scaled
+ * by how much the studies actually disagree. Usually wider. Occasionally
+ * narrower, when q < 1 — a published wart of the original method, and worth
+ * naming rather than hiding, because a reviewer who spots a narrower "more
+ * conservative" interval will otherwise assume the screen has a bug.
+ */
+function hksjNote(random: MetaResult): string {
+  const h = random.hksj;
+  if (!h || !random.pooled) return '';
+  const ratio = (h.hi - h.lo) / (random.pooled.hi - random.pooled.lo);
+  const width = ratio >= 1
+    ? `${ratio.toFixed(2)}x as wide as the standard interval`
+    : `${ratio.toFixed(2)}x the width of the standard interval — narrower`;
+  const tail = h.narrower
+    ? ` Its variance factor q is ${h.q.toFixed(2)}, below 1: these studies sit closer to the pooled `
+      + `estimate than the random-effects model expects, which is the known case where HKSJ comes out `
+      + `narrower despite using a wider reference distribution. Read the standard interval as the `
+      + `conservative one here.`
+    : ` It uses t on ${h.df} df (t = ${h.t.toFixed(2)}) with q = ${h.q.toFixed(2)}, so it stops `
+      + `treating the between-study variance as known — which is the assumption that makes the `
+      + `standard interval look tighter than ${random.studies.length} studies can support.`;
+  return `HKSJ 95% CI is ${width}.${tail}`;
 }
 
 function Th({ children, right = false }: { children?: React.ReactNode; right?: boolean }) {

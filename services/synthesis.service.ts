@@ -20,7 +20,9 @@ export interface MappingSuggestion {
   form_name: string;
   field_name: string | null;
   columns: MappingColumn[];
-  verdict: 'dichotomous' | 'continuous' | 'diagnostic_accuracy' | 'not_poolable';
+  verdict:
+    | 'dichotomous' | 'continuous' | 'effect' | 'proportion' | 'correlation'
+    | 'diagnostic_accuracy' | 'not_poolable';
   layout: 'wide' | 'long' | null;
   slots: Record<string, string>;
   variability_measure_column: string | null;

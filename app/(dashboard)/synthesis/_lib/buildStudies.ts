@@ -14,8 +14,8 @@
 
 import { canonicalAbsenceLabel, FAILED_LABEL } from '@/lib/absence';
 import type { LongFormatRow } from '@/lib/longFormatTransform';
-import type { Arm, BinaryArm, ContinuousArm, MetaStudy } from '@/lib/metaAnalysis';
-import type { Mapping, OutcomeKind, TableLayout } from './mapping';
+import { isRatioMeasure, type Arm, type BinaryArm, type ContinuousArm, type EffectMeasure, type MetaStudy, type PrecomputedEffect } from '@/lib/metaAnalysis';
+import type { EffectScale, Mapping, OutcomeKind, TableLayout } from './mapping';
 import {
   canonicalValue, shouldFlipSign,
   type Confirmations, type Directions, type Harmonization,
@@ -35,6 +35,12 @@ export type ExclusionReason =
   | 'variability_excluded'
   | 'variability_unusable'
   | 'median_excluded'
+  | 'no_precision'
+  | 'non_positive_ratio'
+  | 'ci_bounds_invalid'
+  | 'proportion_impossible'
+  | 'correlation_impossible'
+  | 'sample_too_small'
   // Reached the statistics but produced no estimate. These come back from
   // runMetaAnalysis rather than from parsing, and are folded into the same
   // ledger so its total always reconciles with the plot.
@@ -56,6 +62,23 @@ export const EXCLUSION_TEXT: Record<ExclusionReason, string> = {
   variability_excluded: 'excluded by your choice for this variability measure',
   variability_unusable: 'the variability value could not be converted to a standard deviation',
   median_excluded: 'reports a median, which you chose to exclude rather than approximate',
+  no_precision:
+    'reports an effect with no usable precision — a standard error, or both confidence-interval '
+    + 'bounds, is needed before it can be weighted against the other studies',
+  non_positive_ratio:
+    'reports a ratio of zero or less, which cannot be put on a log scale — check whether the column '
+    + 'actually holds log values, and set the scale accordingly',
+  ci_bounds_invalid:
+    'its confidence-interval bounds are not a usable interval (equal, reversed, or non-positive on a '
+    + 'ratio scale)',
+  proportion_impossible:
+    'the events and total do not describe a proportion — a count above its denominator, or a negative '
+    + 'one, is a data-entry or mapping error rather than an unusual result',
+  correlation_impossible:
+    'the correlation is not strictly between -1 and 1, so it cannot be transformed for pooling — check '
+    + 'whether the column actually holds a correlation',
+  sample_too_small:
+    'fewer than four observations, which is the minimum a correlation can be pooled from',
   zero_events_both_arms: 'zero events in both arms — no ratio is estimable from it',
   no_variance: 'variance is zero or undefined — no confidence interval is estimable',
   not_estimable: 'the mapped values cannot produce this effect measure',
@@ -65,6 +88,9 @@ export const EXCLUSION_TEXT: Record<ExclusionReason, string> = {
 export function reasonFromNotEstimable(reason: string): ExclusionReason {
   if (reason === 'zero_events_both_arms') return 'zero_events_both_arms';
   if (reason === 'zero_variance') return 'no_variance';
+  if (reason === 'proportion_out_of_range') return 'proportion_impossible';
+  if (reason === 'correlation_out_of_range') return 'correlation_impossible';
+  if (reason === 'sample_too_small') return 'sample_too_small';
   return 'not_estimable';
 }
 
@@ -511,6 +537,13 @@ export interface BuildOptions {
   centralTendencyMeasureColumn: string | null;
   variabilityActions: Record<string, VariabilityAction>;
   centralTendencyActions: Record<string, CentralTendencyAction>;
+  /**
+   * Only for `kind: 'effect'` — the measure decides whether the reported value
+   * has to be logged, so the build step needs it. Arm-based kinds do not: their
+   * measure is applied later, by `runMetaAnalysis`.
+   */
+  measure?: EffectMeasure;
+  effectScale?: EffectScale;
   /** Column naming the measurement scale, for effect-direction reconciliation. */
   scaleColumn?: string | null;
   directions?: Directions;
@@ -533,6 +566,66 @@ function armFromRow(
   return { ok: true, arm: { events: events.value, total: total.value } };
 }
 
+/** 1.96 each side, i.e. the width of a 95% interval in standard errors. */
+const CI_WIDTH_IN_SE = 3.92;
+
+/**
+ * Convert one reported effect into (y, se) on the analysis scale.
+ *
+ * Precedence is CI first, SE second, and that order is deliberate: a published
+ * interval needs no assumption about which scale the precision was quoted on,
+ * whereas a standard error beside a natural-scale ratio does. When only an SE is
+ * available for a ratio measure, it is converted by the delta method
+ * (SE_log = SE / estimate) and marked `se-delta` so the plot can say so — an
+ * approximation named out loud beats an interval quietly built on the wrong scale.
+ */
+export function precomputedFromCells(
+  est: number,
+  ci: { lo: number; hi: number } | null,
+  se: number | null,
+  isRatio: boolean,
+  scale: EffectScale,
+): { ok: true; effect: PrecomputedEffect } | { ok: false; reason: ExclusionReason } {
+  const logging = isRatio && scale === 'natural';
+  if (logging && !(est > 0)) return { ok: false, reason: 'non_positive_ratio' };
+
+  const y = logging ? Math.log(est) : est;
+  if (!Number.isFinite(y)) return { ok: false, reason: 'unparseable' };
+
+  const reported = { est, lo: ci?.lo ?? null, hi: ci?.hi ?? null, se, scale };
+
+  if (ci) {
+    const { lo, hi } = ci;
+    const usable = logging ? lo > 0 && hi > 0 && hi > lo : hi > lo;
+    if (usable) {
+      const width = logging ? Math.log(hi) - Math.log(lo) : hi - lo;
+      const seAnalysis = width / CI_WIDTH_IN_SE;
+      if (seAnalysis > 0 && Number.isFinite(seAnalysis)) {
+        return { ok: true, effect: { y, se: seAnalysis, reported: { ...reported, derivedFrom: 'ci' } } };
+      }
+    }
+    // A broken CI falls through to the SE when there is one — the row still has
+    // a usable weight — and is only refused when there is nothing left to use.
+    if (se == null) return { ok: false, reason: 'ci_bounds_invalid' };
+  }
+
+  if (se != null) {
+    if (!(se > 0)) return { ok: false, reason: 'no_precision' };
+    const seAnalysis = logging ? se / est : se;
+    if (!(seAnalysis > 0) || !Number.isFinite(seAnalysis)) return { ok: false, reason: 'no_precision' };
+    return {
+      ok: true,
+      effect: {
+        y,
+        se: seAnalysis,
+        reported: { ...reported, derivedFrom: logging ? 'se-delta' : 'se' },
+      },
+    };
+  }
+
+  return { ok: false, reason: 'no_precision' };
+}
+
 /**
  * Read the mapped columns off each pairing and produce study arms.
  *
@@ -549,9 +642,137 @@ export function buildStudies(pairings: Pairing[], options: BuildOptions): BuildR
   const drop = (p: Pairing, reason: ExclusionReason, column?: string) =>
     excluded.push({ key: p.key, documentId: p.documentId, label: p.label, reason, column });
 
+  const measure = options.measure ?? 'DIFF';
+  const effectScale = options.effectScale ?? 'natural';
+  const ratioMeasure = isRatioMeasure(measure);
+
   for (const p of pairings) {
     let treatment: Arm | null = null;
     let comparator: Arm | null = null;
+
+    if (kind === 'effect') {
+      // One row is one whole comparison here, so both "arms" of the pairing are
+      // the same row and only the treatment row is read.
+      const row = p.treatmentRow;
+      const num = (col?: string) =>
+        col ? parseNumber(row._rawCells?.[col], row[col]) : ({ ok: false, reason: 'blank' } as const);
+
+      const est = num(mapping.effect_value?.col);
+      if (!est.ok) { drop(p, est.reason, mapping.effect_value?.col); continue; }
+
+      const loCol = mapping.effect_ci_lower?.col;
+      const hiCol = mapping.effect_ci_upper?.col;
+      let ci: { lo: number; hi: number } | null = null;
+      if (loCol && hiCol) {
+        const lo = num(loCol);
+        const hi = num(hiCol);
+        if (lo.ok && hi.ok) ci = { lo: lo.value, hi: hi.value };
+      }
+
+      const seCol = mapping.effect_se?.col;
+      const seRead = seCol ? num(seCol) : null;
+      const se = seRead && seRead.ok ? seRead.value : null;
+
+      const built = precomputedFromCells(est.value, ci, se, ratioMeasure, effectScale);
+      if (!built.ok) {
+        drop(p, built.reason, built.reason === 'no_precision' ? (seCol ?? loCol) : mapping.effect_value?.col);
+        continue;
+      }
+
+      const scaleCol = options.scaleColumn ? cell(p.treatmentRow, options.scaleColumn) : '';
+      const flip = !!scaleCol && !!options.directions
+        && shouldFlipSign(scaleCol, options.directions, options.directionsConfirmed ?? {});
+
+      studies.push({
+        key: p.key,
+        label: p.label,
+        documentId: p.documentId,
+        precomputed: built.effect,
+        flipSign: flip,
+        evidence: {
+          outcome: p.outcome,
+          timepoint: p.timepoint,
+          comparison: p.comparison,
+          scale: scaleCol,
+          sharedComparator: false,
+          treatmentCells: row._rawCells,
+          comparatorCells: row._rawCells,
+          row,
+        },
+      });
+      continue;
+    }
+
+    if (kind === 'proportion') {
+      // One row is one study's own prevalence: a count and the denominator it
+      // came out of, with nothing to compare against.
+      const row = p.treatmentRow;
+      const eventsCol = mapping.prop_events?.col;
+      const totalCol = mapping.prop_total?.col;
+      const events = parseNumber(row._rawCells?.[eventsCol ?? ''], row[eventsCol ?? '']);
+      if (!events.ok) { drop(p, events.reason, eventsCol); continue; }
+      const total = parseNumber(row._rawCells?.[totalCol ?? ''], row[totalCol ?? '']);
+      if (!total.ok) { drop(p, total.reason, totalCol); continue; }
+      if (!(total.value > 0)) { drop(p, 'proportion_impossible', totalCol); continue; }
+      if (events.value < 0 || events.value > total.value) {
+        drop(p, 'proportion_impossible', eventsCol);
+        continue;
+      }
+
+      studies.push({
+        key: p.key,
+        label: p.label,
+        documentId: p.documentId,
+        proportion: { events: events.value, total: total.value },
+        evidence: {
+          outcome: p.outcome,
+          timepoint: p.timepoint,
+          comparison: p.comparison,
+          sharedComparator: false,
+          treatmentCells: row._rawCells,
+          comparatorCells: row._rawCells,
+          row,
+        },
+      });
+      continue;
+    }
+
+    if (kind === 'correlation') {
+      const row = p.treatmentRow;
+      const rCol = mapping.corr_r?.col;
+      const nCol = mapping.corr_n?.col;
+      const r = parseNumber(row._rawCells?.[rCol ?? ''], row[rCol ?? '']);
+      if (!r.ok) { drop(p, r.reason, rCol); continue; }
+      const n = parseNumber(row._rawCells?.[nCol ?? ''], row[nCol ?? '']);
+      if (!n.ok) { drop(p, n.reason, nCol); continue; }
+      if (Math.abs(r.value) >= 1) { drop(p, 'correlation_impossible', rCol); continue; }
+      if (n.value < 4) { drop(p, 'sample_too_small', nCol); continue; }
+
+      // A reversed scale flips the sign of a correlation the same way it flips a
+      // mean difference, and for the same reason — but only once confirmed.
+      const scaleCol = options.scaleColumn ? cell(row, options.scaleColumn) : '';
+      const flip = !!scaleCol && !!options.directions
+        && shouldFlipSign(scaleCol, options.directions, options.directionsConfirmed ?? {});
+
+      studies.push({
+        key: p.key,
+        label: p.label,
+        documentId: p.documentId,
+        correlation: { r: r.value, n: n.value },
+        flipSign: flip,
+        evidence: {
+          outcome: p.outcome,
+          timepoint: p.timepoint,
+          comparison: p.comparison,
+          scale: scaleCol,
+          sharedComparator: false,
+          treatmentCells: row._rawCells,
+          comparatorCells: row._rawCells,
+          row,
+        },
+      });
+      continue;
+    }
 
     if (kind === 'dichotomous') {
       if (layout === 'wide') {

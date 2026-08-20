@@ -26,3 +26,4 @@ export * from './literature.service';
 export * from './endnote.service';
 export * from './citations.service';
 export * from './synthesis.service';
+export * from './reviewScope.service';

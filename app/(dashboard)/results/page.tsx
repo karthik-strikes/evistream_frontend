@@ -17,12 +17,17 @@ import {
 import { PdfSourceViewer } from '@/components/PdfSourceViewer';
 import { useSourceLinking } from '@/hooks/useSourceLinking';
 import type { SourceLocation } from '@/types/api';
-import { cn, formatDate, getErrorMessage, formatModelName, modelTagTheme } from '@/lib/utils';
+import { cn, formatDate, getErrorMessage, formatModelName, modelTagTheme, modelFamily, FAMILY_LABEL } from '@/lib/utils';
+import type { ModelFamily } from '@/lib/utils';
+import type { FormCoverage } from '@/services/extractions.service';
+import { TagFilterBar } from '@/components/documents/DocumentTags';
+import { useTagFilter } from '@/hooks/useTagFilter';
 import { PermissionGate } from '@/components/ui/permission-gate';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
 import { FinalDatasetView } from './_components/FinalDatasetView';
 import LongFormatTable from './_components/LongFormatTable';
 import { transformToLongFormat, toCSV, toJSON } from '@/lib/longFormatTransform';
+import { buildLabelMap, documentLabel } from '@/lib/documentLabel';
 
 type SortKey = 'doc_name_asc' | 'doc_name_desc' | 'date_newest' | 'date_oldest' | 'completeness_high' | 'completeness_low';
 
@@ -96,28 +101,28 @@ function hasAnyEvidence(data: any): boolean {
 // from the backend's _field_is_empty — several counts on this page are compared
 // against backend-computed ones.
 
-// Map a stored model_name to a coarse family for the per-model toggle.
-function modelFamily(model?: string | null): 'gpt' | 'claude' | 'gemini' | 'other' {
-  const m = (model || '').toLowerCase();
-  if (m.includes('gpt') || m.includes('openai') || /\bo[134]\b/.test(m)) return 'gpt';
-  if (m.includes('claude') || m.includes('anthropic') || m.includes('opus') || m.includes('sonnet') || m.includes('haiku')) return 'claude';
-  if (m.includes('gemini') || m.includes('google')) return 'gemini';
-  return 'other';
+/**
+ * The empty state the design uses for a tab with nothing in it: a dashed card,
+ * not the app-wide icon block. Local because it is this page's shape.
+ */
+function DashedEmpty({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="rounded-xl border border-dashed border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] px-6 py-14 text-center">
+      <p className="text-sm font-semibold text-gray-700 dark:text-zinc-300">{title}</p>
+      <p className="mt-1.5 text-xs text-gray-400 dark:text-zinc-500">{description}</p>
+    </div>
+  );
 }
 
-const FAMILY_LABEL: Record<string, string> = { gpt: 'GPT', claude: 'Claude', gemini: 'Gemini', other: 'Other' };
-const FAMILY_CLASS: Record<string, string> = {
-  gpt: 'model-dia--gpt', claude: 'model-dia--claude', gemini: 'model-dia--gemini', other: 'model-dia--other',
-};
-
-function ModelDiamond({
-  label, variant, active, onClick, title,
+/** One filter pill. Themed by provider when it is the active model. */
+function ModelChip({
+  label, active, theme, onClick, title,
 }: {
   label: string;
-  variant: string;
   active: boolean;
+  theme?: string;
   onClick: () => void;
-  title: string;
+  title?: string;
 }) {
   return (
     <button
@@ -125,9 +130,16 @@ function ModelDiamond({
       onClick={onClick}
       title={title}
       aria-pressed={active}
-      className={cn('model-dia', variant, active ? 'is-active' : 'is-inactive')}
+      className={cn(
+        'px-2.5 py-1 rounded-full text-[11px] font-semibold border transition-colors whitespace-nowrap',
+        active
+          ? theme
+            ? cn('border-transparent', theme)
+            : 'bg-gray-900 dark:bg-zinc-100 text-white dark:text-gray-900 border-gray-900 dark:border-zinc-100'
+          : 'bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 border-gray-200 dark:border-[#2a2a2a] hover:border-gray-300 dark:hover:border-[#3f3f3f]',
+      )}
     >
-      <span className="inner">{label}</span>
+      {label}
     </button>
   );
 }
@@ -177,6 +189,10 @@ function ViewControlsBar({
   results,
   allFieldNames,
   getCompleteness,
+  rowCount,
+  activeTags,
+  onToggleTag,
+  onClearTags,
 }: {
   searchQuery: string;
   setSearchQuery: (v: string) => void;
@@ -185,6 +201,12 @@ function ViewControlsBar({
   results: ExtractionResult[];
   allFieldNames: string[];
   getCompleteness: (r: ExtractionResult) => { filled: number; total: number; pct: number };
+  /** Long-format rows the table will render — a paper with a table field explodes
+   *  into several, so this is not the document count. */
+  rowCount: number;
+  activeTags: string[];
+  onToggleTag: (tag: string) => void;
+  onClearTags: () => void;
 }) {
   const avgCompleteness = results.length
     ? Math.round(results.reduce((s, r) => s + getCompleteness(r).pct, 0) / results.length)
@@ -214,10 +236,14 @@ function ViewControlsBar({
         )}
       </div>
 
-      {/* Inline stats */}
+      {/* Inline stats — the ONLY count line on this page. The table used to carry a
+          second one in its footer, which meant two places counting one screen. */}
       <span className="text-[11px] text-gray-400 dark:text-zinc-500">
-        {results.length} docs · {avgCompleteness}% complete · {fullyCoveredFields}/{allFieldNames.length} fields
+        {results.length} {results.length === 1 ? 'doc' : 'docs'} · {rowCount} {rowCount === 1 ? 'row' : 'rows'} · {avgCompleteness}% complete · {fullyCoveredFields}/{allFieldNames.length} fields
       </span>
+
+      {/* Active tag filter — the only way back once AND-filtering empties the list */}
+      <TagFilterBar activeTags={activeTags} onToggleTag={onToggleTag} onClear={onClearTags} />
 
       {/* Sort */}
       <div className="relative flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111]">
@@ -259,9 +285,12 @@ function ResultsContent() {
   const [selectedExtractionId, setSelectedExtractionId] = useState<string>(extractionIdParam || '');
   const [searchQuery, setSearchQuery] = useState('');
   const [sortKey, setSortKey] = useState<SortKey>('date_newest');
+  // Document tags as a filter. Owned here, with search/sort/flagged, so the one
+  // count line and the table can never disagree about what is on screen.
+  const { activeTags, toggleTag, clearTags, matchesTags } = useTagFilter();
   const [sourceTab, setSourceTab] = useState<'ai' | 'manual' | 'final'>((sourceTabParam as any) || 'ai');
   const [expandedFormId, setExpandedFormId] = useState<string | null>(null);
-  const [selectedModel, setSelectedModel] = useState<string | null>(null);
+  const [selectedModel, setSelectedModel] = useState<ModelFamily | null>(null);
 
   // Update URL when extraction or tab changes (enables browser back/forward)
   const selectExtraction = (id: string) => {
@@ -438,10 +467,10 @@ function ResultsContent() {
   // Distinct model families across this form's AI runs (for the per-model toggle).
   // Manual rows have no model_name, so this only makes sense scoped to the AI tab.
   const modelFamiliesInForm = useMemo(() => {
-    if (!isFormView || sourceTab !== 'ai') return [] as string[];
-    const present = new Set<string>();
+    if (!isFormView || sourceTab !== 'ai') return [] as ModelFamily[];
+    const present = new Set<ModelFamily>();
     for (const r of formResultsByType) present.add(modelFamily(r.model_name));
-    return (['gpt', 'claude', 'gemini', 'other'] as const).filter((f) => present.has(f)) as string[];
+    return (['gpt', 'claude', 'gemini', 'other'] as const).filter((f) => present.has(f)) as ModelFamily[];
   }, [formResultsByType, isFormView, sourceTab]);
 
   // Selected model only applies if it actually ran for this form.
@@ -479,6 +508,31 @@ function ResultsContent() {
     queryFn: () => documentsService.getAll(selectedProject!.id),
     enabled: !!selectedProject,
   });
+  // Suffix-aware: built from the project's full document list, so the label
+  // here is character-for-character the one the Documents screen shows.
+  // documentLabel() on its own cannot know a second "Mehlisch 2010" exists.
+  const docLabels = useMemo(() => buildLabelMap(documentsList), [documentsList]);
+
+  /**
+   * Per-form coverage, for the picker's paper counts and completeness bars.
+   *
+   * Same query key `/extractions` uses, so this is normally a cache hit rather
+   * than a second round trip. Completeness here is DOCUMENT coverage
+   * (extracted / total), the same definition FormCoverageRow shows on that page —
+   * field-level completeness would mean fetching every result for every form
+   * just to draw a list.
+   */
+  const { data: coverageData = [] } = useQuery({
+    queryKey: ['extraction-coverage', selectedProject?.id],
+    queryFn: () => extractionsService.getCoverage(selectedProject!.id),
+    enabled: !!selectedProject,
+  });
+  const coverageByForm = useMemo(() => {
+    const m: Record<string, FormCoverage> = {};
+    for (const c of coverageData) m[c.form_id] = c;
+    return m;
+  }, [coverageData]);
+
   const documentsMap = useMemo(() => {
     const map: Record<string, Document> = {};
     documentsList.forEach((doc) => { if (doc) map[doc.id] = doc; });
@@ -492,14 +546,14 @@ function ResultsContent() {
         setPdfUrl(url);
         setPdfViewerDocId(documentId);
         setPdfViewerResultId(resultId);
-        setPdfFilename(documentsMap[documentId]?.filename);
+        setPdfFilename(docLabels[documentId] ?? documentLabel(documentsMap[documentId]));
       } catch {
         toast({ title: 'Error', description: 'Failed to load PDF', variant: 'error' });
         return;
       }
     }
     sourceLink.scrollToField(fieldName);
-  }, [pdfViewerDocId, documentsMap, sourceLink, toast]);
+  }, [pdfViewerDocId, documentsMap, docLabels, sourceLink, toast]);
 
   const loading = isFormView ? formResultsLoading : (!extractionsData || resultsLoading);
   const error = resultsError ? getErrorMessage(resultsError as any, 'Failed to load results') : null;
@@ -611,27 +665,54 @@ function ResultsContent() {
     return [...results].sort((a, b) => {
       const da = documentsMap[a.document_id];
       const db = documentsMap[b.document_id];
-      if (sortKey === 'doc_name_asc') return (da?.filename || '').localeCompare(db?.filename || '');
-      if (sortKey === 'doc_name_desc') return (db?.filename || '').localeCompare(da?.filename || '');
+      // Sorted by study ID, which is what the cards actually show.
+      const la = docLabels[a.document_id] ?? documentLabel(da);
+      const lb = docLabels[b.document_id] ?? documentLabel(db);
+      if (sortKey === 'doc_name_asc') return la.localeCompare(lb);
+      if (sortKey === 'doc_name_desc') return lb.localeCompare(la);
       if (sortKey === 'date_newest') return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
       if (sortKey === 'date_oldest') return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
       if (sortKey === 'completeness_high') return getCompleteness(b).filled - getCompleteness(a).filled;
       if (sortKey === 'completeness_low') return getCompleteness(a).filled - getCompleteness(b).filled;
       return 0;
     });
-  }, [results, documentsMap, sortKey, getCompleteness]);
+  }, [results, documentsMap, docLabels, sortKey, getCompleteness]);
 
   // Filter for cards view
+  /**
+   * All filtering happens here, and every filter is DOCUMENT-level.
+   *
+   * Keep it that way. `LongFormatTable` indexes its source-evidence chips by row
+   * position and draws paper boundaries by assuming one paper's rows are
+   * contiguous. Both hold only because filters remove whole papers — a row-level
+   * predicate would leave rows in the table the user cannot see, and every chip
+   * would silently open the wrong cell.
+   */
   const filteredResults = useMemo(() => {
     let base = sortedResults;
     if (flaggedOnly) base = base.filter(r => flaggedSet.has(r.document_id));
+    if (activeTags.length > 0) base = base.filter(r => matchesTags(documentsMap[r.document_id]?.labels));
     if (!searchQuery.trim()) return base;
     const q = searchQuery.toLowerCase();
     return base.filter(r => {
-      if (documentsMap[r.document_id]?.filename.toLowerCase().includes(q)) return true;
+      if ((docLabels[r.document_id] ?? documentLabel(documentsMap[r.document_id])).toLowerCase().includes(q)) return true;
+      if ((documentsMap[r.document_id]?.filename || '').toLowerCase().includes(q)) return true;
+      if ((documentsMap[r.document_id]?.labels ?? []).some(l => l.toLowerCase().includes(q))) return true;
       return Object.values(r.extracted_data).some(v => extractScalarValue(v).toLowerCase().includes(q));
     });
-  }, [sortedResults, searchQuery, documentsMap, flaggedOnly, flaggedSet]);
+  }, [sortedResults, searchQuery, documentsMap, docLabels, flaggedOnly, flaggedSet, activeTags, matchesTags]);
+
+  /**
+   * Row count for the stats line. The same pure transform the table runs, on the
+   * same inputs — computed twice rather than plumbed through, so the two stay
+   * decoupled and cannot disagree. Memoised on both sides, so it only recomputes
+   * when the filter or sort changes.
+   */
+  const longRowCount = useMemo(() => {
+    if (filteredResults.length === 0) return 0;
+    if (formFields.length === 0) return filteredResults.length;
+    return transformToLongFormat(filteredResults, formFields, documentsMap).rows.length;
+  }, [filteredResults, formFields, documentsMap]);
 
   // Build form picker: group extractions by form_id
   // Form picker shows forms that have results for the active tab
@@ -687,6 +768,33 @@ function ResultsContent() {
     );
   }, [allExtractions, extractionsData, forms, sourceTab]);
 
+  /**
+   * Picker groups, derived from the form name rather than authored anywhere:
+   * "Acute Dental Pain — Continuous Outcomes" groups under "Acute Dental Pain"
+   * and shows as "Continuous Outcomes". Names with no dash keep their full name
+   * and fall into a trailing group. With only one group the headers are noise,
+   * so the render skips them.
+   */
+  const pickerGroups = useMemo(() => {
+    type Entry = (typeof formsWithResults)[number] & { displayName: string };
+    const grouped = new Map<string, Entry[]>();
+    const loose: Entry[] = [];
+    for (const f of formsWithResults) {
+      const parts = f.formName.split(/\s+[—–]\s+/);
+      if (parts.length > 1) {
+        const label = parts[0].trim();
+        const arr = grouped.get(label) ?? [];
+        arr.push({ ...f, displayName: parts.slice(1).join(' — ').trim() || f.formName });
+        grouped.set(label, arr);
+      } else {
+        loose.push({ ...f, displayName: f.formName });
+      }
+    }
+    const out = Array.from(grouped.entries()).map(([label, forms]) => ({ label, forms }));
+    if (loose.length > 0) out.push({ label: 'Other forms', forms: loose });
+    return out;
+  }, [formsWithResults]);
+
   // Show form picker when no form_id or extraction_id in URL
   const showFormPicker = !isFormView && !extractionIdParam;
 
@@ -741,35 +849,71 @@ function ResultsContent() {
             description="Run an extraction first to see results here"
           />
         ) : (
-          <div className="flex flex-col gap-3">
+          <div className="flex flex-col gap-6">
             <p className="text-xs text-gray-400 dark:text-zinc-400">Select a form to view its results</p>
-            {formsWithResults.map(f => (
-              <button
-                key={f.formId}
-                onClick={() => router.push(`/results?form_id=${f.formId}`)}
-                className="w-full text-left px-[22px] py-4 rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] hover:shadow-card-hover hover:-translate-y-px transition-all duration-150 cursor-pointer"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-semibold text-gray-900 dark:text-white">{f.formName}</span>
-                  <div className="flex items-center gap-3 text-xs text-gray-500 dark:text-zinc-400">
-                    {f.extractionCount > 1 && (
-                      <span>{f.extractionCount} runs</span>
-                    )}
-                    <span>{new Date(f.latestDate).toLocaleDateString()}</span>
-                    <ChevronDown className="w-3.5 h-3.5 -rotate-90 text-gray-300 dark:text-zinc-600" />
+            {pickerGroups.map(group => (
+              <div key={group.label}>
+                {pickerGroups.length > 1 && (
+                  <div className="flex items-center gap-2 mb-3">
+                    <span className="h-1.5 w-1.5 rounded-full bg-gray-900 dark:bg-white flex-shrink-0" />
+                    <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-zinc-500">
+                      {group.label}
+                    </span>
+                    <span className="flex-1 h-px bg-gray-100 dark:bg-[#1f1f1f]" />
+                    <span className="text-xs text-gray-400 dark:text-zinc-500 flex-shrink-0">
+                      {group.forms.length} form{group.forms.length !== 1 ? 's' : ''}
+                    </span>
                   </div>
+                )}
+                <div className="flex flex-col gap-2">
+                  {group.forms.map(f => {
+                    const cov = coverageByForm[f.formId];
+                    const totalDocs = cov?.total_project_documents ?? 0;
+                    const pct = totalDocs > 0 ? Math.round(((cov?.extracted_count ?? 0) / totalDocs) * 100) : null;
+                    return (
+                      <button
+                        key={f.formId}
+                        onClick={() => router.push(`/results?form_id=${f.formId}`)}
+                        className="group w-full text-left grid grid-cols-[1fr_auto] items-center gap-4 px-[22px] py-4 rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] hover:border-gray-300 dark:hover:border-[#2a2a2a] hover:shadow-card-hover hover:-translate-y-px transition-all duration-150 cursor-pointer"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">{f.displayName}</div>
+                          <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-400 dark:text-zinc-500 flex-wrap">
+                            {totalDocs > 0 && <span className="whitespace-nowrap">{totalDocs} papers</span>}
+                            <span className="whitespace-nowrap">{f.extractionCount === 1 ? '1 run' : `${f.extractionCount} runs`}</span>
+                            <span className="whitespace-nowrap">Last run {new Date(f.latestDate).toLocaleDateString()}</span>
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-4 flex-shrink-0">
+                          {pct !== null && (
+                            <div className="flex flex-col items-end gap-1.5">
+                              <span className="text-[11px] font-semibold text-gray-500 dark:text-zinc-400 tabular-nums whitespace-nowrap">
+                                {pct}% complete
+                              </span>
+                              <div className="w-24 h-1 rounded-full bg-gray-100 dark:bg-[#1f1f1f] overflow-hidden">
+                                <div
+                                  className={cn('h-full rounded-full', pct >= 80 ? 'bg-green-500' : 'bg-gray-900 dark:bg-zinc-300')}
+                                  style={{ width: `${pct}%` }}
+                                />
+                              </div>
+                            </div>
+                          )}
+                          <ChevronDown className="w-3.5 h-3.5 -rotate-90 text-gray-300 dark:text-zinc-600" />
+                        </div>
+                      </button>
+                    );
+                  })}
                 </div>
-              </button>
+              </div>
             ))}
           </div>
         )
       ) : loading && extractions.length === 0 && !isFormView ? (
         <div className="flex justify-center items-center py-12"><Spinner size="lg" /></div>
       ) : !isFormView && extractions.length === 0 ? (
-        <EmptyState
-          icon={TableIcon}
+        <DashedEmpty
           title={sourceTab === 'ai' ? 'No AI extractions' : 'No manual extractions'}
-          description={sourceTab === 'ai' ? 'Run an extraction first to see results here' : 'Use Manual Extract to add results'}
+          description={sourceTab === 'ai' ? 'Run an extraction first to see results here.' : 'Use Manual Extract to add results.'}
         />
       ) : (
         <div className="flex flex-col gap-5">
@@ -794,8 +938,13 @@ function ResultsContent() {
           {/* Flagged papers banner */}
           {flaggedResults.length > 0 && (
             <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-900/10 border border-amber-200 dark:border-amber-800/40">
-              <span className="text-sm text-amber-700 dark:text-amber-400">
-                ⚠ {flaggedResults.length} {flaggedResults.length === 1 ? 'paper has' : 'papers have'} more than half their fields empty{flaggedOnly ? ' (showing only these)' : ''}.
+              <span className="flex items-center gap-3 min-w-0">
+                <span className="flex items-center justify-center w-6 h-6 rounded-lg bg-amber-100 dark:bg-amber-900/30 text-amber-600 dark:text-amber-400 text-xs flex-shrink-0">
+                  <AlertCircle className="w-3.5 h-3.5" />
+                </span>
+                <span className="text-sm font-medium text-amber-700 dark:text-amber-400">
+                  {flaggedResults.length} {flaggedResults.length === 1 ? 'paper has' : 'papers have'} more than half their fields empty{flaggedOnly ? ' — showing only these' : ''}.
+                </span>
               </span>
               <div className="flex items-center gap-2 flex-shrink-0">
                 <button
@@ -816,18 +965,53 @@ function ResultsContent() {
             </div>
           )}
 
+          {/* Back to the picker — the form select below switches forms, this leaves them */}
+          {isFormView && (
+            <button
+              onClick={() => router.push('/results')}
+              className="self-start -mb-3 text-xs font-semibold text-gray-400 dark:text-zinc-500 hover:text-gray-700 dark:hover:text-zinc-300 transition-colors cursor-pointer"
+            >
+              ← All forms
+            </button>
+          )}
+
           {/* Toolbar */}
           <div className="flex items-center gap-3 flex-wrap">
             {/* Extraction picker / Form label */}
             <div className="flex items-center gap-2 min-w-0">
               {isFormView ? (
-                <div className="flex items-center gap-3">
-                  <span className="text-sm font-semibold text-gray-900 dark:text-white">
-                    {currentForm?.form_name || 'All runs combined'}
+                <div className="flex items-center gap-3 flex-wrap">
+                  {/* The form name IS the form switcher — a heading you can change. */}
+                  <div className="relative">
+                    <select
+                      value={formIdParam ?? ''}
+                      onChange={e => { if (e.target.value) router.push(`/results?form_id=${e.target.value}`); }}
+                      className="max-w-[420px] appearance-none truncate bg-transparent text-[17px] font-bold tracking-tight text-gray-900 dark:text-white border border-transparent rounded-lg py-1 pl-1.5 pr-7 -ml-1.5 outline-none cursor-pointer hover:border-gray-200 dark:hover:border-[#2a2a2a] hover:bg-white dark:hover:bg-[#111111] transition-colors dark:[color-scheme:dark]"
+                    >
+                      {!formsWithResults.some(f => f.formId === formIdParam) && (
+                        <option value={formIdParam ?? ''}>{currentForm?.form_name || 'All runs combined'}</option>
+                      )}
+                      {formsWithResults.map(f => (
+                        <option key={f.formId} value={f.formId}>{f.formName}</option>
+                      ))}
+                    </select>
+                    <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
+                  </div>
+                  <span className="text-xs text-gray-400 dark:text-zinc-500 whitespace-nowrap">
+                    {results.length} {results.length === 1 ? 'document' : 'documents'} · {allFieldNames.length} fields
                   </span>
-                  <span className="text-xs text-gray-500 dark:text-zinc-400">
-                    {results.length} {results.length === 1 ? 'document' : 'documents'}
-                  </span>
+                  {/* One model, one tag. The table badges rows individually only when
+                      they actually differ; when several models ran, the chip row below
+                      names them, so a badge here would just repeat it. */}
+                  {sourceTab === 'ai' && (() => {
+                    const models = [...new Set(filteredResults.map(r => r.model_name).filter(Boolean) as string[])];
+                    if (models.length !== 1) return null;
+                    return (
+                      <Badge className={cn('border-0 font-semibold tracking-tight shadow-sm', modelTagTheme(models[0]))}>
+                        {formatModelName(models[0])}
+                      </Badge>
+                    );
+                  })()}
                   {/* View by run — subtle dropdown */}
                   {(() => {
                     const formEntry = formsWithResults.find(f => f.formId === formIdParam);
@@ -939,32 +1123,28 @@ function ResultsContent() {
 
           {/* Per-model toggle — latest result per paper, by model (All runs view) */}
           {isFormView && sourceTab === 'ai' && modelFamiliesInForm.length > 1 && (
-            <div className="flex items-center gap-7 flex-wrap py-1">
-              <span className="text-[11px] text-gray-400 dark:text-zinc-500">
+            <div className="flex items-center gap-2 flex-wrap py-1">
+              <span className="text-[11px] text-gray-400 dark:text-zinc-500 mr-1 whitespace-nowrap">
                 {effectiveModel
                   ? `Showing latest ${FAMILY_LABEL[effectiveModel]} results`
                   : 'Latest per paper by model'}
               </span>
-              {modelFamiliesInForm.map((fam, i) => (
-                <div key={fam} className={cn('model-dia-float', i % 3 === 0 ? 'd1' : i % 3 === 1 ? 'd2' : 'd3')}>
-                  <ModelDiamond
-                    label={FAMILY_LABEL[fam]}
-                    variant={FAMILY_CLASS[fam]}
-                    active={effectiveModel === fam}
-                    onClick={() => setSelectedModel((prev) => (prev === fam ? null : fam))}
-                    title={`Show each paper's latest ${FAMILY_LABEL[fam]} result`}
-                  />
-                </div>
+              <ModelChip
+                label="All models"
+                active={!effectiveModel}
+                onClick={() => setSelectedModel(null)}
+                title="Show each paper's latest result, whichever model produced it"
+              />
+              {modelFamiliesInForm.map(fam => (
+                <ModelChip
+                  key={fam}
+                  label={FAMILY_LABEL[fam]}
+                  active={effectiveModel === fam}
+                  theme={modelTagTheme(fam)}
+                  onClick={() => setSelectedModel(prev => (prev === fam ? null : fam))}
+                  title={`Show each paper's latest ${FAMILY_LABEL[fam]} result`}
+                />
               ))}
-              {effectiveModel && (
-                <button
-                  type="button"
-                  onClick={() => setSelectedModel(null)}
-                  className="text-[11px] font-medium text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200 underline-offset-2 hover:underline transition-colors"
-                >
-                  ↩ Clear filter
-                </button>
-              )}
             </div>
           )}
 
@@ -989,6 +1169,10 @@ function ResultsContent() {
                 results={results}
                 allFieldNames={allFieldNames}
                 getCompleteness={getCompleteness}
+                rowCount={longRowCount}
+                activeTags={activeTags}
+                onToggleTag={toggleTag}
+                onClearTags={clearTags}
               />
 
               {/* Main view — with optional PDF panel */}
@@ -999,6 +1183,9 @@ function ResultsContent() {
                     documentsMap={documentsMap}
                     formFields={formFields}
                     formId={selectedExtraction?.form_id}
+                    flaggedDocIds={flaggedSet}
+                    activeTags={activeTags}
+                    onToggleTag={toggleTag}
                   />
                 </div>
 

@@ -3,10 +3,16 @@
 import { FileText, Play, Loader2, Check } from 'lucide-react';
 import { cn, formatDate } from '@/lib/utils';
 import type { Document, Form } from '@/types/api';
+import { DocumentTags, TagFilterBar } from '@/components/documents/DocumentTags';
+import { useTagFilter } from '@/hooks/useTagFilter';
+import { docMatchesQuery } from '@/lib/documentTags';
 
 interface SelectionViewProps {
   forms: Form[];
   documents: Document[];
+  /** Project-wide study IDs — see ExtractionView. Passed in rather than derived
+   *  here, because `documents` is already filtered to completed ones. */
+  docLabels: Record<string, string>;
   selectedForm: Form | null;
   selectedDoc: Document | null;
   formSearch: string;
@@ -24,6 +30,7 @@ interface SelectionViewProps {
 export function SelectionView({
   forms,
   documents,
+  docLabels,
   selectedForm,
   selectedDoc,
   formSearch,
@@ -38,7 +45,12 @@ export function SelectionView({
   onStart,
 }: SelectionViewProps) {
   const filteredForms = formSearch.trim() ? forms.filter(f => f.form_name.toLowerCase().includes(formSearch.toLowerCase())) : forms;
-  const filteredDocs = docSearch.trim() ? documents.filter(d => d.filename.toLowerCase().includes(docSearch.toLowerCase())) : documents;
+  const { activeTags, toggleTag, clearTags, matchesTags } = useTagFilter();
+  const filteredDocs = documents.filter(
+    d =>
+      docMatchesQuery([docLabels[d.id], d.filename], d.labels, docSearch) &&
+      matchesTags(d.labels),
+  );
 
   return (
     <div className="flex flex-col rounded-xl border border-gray-200 dark:border-[#1f1f1f] overflow-hidden bg-white dark:bg-[#111111]" style={{ height: 'calc(100vh - 120px)' }}>
@@ -127,10 +139,16 @@ export function SelectionView({
                 type="text"
                 value={docSearch}
                 onChange={e => onDocSearch(e.target.value)}
-                placeholder="Search documents…"
+                placeholder="Search documents or tags…"
                 className="w-full text-sm text-gray-900 dark:text-white bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-1.5 pl-8 pr-3 outline-none focus:border-gray-400 dark:focus:border-[#3f3f3f] placeholder:text-gray-400 dark:placeholder:text-zinc-600"
               />
             </div>
+            <TagFilterBar
+              activeTags={activeTags}
+              onToggleTag={toggleTag}
+              onClear={clearTags}
+              className="mt-2"
+            />
           </div>
           <div className="flex-1 overflow-y-auto px-5 pb-5 min-h-0">
             {loadingData ? (
@@ -166,7 +184,14 @@ export function SelectionView({
                         <FileText className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
                       </div>
                       <div className="flex-1 min-w-0">
-                        <p className="text-sm text-gray-900 dark:text-white truncate leading-snug">{doc.filename}</p>
+                        <div className="flex min-w-0 items-center gap-2">
+                          <p className="min-w-0 text-sm text-gray-900 dark:text-white truncate leading-snug" title={doc.filename}>{docLabels[doc.id] ?? doc.filename}</p>
+                          <DocumentTags
+                            labels={doc.labels}
+                            activeTags={activeTags}
+                            onToggleTag={toggleTag}
+                          />
+                        </div>
                         <p className="text-xs text-gray-400 dark:text-zinc-500">{formatDate(doc.created_at)}</p>
                       </div>
                       {isDone && (
@@ -190,7 +215,7 @@ export function SelectionView({
             <div className="flex items-center gap-1.5 min-w-0">
               <span className="text-xs font-semibold text-gray-800 dark:text-zinc-200 truncate">{selectedForm.form_name}</span>
               <span className="text-gray-300 dark:text-zinc-600 text-xs flex-shrink-0">·</span>
-              <span className="text-xs text-gray-400 dark:text-zinc-500 truncate">{selectedDoc.filename}</span>
+              <span className="text-xs text-gray-400 dark:text-zinc-500 truncate" title={selectedDoc.filename}>{docLabels[selectedDoc.id] ?? selectedDoc.filename}</span>
             </div>
           ) : (
             <span className="text-xs text-gray-400 dark:text-zinc-500 italic">Select a form and document to continue</span>

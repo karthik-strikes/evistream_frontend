@@ -4,7 +4,11 @@ import { useState } from 'react';
 import { AlertTriangle, Check, ChevronRight, Info, Lock } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import {
-  EFFECT_LABEL, MODEL_LABEL, type EffectMeasure, type PoolingModel,
+  PROPORTION_METHOD_LABEL, PROPORTION_METHOD_NOTE, type ProportionMethod,
+} from '@/lib/singleGroupMeta';
+import {
+  EFFECT_LABEL, MODEL_LABEL, hasNullValue, isRatioMeasure,
+  type EffectMeasure, type PoolingModel,
 } from '@/lib/metaAnalysis';
 import type { ExcludedStudy, Facet } from '../_lib/buildStudies';
 import { groupExclusions } from '../_lib/buildStudies';
@@ -44,7 +48,10 @@ export function ComparisonStep({
   outcomeColumn,
   comparisonSourceColumn,
   measure, onMeasure, measureOptions,
-  model, onModel,
+  model, onModel, modelOptions,
+  mid, onMid,
+  proportionMethod, onProportionMethod,
+  sparseDataWarning, poolingMethodRefusal,
   ledger,
   onNext,
 }: {
@@ -58,6 +65,19 @@ export function ComparisonStep({
   comparisonSourceColumn: string | null;
   measure: EffectMeasure; onMeasure: (m: EffectMeasure) => void; measureOptions: EffectMeasure[];
   model: PoolingModel; onModel: (m: PoolingModel) => void;
+  /** Only the methods computable for this measure and data shape. */
+  modelOptions: PoolingModel[];
+  /**
+   * Minimal important difference, on the natural scale the reader thinks in
+   * (an RR of 1.25, not its log). Empty string means none.
+   */
+  mid: string; onMid: (v: string) => void;
+  /** Only used when the measure is a proportion. */
+  proportionMethod: ProportionMethod;
+  onProportionMethod: (m: ProportionMethod) => void;
+  /** Advice about the method, shown where the method is chosen. */
+  sparseDataWarning: string | null;
+  poolingMethodRefusal: string | null;
   ledger: LedgerInput;
   onNext: () => void;
 }) {
@@ -139,27 +159,106 @@ export function ComparisonStep({
           </div>
         )}
 
-        <div className="flex gap-3 items-center mt-3.5 pt-3.5 border-t border-gray-100 dark:border-[#1f1f1f] flex-wrap">
-          <span className="text-[13px] font-medium text-gray-700 dark:text-zinc-300">Effect</span>
-          <select
-            value={measure}
-            onChange={e => onMeasure(e.target.value as EffectMeasure)}
-            className={selectClass}
-          >
-            {measureOptions.map(m => (
-              <option key={m} value={m}>{EFFECT_LABEL[m]}</option>
-            ))}
-          </select>
-          <span className="text-[13px] font-medium text-gray-700 dark:text-zinc-300 ml-2">Model</span>
-          <select
-            value={model}
-            onChange={e => onModel(e.target.value as PoolingModel)}
-            className={selectClass}
-          >
-            <option value="random">{MODEL_LABEL.random}</option>
-            <option value="fixed">{MODEL_LABEL.fixed}</option>
-          </select>
+        {/*
+          Four controls can be live at once (effect, model, pooling scale, MID).
+          Each label travels with its own control in a non-wrapping group, so a
+          wrap breaks BETWEEN controls and never leaves a label stranded above
+          somebody else's select. The MID hint takes its own row for the same
+          reason.
+        */}
+        <div className="flex gap-x-4 gap-y-2.5 items-center mt-3.5 pt-3.5 border-t border-gray-100 dark:border-[#1f1f1f] flex-wrap">
+          <span className="inline-flex items-center gap-2 whitespace-nowrap">
+            <span className="text-[13px] font-medium text-gray-700 dark:text-zinc-300">Effect</span>
+            <select
+              value={measure}
+              onChange={e => onMeasure(e.target.value as EffectMeasure)}
+              className={selectClass}
+            >
+              {measureOptions.map(m => (
+                <option key={m} value={m}>{EFFECT_LABEL[m]}</option>
+              ))}
+            </select>
+          </span>
+
+          <span className="inline-flex items-center gap-2 whitespace-nowrap">
+            <span className="text-[13px] font-medium text-gray-700 dark:text-zinc-300">Model</span>
+            <select
+              value={model}
+              onChange={e => onModel(e.target.value as PoolingModel)}
+              className={selectClass}
+            >
+              {modelOptions.map(m => (
+                <option key={m} value={m}>{MODEL_LABEL[m]}</option>
+              ))}
+            </select>
+          </span>
+
+          {measure === 'PROP' && (
+            <span className="inline-flex items-center gap-2 whitespace-nowrap">
+              <span className="text-[13px] font-medium text-gray-700 dark:text-zinc-300">
+                Pooling scale
+              </span>
+              <select
+                value={proportionMethod}
+                onChange={e => onProportionMethod(e.target.value as ProportionMethod)}
+                className={selectClass}
+              >
+                {(['glmm', 'arcsine', 'logit', 'raw'] as ProportionMethod[]).map(m => (
+                  <option key={m} value={m}>{PROPORTION_METHOD_LABEL[m]}</option>
+                ))}
+              </select>
+            </span>
+          )}
+
+          {hasNullValue(measure) && (
+            <span className="inline-flex items-center gap-2 whitespace-nowrap">
+              <span
+                className="text-[13px] font-medium text-gray-700 dark:text-zinc-300"
+                title="A threshold below which a difference is not clinically important. Shaded on the plot, so a statistically significant result that sits inside it is visible as such."
+              >
+                MID
+              </span>
+              <input
+                type="text"
+                inputMode="decimal"
+                value={mid}
+                onChange={e => onMid(e.target.value)}
+                placeholder={isRatioMeasure(measure) ? 'e.g. 1.25' : 'e.g. 4'}
+                aria-label="Minimal important difference, on the natural scale"
+                className="h-8 w-[92px] border border-gray-200 rounded-md bg-white text-[13px] px-2 text-gray-900 dark:border-[#2a2a2a] dark:bg-[#1a1a1a] dark:text-white focus:outline-none"
+              />
+            </span>
+          )}
+
+          {hasNullValue(measure) && mid.trim() !== '' && (
+            <span className="basis-full text-[11px] text-gray-400 dark:text-zinc-600">
+              MID on the {isRatioMeasure(measure)
+                ? 'natural scale — an RR/OR of 1.25, not its log; the shaded zone runs 1/1.25 to 1.25'
+                : 'outcome’s own units; the shaded zone runs from −MID to +MID'}
+            </span>
+          )}
         </div>
+        {measure === 'PROP' && (
+          <div className="text-[12px] text-gray-500 dark:text-zinc-500 mt-2 leading-relaxed max-w-[720px]">
+            {PROPORTION_METHOD_NOTE[proportionMethod]}
+          </div>
+        )}
+
+        {poolingMethodRefusal && (
+          <div className="border border-amber-200 bg-amber-50 rounded-lg px-3.5 py-2.5 mt-3 text-[12.5px] text-amber-900 dark:border-amber-900/60 dark:bg-amber-500/5 dark:text-amber-200">
+            {poolingMethodRefusal}
+          </div>
+        )}
+        {!poolingMethodRefusal && sparseDataWarning && (
+          <div className="border border-gray-200 dark:border-[#2a2a2a] bg-gray-50 dark:bg-[#0d0d0d] rounded-lg px-3.5 py-2.5 mt-3">
+            <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-zinc-500 mb-1">
+              Method advice
+            </div>
+            <div className="text-[12.5px] text-gray-700 dark:text-zinc-300 leading-relaxed">
+              {sparseDataWarning}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Inclusion ledger ─────────────────────────────────────────────── */}

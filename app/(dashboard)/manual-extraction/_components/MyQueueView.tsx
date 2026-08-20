@@ -11,6 +11,8 @@ export type FormState = 'done' | 'partial' | 'todo';
 interface MyQueueViewProps {
   assignments: ReviewAssignment[];
   documents: Document[];
+  /** Project-wide study IDs — see ExtractionView. */
+  docLabels: Record<string, string>;
   forms: Form[];
   // (docId, formId) → state for the *current* user, scoped by reviewer_role
   perDocFormStatus: Map<string, Map<string, FormState>>;
@@ -70,6 +72,7 @@ function FormsStrip({ total, done }: { total: number; done: number }) {
 export function MyQueueView({
   assignments,
   documents,
+  docLabels,
   forms,
   perDocFormStatus,
   loading,
@@ -82,6 +85,10 @@ export function MyQueueView({
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [filter, setFilter] = useState<'all' | 'pending' | 'in_progress' | 'done'>('all');
   const [query, setQuery] = useState('');
+
+  // Study IDs for the queue rows — sorting, search and display all use them,
+  // so the list is alphabetical by study ("Black 2002" before "Chang 2004")
+  // rather than by whatever the file happened to be called.
 
   const docById = useMemo(() => {
     const m = new Map<string, Document>();
@@ -104,11 +111,11 @@ export function MyQueueView({
         // pending/in_progress before completed
         const rank = (s: string) => (s === 'completed' ? 1 : 0);
         if (rank(x.status) !== rank(y.status)) return rank(x.status) - rank(y.status);
-        return (docById.get(x.document_id)?.filename ?? '').localeCompare(docById.get(y.document_id)?.filename ?? '');
+        return (docLabels[x.document_id] ?? '').localeCompare(docLabels[y.document_id] ?? '');
       });
     }
     return out;
-  }, [assignments, docById]);
+  }, [assignments, docById, docLabels]);
 
   const stats = useMemo(() => {
     let pending = 0, inProgress = 0, done = 0;
@@ -132,12 +139,12 @@ export function MyQueueView({
     for (const role of Object.keys(grouped)) {
       out[role] = grouped[role].filter(a => {
         if (!matchesStatus(a.status)) return false;
-        if (q && !(docById.get(a.document_id)?.filename ?? '').toLowerCase().includes(q)) return false;
+        if (q && !(docLabels[a.document_id] ?? '').toLowerCase().includes(q)) return false;
         return true;
       });
     }
     return out;
-  }, [grouped, filter, query, docById]);
+  }, [grouped, filter, query, docById, docLabels]);
 
   const toggleExpand = (docId: string, role: string) => {
     const key = `${role}:${docId}`;
@@ -246,7 +253,7 @@ export function MyQueueView({
         flat.sort((x, y) => {
           const r = rankStatus(x.a.status) - rankStatus(y.a.status);
           if (r !== 0) return r;
-          return (docById.get(x.a.document_id)?.filename ?? '').localeCompare(docById.get(y.a.document_id)?.filename ?? '');
+          return (docLabels[x.a.document_id] ?? '').localeCompare(docLabels[y.a.document_id] ?? '');
         });
 
         return (
@@ -292,7 +299,7 @@ export function MyQueueView({
                         >
                           <div className="flex items-center gap-2 min-w-0">
                             <FileText className="w-3.5 h-3.5 text-gray-300 dark:text-zinc-600 flex-shrink-0" />
-                            <span className="text-sm text-gray-800 dark:text-zinc-200 truncate">{doc.filename}</span>
+                            <span className="text-sm text-gray-800 dark:text-zinc-200 truncate" title={doc.filename}>{docLabels[doc.id] ?? doc.filename}</span>
                           </div>
                           <span className={cn('inline-flex items-center text-[10px] font-semibold rounded-full px-2 py-0.5 w-fit', meta.pill)}>
                             {meta.label}

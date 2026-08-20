@@ -1,6 +1,9 @@
 'use client';
 
+import { Tag } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Tooltip } from '@/components/ui/tooltip';
+import { tagsAsText } from '@/lib/documentTags';
 import {
   SEVERITY_COLOR, SEVERITY_LABEL, STATUS_COLOR, STATUS_LABEL,
   type AssessmentStatus, type Severity,
@@ -10,6 +13,9 @@ import type { BoundDomain } from '../_lib/robAdapter';
 export interface GridRow {
   documentId: string;
   label: string;
+  /** Document tags (`documents.labels`). Optional: a caller that has not been
+   *  taught to pass them gets a row with no tag marker, not a type error. */
+  labels?: string[];
   /** One severity per bound domain, in the instrument's order. */
   severities: Severity[];
   overall: Severity;
@@ -107,8 +113,17 @@ export function StudyGrid({
             )}
             style={grid}
           >
-            <span className="text-[13px] text-zinc-900 dark:text-zinc-100 truncate" title={r.label}>
-              {r.label}
+            {/* Tags live behind a marker, not inline: this column is capped at
+                190px and the study label has first claim on it. */}
+            <span className="flex min-w-0 items-center gap-1.5">
+              <span className="text-[13px] text-zinc-900 dark:text-zinc-100 truncate" title={r.label}>
+                {r.label}
+              </span>
+              {!!r.labels?.length && (
+                <Tooltip content={tagsAsText(r.labels)} className="max-w-xs whitespace-normal">
+                  <Tag className="h-2.5 w-2.5 shrink-0 text-gray-400 dark:text-zinc-500" />
+                </Tooltip>
+              )}
             </span>
             {domains.map((d, i) => {
               const severity = r.severities[i] ?? 'none';
