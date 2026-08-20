@@ -21,6 +21,7 @@ import type { ExtractionMode } from './_components/ExtractionToolbar';
 import { useDraftAutoSave } from './_hooks/useDraftAutoSave';
 import { useExtractionKeyboard } from './_hooks/useExtractionKeyboard';
 import { isTableField, flattenScalarFields, type AiTablePrefill } from './_lib/fieldKinds';
+import { buildLabelMap } from '@/lib/documentLabel';
 
 /** Normalize AI extraction keys: strip '.value' suffix, preserve arrays for table fields */
 function normalizeAiData(raw: Record<string, any>): Record<string, any> {
@@ -66,6 +67,12 @@ function ManualExtractionContent() {
   const [currentPage, setCurrentPage] = useState<number | null>(null);
 
   const [documents, setDocuments] = useState<Document[]>([]);
+  // Every list on this screen is filtered to `completed` documents, but a study
+  // ID's a/b suffix is a whole-project computation: label from a subset and a
+  // second "Mehlisch 2010" that is still processing makes this screen show a
+  // bare "Mehlisch 2010" while Documents shows "Mehlisch 2010a". Keep the
+  // unfiltered list purely to build the label map.
+  const [allDocuments, setAllDocuments] = useState<Document[]>([]);
   const [forms, setForms] = useState<Form[]>([]);
   const [selectedDoc, setSelectedDoc] = useState<Document | null>(null);
   const [selectedForm, setSelectedForm] = useState<Form | null>(null);
@@ -114,6 +121,10 @@ function ManualExtractionContent() {
     sessionStorage.setItem('evistream:extractionMode', extractionMode);
   }, [extractionMode]);
 
+  // One map, passed down to every child — never recomputed from a child's own
+  // (filtered) `documents` prop.
+  const docLabels = useMemo(() => buildLabelMap(allDocuments), [allDocuments]);
+
   useEffect(() => {
     if (selectedProject) {
       setLoadingData(true);
@@ -122,6 +133,7 @@ function ManualExtractionContent() {
         documentsService.getAll(selectedProject.id),
       ]).then(([f, d]) => {
         setForms(f.filter((x: any) => x.status === 'active'));
+        setAllDocuments(d);
         setDocuments(d.filter((x: any) => x.processing_status === 'completed'));
       }).catch(() => {
         toast({ title: 'Error', description: 'Failed to load forms and documents', variant: 'error' });
@@ -734,6 +746,7 @@ function ManualExtractionContent() {
           form={selectedForm}
           doc={selectedDoc}
           documents={documents}
+          docLabels={docLabels}
           pdfUrl={pdfUrl}
           formData={formData}
           aiPrefilledKeys={aiPrefilledKeys}
@@ -763,6 +776,7 @@ function ManualExtractionContent() {
         <MyQueueView
           assignments={myAssignments}
           documents={documents}
+          docLabels={docLabels}
           forms={forms}
           perDocFormStatus={myFormStatusByDoc}
           loading={loadingData || loadingAssignments}
@@ -785,6 +799,7 @@ function ManualExtractionContent() {
           <SelectionView
             forms={forms}
             documents={documents}
+            docLabels={docLabels}
             selectedForm={selectedForm}
             selectedDoc={selectedDoc}
             formSearch={formSearch}

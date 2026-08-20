@@ -5,12 +5,17 @@ import { Spinner } from '@/components/ui';
 import { cn } from '@/lib/utils';
 import { SlotSelect } from './SlotSelect';
 import {
+  correlationSlots,
+  effectSlots,
+  proportionSlots,
   identityHeader,
   identitySlots,
   longSlots,
   pairedRows,
+  precisionSources,
   suggestedCount,
   type ColumnCoverage,
+  type EffectScale,
   type Mapping,
   type OutcomeKind,
   type SlotKey,
@@ -29,6 +34,8 @@ export function MappingStep({
   layout,
   onKind,
   onLayout,
+  effectScale,
+  onEffectScale,
   mapping,
   onSelect,
   onConfirm,
@@ -54,6 +61,8 @@ export function MappingStep({
   layout: TableLayout;
   onKind: (k: OutcomeKind) => void;
   onLayout: (l: TableLayout) => void;
+  effectScale: EffectScale;
+  onEffectScale: (s: EffectScale) => void;
   mapping: Mapping;
   onSelect: (key: SlotKey, col: string) => void;
   onConfirm: (key: SlotKey) => void;
@@ -132,33 +141,90 @@ export function MappingStep({
               <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-zinc-500 mb-2">
                 Outcome type
               </div>
-              <div className="inline-flex bg-gray-100 dark:bg-[#1a1a1a] rounded-lg p-0.5">
+              {/* Five options now — wraps rather than pushing out of its column. */}
+              <div className="flex flex-wrap gap-0.5 bg-gray-100 dark:bg-[#1a1a1a] rounded-lg p-0.5 max-w-[300px]">
                 <Toggle active={kind === 'dichotomous'} onClick={() => onKind('dichotomous')}>
                   Dichotomous
                 </Toggle>
                 <Toggle active={kind === 'continuous'} onClick={() => onKind('continuous')}>
                   Continuous
                 </Toggle>
+                <Toggle active={kind === 'effect'} onClick={() => onKind('effect')}>
+                  Reported effect
+                </Toggle>
+                <Toggle active={kind === 'proportion'} onClick={() => onKind('proportion')}>
+                  Proportion
+                </Toggle>
+                <Toggle active={kind === 'correlation'} onClick={() => onKind('correlation')}>
+                  Correlation
+                </Toggle>
               </div>
+              {kind === 'effect' && (
+                <div className="text-[11px] text-gray-400 dark:text-zinc-600 mt-1.5 max-w-[240px] leading-relaxed">
+                  For tables holding an already-computed effect — an adjusted OR, a hazard ratio —
+                  with its CI or standard error, and no arm counts.
+                </div>
+              )}
+              {kind === 'proportion' && (
+                <div className="text-[11px] text-gray-400 dark:text-zinc-600 mt-1.5 max-w-[240px] leading-relaxed">
+                  One group per row — a prevalence or event rate with no comparator. Pooled on a
+                  variance-stabilising scale, so a study at 0% keeps a sensible weight.
+                </div>
+              )}
+              {kind === 'correlation' && (
+                <div className="text-[11px] text-gray-400 dark:text-zinc-600 mt-1.5 max-w-[240px] leading-relaxed">
+                  One correlation per row, pooled on Fisher&rsquo;s z and reported back as r — because
+                  r&rsquo;s own variance depends on r.
+                </div>
+              )}
             </div>
 
             <div className="flex-1 min-w-[340px]">
               <div className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-zinc-500 mb-2">
-                How is this table organized?
+                {kind === 'proportion' || kind === 'correlation' ? 'Table shape'
+                  : kind === 'effect' ? 'What scale is the effect printed on?'
+                  : 'How is this table organized?'}
               </div>
               <div className="flex gap-2.5">
-                <LayoutChoice
-                  active={layout === 'wide'}
-                  onClick={() => onLayout('wide')}
-                  title="One row per comparison"
-                  detail="Treatment and comparator side by side"
-                />
-                <LayoutChoice
-                  active={layout === 'long'}
-                  onClick={() => onLayout('long')}
-                  title="One row per study arm"
-                  detail="Rows must be paired up"
-                />
+                {kind === 'proportion' || kind === 'correlation' ? (
+                  <div className="text-[12.5px] text-gray-500 dark:text-zinc-400 leading-relaxed max-w-[420px]">
+                    One row per study, no pairing — a single group has nothing to be compared
+                    against, so there is no layout choice to make here.
+                    {kind === 'proportion'
+                      ? ' Choose how the proportions are pooled on the next step.'
+                      : ''}
+                  </div>
+                ) : kind === 'effect' ? (
+                  <>
+                    <LayoutChoice
+                      active={effectScale === 'natural'}
+                      onClick={() => onEffectScale('natural')}
+                      title="As printed in the paper"
+                      detail="e.g. an OR of 1.42 — ratios are logged for pooling"
+                    />
+                    <LayoutChoice
+                      active={effectScale === 'log'}
+                      onClick={() => onEffectScale('log')}
+                      title="Already log-transformed"
+                      detail="The column holds ln(OR), ln(HR) — used as-is"
+                    />
+                  </>
+                ) : (
+                  <>
+                    <LayoutChoice
+                      active={layout === 'wide'}
+                      onClick={() => onLayout('wide')}
+                      title="One row per comparison"
+                      detail="Treatment and comparator side by side"
+                    />
+                    <LayoutChoice
+                      active={layout === 'long'}
+                      onClick={() => onLayout('long')}
+                      title="One row per study arm"
+                      detail="Rows must be paired up"
+                    />
+                  </>
+                )}
               </div>
             </div>
           </div>
@@ -232,7 +298,44 @@ export function MappingStep({
 
           {!mappingEmpty && (
             <>
-              {layout === 'wide' ? (
+              {kind === 'proportion' || kind === 'correlation' ? (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-3.5">
+                  {(kind === 'proportion' ? proportionSlots() : correlationSlots()).map(s => (
+                    <div key={s.key}>
+                      <SlotSelect slotKey={s.key} label={s.label} mapping={mapping}
+                        columns={columnNames} onSelect={onSelect} onConfirm={onConfirm}
+                        sourceField={sourceField} showPath />
+                      <div className="text-[11px] text-gray-400 dark:text-zinc-600 mt-1 leading-relaxed">
+                        {s.hint}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : kind === 'effect' ? (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 mt-3.5">
+                    {effectSlots().map(s => (
+                      <div key={s.key}>
+                        <SlotSelect slotKey={s.key} label={s.label} mapping={mapping}
+                          columns={columnNames} onSelect={onSelect} onConfirm={onConfirm}
+                          sourceField={sourceField} showPath />
+                        <div className="text-[11px] text-gray-400 dark:text-zinc-600 mt-1 leading-relaxed">
+                          {s.hint}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="flex items-start gap-2 border border-gray-200 dark:border-[#2a2a2a] bg-gray-50 dark:bg-[#0d0d0d] rounded-lg px-3 py-2.5 mt-3">
+                    <span className="text-[12.5px] text-gray-700 dark:text-zinc-300 leading-relaxed">
+                      {precisionSources(mapping).ci
+                        ? 'Precision comes from the CI bounds. A row whose bounds are unusable falls back to the standard-error column when one is mapped, and is listed in the ledger when it is not.'
+                        : precisionSources(mapping).se
+                        ? 'Precision comes from the standard-error column. For a ratio measure printed on its natural scale that SE is converted by SE ÷ estimate, an approximation — mapping both CI bounds instead avoids it.'
+                        : 'Map a standard error, or both CI bounds, before this can run — each study needs a precision to be weighted by.'}
+                    </span>
+                  </div>
+                </>
+              ) : layout === 'wide' ? (
                 <>
                   <div className="grid grid-cols-[96px_1fr_1fr] gap-2.5 mt-3.5">
                     <div />
@@ -345,7 +448,7 @@ function Toggle({
       type="button"
       onClick={onClick}
       className={cn(
-        'cursor-pointer text-[13px] font-medium px-3.5 py-1.5 rounded-md transition-colors',
+        'cursor-pointer text-[13px] font-medium px-3 py-1.5 rounded-md transition-colors whitespace-nowrap',
         active
           ? 'bg-white text-gray-900 shadow-sm dark:bg-[#2a2a2a] dark:text-white'
           : 'bg-transparent text-gray-500 dark:text-zinc-500',

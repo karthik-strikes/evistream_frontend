@@ -235,7 +235,7 @@ export function AllocationsView({
       const matchStatus = statusFilter === 'all' || r.status === statusFilter;
       const matchSearch = !q ||
         (r.reviewer_name || '').toLowerCase().includes(q) ||
-        (r.document_filename || '').toLowerCase().includes(q);
+        (r.document_label || r.document_filename || '').toLowerCase().includes(q);
       return matchStatus && matchSearch;
     });
   }, [rows, search, statusFilter]);
@@ -609,7 +609,7 @@ export function AllocationsView({
                             <div className="flex items-center gap-2.5 min-w-0 pl-4">
                               <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', statusDot(p.status))} />
                               <span className="text-[12.5px] text-gray-700 dark:text-zinc-300 truncate">
-                                {p.document_filename || p.document_id}
+                                {p.document_label || p.document_filename || p.document_id}
                               </span>
                             </div>
 

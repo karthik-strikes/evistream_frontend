@@ -120,6 +120,12 @@ export const documentsService = {
     return apiClient.patch<Document>(`/api/v1/documents/${id}/labels`, { labels });
   },
 
+  /** Set the manual study ID ("Jefferson 2026b"). An empty string clears the
+   *  override and hands the label back to the derived author + year. */
+  async updateStudyLabel(id: string, studyLabel: string | null): Promise<Document> {
+    return apiClient.patch<Document>(`/api/v1/documents/${id}/study-label`, { study_label: studyLabel });
+  },
+
   async upload({ file, projectId, labels, onUploadProgress }: UploadDocumentOptions): Promise<UploadResult> {
     const contentHash = await computeSHA256(file);
 

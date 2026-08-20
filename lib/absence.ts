@@ -33,11 +33,31 @@ export type CellStatus =
   | 'error'
   | 'partial';
 
+/** Where a quote was found in the document, as resolved by the backend's
+ *  source linker. `synthetic_caption` marks a quote that landed inside
+ *  Datalab's machine-generated description of a figure rather than in text the
+ *  authors wrote — see backend/utils/synthetic_captions.py. It rides here
+ *  rather than on the cell so reviewer comparison keeps ignoring it. */
+export interface SourceLocation {
+  page?: number;
+  start_char?: number;
+  end_char?: number;
+  matched_text?: string;
+  confidence?: number;
+  section?: string;
+  grounding_method?: string;
+  bboxes?: any[];
+  synthetic_caption?: boolean;
+  /** Filename of the figure a synthetic caption describes — the viewer's join
+   *  key for highlighting the picture instead of the caption text. */
+  caption_image?: string;
+}
+
 /** The `{value, source_text, status}` envelope every extracted field uses. */
 export interface ValueCell {
   value: any;
   source_text?: string;
-  source_location?: any;
+  source_location?: SourceLocation | null;
   status?: string;
   error?: string;
   off_options?: string[];

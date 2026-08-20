@@ -11,6 +11,7 @@ import type { LiteratureResult } from '@/types/api';
 import type { LiteratureScope } from '@/services/literature.service';
 import { TrialEvidencePanel } from './TrialEvidencePanel';
 import { ArticleEvidencePanel } from '../pubmed/ArticleEvidencePanel';
+import { documentLabel } from '@/lib/documentLabel';
 
 // NCT ID / PMID auto-detection lives server-side now (literature.py's
 // _search_ctgov/_search_pubmed) so it applies consistently regardless of
@@ -297,7 +298,7 @@ export function LiteratureSearchDrawer({ open, onClose, projectId, projectName, 
       const { duplicate, document } = result;
       const key = resultKey(selected);
       if (duplicate) {
-        toast({ title: 'Already imported', description: `${key} is already in this project as "${document.filename}"` });
+        toast({ title: 'Already imported', description: `${key} is already in this project as "${documentLabel(document)}"` });
       } else {
         // full_text_source only exists on PubMed imports (see
         // pubmedService.importArticle) — a trial import always falls to the

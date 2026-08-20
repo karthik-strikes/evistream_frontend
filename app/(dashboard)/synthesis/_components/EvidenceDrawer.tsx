@@ -2,10 +2,16 @@
 
 import Link from 'next/link';
 import { X } from 'lucide-react';
-import { isBinaryArm, type StudyEffect } from '@/lib/metaAnalysis';
+import { isBinaryArm, studyDataCells, type StudyEffect } from '@/lib/metaAnalysis';
 
+/**
+ * One side of the two-panel header. A study that arrived as an effect estimate
+ * has no arms behind it, so both panels fall back to the plot's own reading of
+ * what the source reported rather than inventing arm numbers.
+ */
 function armText(study: StudyEffect, which: 'treatment' | 'comparator'): string {
   const arm = study[which];
+  if (!arm) return which === 'treatment' ? studyDataCells(study).left : studyDataCells(study).right;
   if (isBinaryArm(arm)) return `${arm.events} / ${arm.total}`;
   return `${arm.mean} ± ${Number(arm.sd.toFixed(3))} (n = ${arm.n})`;
 }

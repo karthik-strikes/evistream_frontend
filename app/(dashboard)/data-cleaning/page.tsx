@@ -181,7 +181,7 @@ export default function DataCleaningPage() {
                 {gridData.map(row => (
                   <tr key={row.document_id} className="hover:bg-gray-50 dark:hover:bg-[#0a0a0a]">
                     <td className="px-3 py-2 whitespace-nowrap dark:text-white font-medium sticky left-0 bg-white dark:bg-[#141414] z-10">
-                      {row.filename}
+                      {row.study_label || row.filename}
                     </td>
                     <td className="px-3 py-2 whitespace-nowrap">
                       <span className="text-xs px-1.5 py-0.5 rounded bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-400">

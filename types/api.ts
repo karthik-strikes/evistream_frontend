@@ -2,6 +2,8 @@
  * API Request/Response Types
  */
 
+import type { ReviewScopeStructured } from '@/lib/reviewScope';
+
 // Authentication
 export interface LoginRequest {
   email: string;
@@ -91,6 +93,10 @@ export interface Project {
    *  extraction prompt at runtime as CONTEXT — it helps the model pick the
    *  right arm/population/timepoint. It never filters rows. */
   review_scope?: string | null;
+  /** The guided scope builder's chips behind `review_scope`. UI state only —
+   *  extraction reads `review_scope`. Null on projects whose scope was typed
+   *  as free text, which is why the editor falls back to a textarea. */
+  review_scope_structured?: ReviewScopeStructured | null;
   my_role?: 'owner' | 'manager' | 'member' | 'viewer' | 'admin';
   /** Soft archive. Null/undefined = active. Archived projects are hidden from
    *  the selector and every dropdown, and are read-only until restored. */
@@ -119,6 +125,13 @@ export interface Document {
   doi: string | null;
   doi_source: 'metadata' | 'text' | 'crossref' | 'none' | null;
   title: string | null;
+  /** Study identity — the "Raslan 2021" every screen shows. `first_author` is a
+   *  surname only; `study_label` is the manual override and beats both. The
+   *  displayed label (a/b/c disambiguation included, which is a per-project
+   *  decision) is composed by lib/documentLabel.ts — never render these raw. */
+  first_author?: string | null;
+  pub_year?: string | null;
+  study_label?: string | null;
   labels: string[];
   created_at: string;
   // ClinicalTrials.gov / PubMed import (optional — absent/undefined on normal uploads)
@@ -728,6 +741,9 @@ export interface PermissionAuditLog {
 export interface ConsensusSummaryDoc {
   document_id: string;
   filename: string;
+  /** Study ID for display ("Raslan 2021"), resolved server-side over the whole
+   *  project so its a/b suffix matches every other screen. */
+  study_label?: string;
   ref_id: number | null;
   has_ai: boolean;
   has_manual: boolean;
@@ -790,6 +806,9 @@ export interface ReviewAssignment {
   completed_at: string | null;
   is_training: boolean;
   document_filename?: string;
+  /** Study ID for display ("Raslan 2021"), resolved server-side across the
+   *  whole project so its a/b suffix matches every other screen. */
+  document_label?: string;
   reviewer_name?: string;
   forms_completed: number;
   forms_total: number;
@@ -928,6 +947,7 @@ export interface QAReview {
   created_at: string;
   updated_at: string;
   document_filename?: string;
+  document_label?: string;
 }
 
 export interface FieldComment {
@@ -1012,6 +1032,8 @@ export interface ValidationRule {
 export interface DataCleaningRow {
   document_id: string;
   filename: string;
+  /** Study ID for display, resolved server-side across the whole project. */
+  study_label?: string;
   data_source: 'adjudicated' | 'reviewer_1' | 'ai' | 'manual';
   values: Record<string, any>;
   violations: DataViolation[];

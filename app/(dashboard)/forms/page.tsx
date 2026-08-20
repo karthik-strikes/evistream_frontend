@@ -42,6 +42,7 @@ import {
   DecompositionDependencyOverlay,
   type DecompositionDependencyEdge,
 } from '@/components/forms/DecompositionDependencyOverlay';
+import { buildLabelMap } from '@/lib/documentLabel';
 
 export default function FormsPage() {
   const { selectedProject, projects } = useProject();
@@ -86,11 +87,7 @@ export default function FormsPage() {
     enabled: !!selectedProject,
   });
 
-  const docNames = useMemo(() => {
-    const map: Record<string, string> = {};
-    documents.forEach((d: any) => { map[d.id] = d.filename; });
-    return map;
-  }, [documents]);
+  const docNames = useMemo(() => buildLabelMap(documents), [documents]);
 
   const error = queryError ? getErrorMessage(queryError as any, 'Failed to load forms') : null;
 

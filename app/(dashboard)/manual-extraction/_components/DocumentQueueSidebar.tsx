@@ -4,11 +4,14 @@ import { FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Document } from '@/types/api';
 import { getDraftStatus } from '../_hooks/useDraftAutoSave';
+import { DocumentTags } from '@/components/documents/DocumentTags';
 
 type DocStatus = 'done' | 'partial' | 'draft' | 'todo';
 
 interface DocumentQueueSidebarProps {
   documents: Document[];
+  /** Project-wide study IDs — see ExtractionView. */
+  docLabels: Record<string, string>;
   currentDocId: string;
   doneDocs: Set<string>;
   partialDocs: Set<string>;
@@ -32,7 +35,7 @@ const statusBadge: Record<DocStatus, { label: string; cls: string }> = {
   todo: { label: 'Todo', cls: 'text-gray-500 dark:text-zinc-500 bg-gray-50 dark:bg-[#1a1a1a] border-gray-200 dark:border-[#2a2a2a]' },
 };
 
-export function DocumentQueueSidebar({ documents, currentDocId, doneDocs, partialDocs, formId, onSelectDoc }: DocumentQueueSidebarProps) {
+export function DocumentQueueSidebar({ documents, docLabels, currentDocId, doneDocs, partialDocs, formId, onSelectDoc }: DocumentQueueSidebarProps) {
   const docsWithStatus = documents
     .map(d => ({ doc: d, status: getDocStatus(d, doneDocs, partialDocs, formId) }))
     .sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
@@ -64,8 +67,12 @@ export function DocumentQueueSidebar({ documents, currentDocId, doneDocs, partia
               )}
             >
               <FileText className="w-3 h-3 text-gray-400 dark:text-zinc-500 flex-shrink-0" />
+              {/* This rail is 200px wide, so tags sit UNDER the study ID rather
+                  than beside it, and only one shows before collapsing. Read-only:
+                  the queue is the selected form's workload, not a filterable list. */}
               <div className="flex-1 min-w-0">
-                <p className="text-[11px] text-gray-700 dark:text-zinc-300 truncate">{doc.filename}</p>
+                <p className="text-[11px] text-gray-700 dark:text-zinc-300 truncate" title={doc.filename}>{docLabels[doc.id] ?? doc.filename}</p>
+                <DocumentTags labels={doc.labels} max={1} className="mt-0.5" />
               </div>
               <span className={cn("text-[9px] font-semibold px-1 py-0.5 rounded border flex-shrink-0", badge.cls)}>
                 {badge.label}

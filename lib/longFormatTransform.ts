@@ -8,6 +8,7 @@
  */
 
 import { displayLabel } from './absence';
+import { buildLabelMap, filenameStem } from './documentLabel';
 import type { FormField } from '@/types/api';
 
 // ---------------------------------------------------------------------------
@@ -25,6 +26,10 @@ export interface LongFormatRow {
   _paperFilename: string;
   _resultId: string;
   _documentId: string;
+  /** Which model produced this row, for the paper cell's badge. Null on manual rows. */
+  _modelName?: string | null;
+  /** 'ai' | 'manual' | 'consensus' — drives the "Manual" badge. */
+  _extractionType?: string | null;
   /** Raw wrapped cell envelopes ({value, source_text, ...}) keyed by column name —
    *  used by the renderer to surface per-cell source evidence. */
   _rawCells?: Record<string, any>;
@@ -211,10 +216,23 @@ interface DocInfo {
   id: string;
   filename: string;
   ref_id?: number | null;
+  // Study identity. Optional because a few callers build this map from a
+  // trimmed row; documentLabel falls back to the filename when they are absent.
+  first_author?: string | null;
+  pub_year?: string | null;
+  study_label?: string | null;
+  pmid?: string | null;
+  nct_id?: string | null;
 }
 
 export function transformToLongFormat(
-  results: Array<{ id: string; document_id: string; extracted_data: Record<string, any> }>,
+  results: Array<{
+    id: string;
+    document_id: string;
+    extracted_data: Record<string, any>;
+    model_name?: string | null;
+    extraction_type?: string | null;
+  }>,
   formFields: FormField[],
   documentsMap: Record<string, DocInfo>,
 ): LongFormatResult {
@@ -223,6 +241,10 @@ export function transformToLongFormat(
     return fallbackTransform(results, documentsMap);
   }
 
+  // "Paper" is the study ID ("Raslan 2021"), not the filename — one map for
+  // the whole project so the a/b suffixes match the screens this exports from.
+  const paperLabels = buildLabelMap(Object.values(documentsMap));
+
   const classification = classifyFields(formFields);
   const columns = buildColumns(classification);
   const rows: LongFormatRow[] = [];
@@ -230,6 +252,7 @@ export function transformToLongFormat(
   for (const result of results) {
     const doc = documentsMap[result.document_id];
     const filename = doc?.filename ?? result.document_id;
+    const paper = paperLabels[result.document_id] ?? filenameStem(filename);
     const data = result.extracted_data ?? {};
 
     // Extract flat field values + capture raw wrapped envelopes for evidence lookup
@@ -244,7 +267,9 @@ export function transformToLongFormat(
       _paperFilename: filename,
       _resultId: result.id,
       _documentId: result.document_id,
-      Paper: filename.replace(/\.pdf$/i, ''),
+      _modelName: result.model_name ?? null,
+      _extractionType: result.extraction_type ?? null,
+      Paper: paper,
       'Ref ID': doc?.ref_id != null ? String(doc.ref_id) : '',
     };
 
@@ -258,9 +283,11 @@ export function transformToLongFormat(
     const deepestFieldName = classification.deepestTableField.field_name;
     let deepestArray = extractArray(data[deepestFieldName]);
 
-    // Empty array — still emit one row with flat fields
+    // Empty array — still emit one row with flat fields (carry their raw
+    // envelopes too, or the flat cells silently lose their source evidence
+    // whenever the table came back empty).
     if (deepestArray.length === 0) {
-      rows.push({ ...baseRow, ...flatValues });
+      rows.push({ ...baseRow, ...flatValues, _rawCells: { ...flatRaw } });
       continue;
     }
 
@@ -332,6 +359,7 @@ function fallbackTransform(
     }
   }
   const columns = ['Paper', 'Ref ID', ...Array.from(allKeys).sort()];
+  const paperLabels = buildLabelMap(Object.values(documentsMap));
   const rows: LongFormatRow[] = results.map(r => {
     const doc = documentsMap[r.document_id];
     const rawCells: Record<string, any> = {};
@@ -339,7 +367,9 @@ function fallbackTransform(
       _paperFilename: doc?.filename ?? r.document_id,
       _resultId: r.id,
       _documentId: r.document_id,
-      Paper: (doc?.filename ?? r.document_id).replace(/\.pdf$/i, ''),
+      _modelName: (r as any).model_name ?? null,
+      _extractionType: (r as any).extraction_type ?? null,
+      Paper: paperLabels[r.document_id] ?? filenameStem(doc?.filename ?? r.document_id),
       'Ref ID': doc?.ref_id != null ? String(doc.ref_id) : '',
     };
     for (const k of allKeys) {

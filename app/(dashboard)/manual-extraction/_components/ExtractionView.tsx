@@ -7,11 +7,15 @@ import { ExtractionToolbar, type ExtractionMode } from './ExtractionToolbar';
 import { ExtractionForm } from './ExtractionForm';
 import { DocumentQueueSidebar } from './DocumentQueueSidebar';
 import type { AiTablePrefill } from '../_lib/fieldKinds';
+import { buildLabelMap, documentLabel } from '@/lib/documentLabel';
 
 interface ExtractionViewProps {
   form: Form;
   doc: Document;
   documents: Document[];
+  /** Project-wide study IDs. Required, not optional: a child computing its own
+   *  map from the filtered `documents` above would silently drop a/b suffixes. */
+  docLabels: Record<string, string>;
   pdfUrl: string;
   formData: Record<string, any>;
   aiPrefilledKeys: Set<string>;
@@ -43,6 +47,7 @@ export function ExtractionView({
   form,
   doc,
   documents,
+  docLabels,
   pdfUrl,
   formData,
   aiPrefilledKeys,
@@ -72,7 +77,7 @@ export function ExtractionView({
     <>
       <ExtractionToolbar
         formName={form.form_name}
-        docFilename={doc.filename}
+        docFilename={docLabels[doc.id] ?? documentLabel(doc)}
         extractionMode={extractionMode}
         onModeChange={onModeChange}
         onBack={onBack}
@@ -110,6 +115,7 @@ export function ExtractionView({
             {queueOpen && (
               <DocumentQueueSidebar
                 documents={documents}
+                docLabels={docLabels}
                 currentDocId={doc.id}
                 doneDocs={doneDocs}
                 partialDocs={partialDocs}

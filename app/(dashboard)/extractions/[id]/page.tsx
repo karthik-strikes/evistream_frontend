@@ -30,6 +30,7 @@ import type { ExtractionResult } from '@/types/api';
 import { ExtractionStatusBadge } from '@/components/extractions';
 import { JobLogsWebSocket, type LogMessage } from '@/services/jobLogsWebSocket';
 import { apiClient } from '@/lib/api';
+import { buildLabelMap } from '@/lib/documentLabel';
 
 type TabType = 'papers' | 'logs' | 'export';
 
@@ -139,7 +140,8 @@ export default function ExtractionDetailPage() {
   });
 
   const docNamesMap = new Map<string, string>();
-  allDocuments.forEach((d: any) => docNamesMap.set(d.id, d.filename));
+  const docLabels = buildLabelMap(allDocuments);
+  allDocuments.forEach((d: any) => docNamesMap.set(d.id, docLabels[d.id] || d.filename));
 
   const formName = extraction
     ? forms.find((f: any) => f.id === extraction.form_id)?.form_name ?? 'Unknown Form'

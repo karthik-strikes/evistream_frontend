@@ -43,6 +43,10 @@ export interface FlatBlock {
   pageHeight: number;
   bbox: Bbox;
   blockType: string;
+  /** Filenames of images this block owns, from Datalab's per-block `images`
+   *  map. The join key for locating a figure by name rather than by text —
+   *  see findBlockByImageFile. */
+  imageFiles?: string[];
   /** Plain text, HTML tags stripped, whitespace collapsed. */
   text: string;
 }
@@ -137,6 +141,7 @@ function walkLeaves(
       block_type?: string;
       bbox?: number[];
       html?: string;
+      images?: Record<string, string>;
       children?: unknown[];
     };
     const bbox = toBbox(n.bbox);
@@ -160,6 +165,7 @@ function walkLeaves(
         bbox,
         blockType,
         text,
+        imageFiles: n.images ? Object.keys(n.images) : undefined,
       });
     }
     if (hasChildren) {
@@ -202,6 +208,32 @@ export function findQuoteInBlocks(
     }
   }
   return best;
+}
+
+/**
+ * Find the block that owns a given image file, by filename.
+ *
+ * Used when a quote came from Datalab's automatic description of a figure: the
+ * real source is the picture, so we highlight the block that holds it. The
+ * filename is the only reliable join — the caption text in the markdown and the
+ * caption text in this blocks sidecar are separate Datalab generations and are
+ * worded differently ("Four groups are shown" vs "Four treatment groups are
+ * shown" for the same figure), so matching on text would miss.
+ *
+ * Confidence is 1.0 because this is a structural identity, not a fuzzy text
+ * match — the block literally contains the image the caption describes.
+ */
+export function findBlockByImageFile(
+  blocks: FlatBlock[],
+  imageFile: string,
+): QuoteMatch | null {
+  if (!imageFile || !blocks.length) return null;
+  for (const block of blocks) {
+    if (block.imageFiles?.includes(imageFile)) {
+      return { block, confidence: 1.0, localStart: 0, localEnd: block.text.length };
+    }
+  }
+  return null;
 }
 
 /**

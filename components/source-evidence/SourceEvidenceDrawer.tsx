@@ -47,6 +47,15 @@ export interface SourceEvidenceDrawerProps {
   /** NCT ID (ctgov) or PMID (pubmed) for the metadata record. */
   recordId?: string | null;
   doi?: string | null;
+  /** True when the quote was located inside Datalab's machine-generated
+   *  description of a figure rather than in the authors' own text. Such a quote
+   *  passes verbatim verification — the string really is in the parsed
+   *  document — so the reviewer has to be told, or they will read a machine's
+   *  reading of a chart as the paper's own words. */
+  syntheticCaption?: boolean;
+  /** Filename of the figure the quote was read from, when it came from an
+   *  automatic figure description. Lets the viewer highlight the picture. */
+  captionImage?: string | null;
 }
 
 /**
@@ -76,6 +85,8 @@ export function SourceEvidenceDrawer({
   sourceType,
   recordId,
   doi,
+  syntheticCaption = false,
+  captionImage = null,
 }: SourceEvidenceDrawerProps) {
   // Wrap onClose so we blur whatever button is focused inside the drawer
   // BEFORE flipping aria-hidden to true on its ancestor. Otherwise Chrome
@@ -130,6 +141,22 @@ export function SourceEvidenceDrawer({
         {/* Body — PdfHighlightViewer owns the entire chrome now (filename,
             page input, zoom, prev/next, close all live in its header). */}
         <div className="relative flex-1 min-h-0 bg-gray-50 p-3 dark:bg-[#0a0a0a]">
+          {syntheticCaption && (
+            <div className="mb-2 flex items-start gap-2.5 rounded-lg border border-amber-200/80 bg-amber-50/70 px-3 py-2 dark:border-amber-900/40 dark:bg-amber-950/25">
+              <span
+                aria-hidden
+                className="mt-[5px] h-1.5 w-1.5 flex-shrink-0 rounded-full bg-amber-500 dark:bg-amber-400"
+              />
+              <p className="text-[11.5px] leading-relaxed text-amber-900 dark:text-amber-200/90">
+                <span className="font-semibold">Automatic figure description.</span>{' '}
+                This quote comes from a description of a figure generated during
+                document processing — not from text the authors wrote.
+                {captionImage
+                  ? ' The figure it describes is highlighted below — read the value off the figure before accepting it.'
+                  : ' Check it against the figure itself before accepting the value.'}
+              </p>
+            </div>
+          )}
           {!hasPdf && (sourceType === 'ctgov' || sourceType === 'pubmed') ? (
             <MetadataSourceEvidence
               documentId={documentId}
@@ -158,6 +185,7 @@ export function SourceEvidenceDrawer({
               onNext={onNext}
               hasPrev={hasPrev}
               hasNext={hasNext}
+              captionImage={captionImage}
             />
           )}
         </div>

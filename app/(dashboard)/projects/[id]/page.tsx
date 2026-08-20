@@ -468,6 +468,7 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
                   <ReviewScopeSection
                     projectId={id}
                     reviewScope={proj?.review_scope}
+                    reviewScopeStructured={proj?.review_scope_structured}
                     onScopeChange={refreshProjects}
                     editable={canManageThis && !isProjArchived}
                   />

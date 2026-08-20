@@ -102,6 +102,34 @@ export function formatModelName(model: string): string {
   return words.join(' ');
 }
 
+export type ModelFamily = 'gpt' | 'claude' | 'gemini' | 'other';
+
+/**
+ * Coarsen a stored `model_name` to a provider family.
+ *
+ * Lives here beside `modelTagTheme` because two screens need the same answer:
+ * the Results toolbar filters by family, and each table row badges its family.
+ * Substring matching on purpose — `model_name` holds LiteLLM ids like
+ * `anthropic/claude-sonnet-5`, and the served list changes faster than any
+ * enum we could keep in sync.
+ */
+export function modelFamily(model?: string | null): ModelFamily {
+  const m = (model || '').toLowerCase();
+  if (m.includes('gpt') || m.includes('openai') || /\bo[134]\b/.test(m)) return 'gpt';
+  if (m.includes('claude') || m.includes('anthropic') || m.includes('opus') || m.includes('sonnet') || m.includes('haiku')) return 'claude';
+  if (m.includes('gemini') || m.includes('google')) return 'gemini';
+  return 'other';
+}
+
+export const FAMILY_LABEL: Record<ModelFamily, string> = {
+  gpt: 'GPT', claude: 'Claude', gemini: 'Gemini', other: 'Other',
+};
+
+/** Family label straight from a model id — for badges too small for a full name. */
+export function modelFamilyLabel(model?: string | null): string {
+  return FAMILY_LABEL[modelFamily(model)];
+}
+
 /**
  * Provider-themed style for a model tag: orange for Claude/Anthropic,
  * green for OpenAI/GPT, blue for Gemini, neutral zinc otherwise.

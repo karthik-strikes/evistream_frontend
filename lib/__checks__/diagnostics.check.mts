@@ -42,6 +42,7 @@ import {
   type ContinuousArm,
   type MetaStudy,
 } from '../metaAnalysis.ts';
+import { normalTwoSidedP, studentTTwoSidedP } from '../distributions.ts';
 
 let passed = 0;
 const failures: string[] = [];
@@ -406,6 +407,24 @@ const cont = (key: string, m1: number, s1: number, n1: number,
   // Too few studies for a regression at all.
   const tiny = funnelAndEgger(runMetaAnalysis(symmetric.slice(0, 2), 'RR', 'random'));
   check('two studies yield no Egger test', tiny.egger === null);
+
+  // Egger's statistic is an OLS t on k - 2 residual degrees of freedom, so its
+  // p-value comes off the t distribution. Reading it off the normal understated
+  // it by several fold at exactly the corpus sizes this test is gated for.
+  check('Egger reports its residual df', big.egger!.df === 12 - 2, String(big.egger!.df));
+  check('Egger df tracks the corpus', sym.egger!.df === sym.points.length - 2);
+  close('Egger p is the t-distribution p for its own statistic',
+    big.egger!.p, studentTTwoSidedP(big.egger!.t, big.egger!.df), 1e-12);
+  // Fatter tails, so t is never more significant than z for the same statistic —
+  // strictly less whenever the normal p is large enough to be representable at
+  // all (this fixture's intercept is extreme enough that both underflow to 0).
+  for (const e of [sym.egger!, asym.egger!, big.egger!]) {
+    const pz = normalTwoSidedP(e.t);
+    check('Egger p is never below the normal-based p it replaced', e.p >= pz, `${e.p} vs ${pz}`);
+    if (pz > 1e-12) {
+      check('Egger p is strictly larger than the normal-based p', e.p > pz, `${e.p} vs ${pz}`);
+    }
+  }
   check('...but still yield funnel points', tiny.points.length === 2);
   check('...and no pseudo-CI without a pooled estimate', tiny.pseudo === null);
 }

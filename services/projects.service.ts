@@ -1,5 +1,6 @@
 import { apiClient } from '@/lib/api';
 import type { Project, CreateProjectRequest } from '@/types/api';
+import type { ReviewScopeStructured } from '@/lib/reviewScope';
 
 export const projectsService = {
   /**
@@ -32,8 +33,21 @@ export const projectsService = {
    * Set the project's review scope — context injected into every extraction
    * prompt. Pass null to clear. Requires can_create_forms server-side.
    */
-  async updateReviewScope(id: string, review_scope: string | null): Promise<{ review_scope: string | null }> {
-    return apiClient.patch(`/api/v1/projects/${id}/review-scope`, { review_scope });
+  /**
+   * Writes both scope columns at once. `review_scope` is the prose extraction
+   * reads; `review_scope_structured` is the guided builder's chips. Passing
+   * null for the chips (what a free-text save does) clears them server-side,
+   * so the two can never describe different scopes.
+   */
+  async updateReviewScope(
+    id: string,
+    review_scope: string | null,
+    review_scope_structured: ReviewScopeStructured | null = null,
+  ): Promise<{ review_scope: string | null; review_scope_structured: ReviewScopeStructured | null }> {
+    return apiClient.patch(`/api/v1/projects/${id}/review-scope`, {
+      review_scope,
+      review_scope_structured,
+    });
   },
 
   /** Hide the project and make it read-only. Owner/admin/manager only. */

@@ -16,9 +16,17 @@ import type { MappingSuggestion } from '@/services/synthesis.service';
 export function NotPoolableExplainer({
   suggestion,
   formName,
+  onUseReportedEffect,
 }: {
   suggestion: MappingSuggestion;
   formName: string;
+  /**
+   * Escape hatch. The classifier only knows how to recognize arm data, so a
+   * table holding a published effect estimate lands here wrongly — this lets the
+   * reviewer say so and map it directly. Offered on every non-diagnostic verdict
+   * because the classifier being wrong is exactly the case it exists for.
+   */
+  onUseReportedEffect: () => void;
 }) {
   const diagnostic = suggestion.verdict === 'diagnostic_accuracy';
 
@@ -51,10 +59,26 @@ export function NotPoolableExplainer({
       )}
 
       {!diagnostic && (
-        <p className="text-[13px] text-gray-600 dark:text-zinc-400 mt-3 leading-relaxed">
-          A meta-analysis needs, for each group, either an event count with a denominator or a mean
-          with a spread and a sample size. Pick a form whose table reports outcomes to continue.
-        </p>
+        <>
+          <p className="text-[13px] text-gray-600 dark:text-zinc-400 mt-3 leading-relaxed">
+            A meta-analysis needs, for each group, either an event count with a denominator or a mean
+            with a spread and a sample size. Pick a form whose table reports outcomes to continue.
+          </p>
+          <div className="border border-gray-200 dark:border-[#2a2a2a] bg-gray-50 dark:bg-[#0d0d0d] rounded-lg px-3.5 py-3 mt-4">
+            <div className="text-[13px] text-gray-700 dark:text-zinc-300 leading-relaxed">
+              Unless this table reports an <strong>already-computed effect</strong> — an adjusted odds
+              ratio, a hazard ratio — with its confidence interval or standard error. That can be
+              pooled, and the check above cannot recognize it.
+            </div>
+            <button
+              type="button"
+              onClick={onUseReportedEffect}
+              className="mt-2.5 cursor-pointer text-[12.5px] font-semibold bg-[#0a0a0a] text-white rounded-md px-3 py-1.5 hover:bg-zinc-800 dark:bg-white dark:text-black dark:hover:bg-zinc-100"
+            >
+              Map it as a reported effect →
+            </button>
+          </div>
+        </>
       )}
 
       {suggestion.columns.length > 0 && (

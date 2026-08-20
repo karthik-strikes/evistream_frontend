@@ -164,7 +164,7 @@ export default function QAPage() {
                 {queue.map(r => (
                   <div key={r.id} className="flex items-center justify-between p-4 bg-white dark:bg-[#141414] border border-gray-200 dark:border-[#2a2a2a] rounded-lg">
                     <div>
-                      <p className="font-medium text-sm dark:text-white">{r.document_filename || r.document_id.slice(0, 12)}</p>
+                      <p className="font-medium text-sm dark:text-white">{r.document_label || r.document_filename || r.document_id.slice(0, 12)}</p>
                       <p className="text-xs text-gray-500">{r.flagged_field_count} flags / {r.total_fields_reviewed} reviewed</p>
                     </div>
                     <div className="flex items-center gap-3">

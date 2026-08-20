@@ -12,12 +12,16 @@ import { Loader2, AlertCircle, FileUp, FolderOpen, Layers, Plus, X, ChevronDown,
 import { useRouter } from 'next/navigation';
 import { Input } from '@/components/ui';
 import { cn } from '@/lib/utils';
+import { buildLabelMap } from '@/lib/documentLabel';
 
 export default function ChatPage() {
   const { selectedProject } = useProject();
   const { toast } = useToast();
   const router = useRouter();
   const [documents, setDocuments] = useState<Document[]>([]);
+  // Unfiltered, for the label map only — `documents` below is completed-only,
+  // and a subset drops the a/b suffix that separates two same-author studies.
+  const [allDocuments, setAllDocuments] = useState<Document[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
   const [isExpanded, setIsExpanded] = useState(false);
@@ -33,6 +37,7 @@ export default function ChatPage() {
       setLoading(true);
       const data = await documentsService.getAll(selectedProject.id);
       const completedDocs = data.filter(doc => doc.processing_status === 'completed');
+      setAllDocuments(data);
       setDocuments(completedDocs);
     } catch (error: any) {
       const errorMessage = typeof error.response?.data?.detail === 'string'
@@ -62,10 +67,11 @@ export default function ChatPage() {
     setSelectedDocIds([]);
   };
 
+  const docLabels = buildLabelMap(allDocuments);
   const selectedDocs = documents.filter(doc => selectedDocIds.includes(doc.id));
   const availableDocs = documents.filter(doc => !selectedDocIds.includes(doc.id));
   const filteredDocs = availableDocs.filter(doc =>
-    doc.filename.toLowerCase().includes(searchQuery.toLowerCase())
+    (docLabels[doc.id] ?? doc.filename).toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   // Paper selector component for header
@@ -115,7 +121,7 @@ export default function ChatPage() {
                       className="group flex items-center gap-1.5 px-2 py-1 bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#333] rounded text-xs hover:bg-gray-100"
                     >
                       <span className="max-w-[200px] truncate font-medium text-gray-700 dark:text-zinc-300">
-                        {doc.filename.replace('.pdf', '')}
+                        {docLabels[doc.id] ?? doc.filename.replace('.pdf', '')}
                       </span>
                       <button
                         onClick={() => toggleDocument(doc.id)}
@@ -154,7 +160,7 @@ export default function ChatPage() {
                     >
                       <div className="flex-1 min-w-0">
                         <p className="text-xs font-medium text-gray-900 dark:text-zinc-100 truncate">
-                          {doc.filename.replace('.pdf', '')}
+                          {docLabels[doc.id] ?? doc.filename.replace('.pdf', '')}
                         </p>
                         <p className="text-[11px] text-gray-500 dark:text-zinc-500">
                           {new Date(doc.created_at).toLocaleDateString()}

@@ -4,7 +4,7 @@ import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useDropzone } from 'react-dropzone';
-import { FileText, Upload, Trash2, Download, Loader2, AlertCircle, CheckCircle, Clock, X, Tag, FolderOpen, RotateCcw, MoreHorizontal, MoreVertical, Search, ChevronDown, Check, ExternalLink, BookMarked, Copy, FlaskConical } from 'lucide-react';
+import { FileText, Upload, Trash2, Download, Loader2, AlertCircle, CheckCircle, Clock, X, Tag, FolderOpen, RotateCcw, MoreHorizontal, MoreVertical, Search, ChevronDown, Check, ExternalLink, BookMarked, Copy, FlaskConical, Pencil } from 'lucide-react';
 import { Button, Card, Alert, EmptyState, Badge } from '@/components/ui';
 import { Tooltip } from '@/components/ui/tooltip';
 import { useConfirmationDialog } from '@/components/ui/confirmation-dialog';
@@ -19,9 +19,11 @@ import { useRouter } from 'next/navigation';
 import { typography } from '@/lib/typography';
 import { LiteratureSearchDrawer } from '@/components/clinical-trials/LiteratureSearchDrawer';
 import { ImportedTrialDrawer } from '@/components/clinical-trials/ImportedTrialDrawer';
+import { LabelChip } from '@/components/documents/DocumentTags';
 import { EndNoteImportDialog } from '@/components/documents/EndNoteImportDialog';
 import { CitationImportDialog } from '@/components/documents/CitationImportDialog';
 import type { LiteratureScope } from '@/services/literature.service';
+import { buildLabelMap } from '@/lib/documentLabel';
 
 interface StagedFile {
   file: File;
@@ -345,6 +347,13 @@ export default function DocumentsPage() {
     }
   };
 
+  // Study IDs for the whole project at once: the a/b suffix is a per-project
+  // decision, so it cannot be computed row by row — and it is built from
+  // `allDocuments`, NOT the search-filtered `documents`, for the same reason
+  // duplicate detection is: searching "Mehlisch" must not turn "Mehlisch 2010a"
+  // into a bare "Mehlisch 2010" just because its sibling was filtered out.
+  const docLabels = useMemo(() => buildLabelMap(allDocuments), [allDocuments]);
+
   const visibleDocs = useMemo(() => {
     if (docTab === 'attn') return documents.filter(needsAttention);
     if (docTab === 'ready') return documents.filter(d => !needsAttention(d));
@@ -427,6 +436,11 @@ export default function DocumentsPage() {
 
   // Card label edit state
   const [editingDocId, setEditingDocId] = useState<string | null>(null);
+  // Manual study ID ("Jefferson 2026b") — a separate edit mode from labels
+  // because it replaces the row's title rather than adding to its metadata.
+  const [editingStudyIdFor, setEditingStudyIdFor] = useState<string | null>(null);
+  const [studyIdDraft, setStudyIdDraft] = useState('');
+  const [savingStudyId, setSavingStudyId] = useState(false);
   const [editLabels, setEditLabels] = useState<string[]>([]);
   const [editLabelInput, setEditLabelInput] = useState('');
   const [savingLabels, setSavingLabels] = useState(false);
@@ -598,6 +612,31 @@ export default function DocumentsPage() {
     }
   };
 
+  const startEditStudyId = (doc: Document) => {
+    setEditingStudyIdFor(doc.id);
+    // Seed with what the row currently shows, so "Polat 2005" -> "Polat 2005b"
+    // is a two-keystroke edit rather than retyping the whole ID.
+    setStudyIdDraft(doc.study_label || docLabels[doc.id] || '');
+  };
+
+  const saveStudyId = async (docId: string) => {
+    setSavingStudyId(true);
+    try {
+      // Empty clears the override and hands the label back to author + year.
+      await documentsService.updateStudyLabel(docId, studyIdDraft.trim() || null);
+      await queryClient.invalidateQueries({ queryKey: ['documents'] });
+      setEditingStudyIdFor(null);
+      setStudyIdDraft('');
+    } catch (error: any) {
+      const errorMessage = typeof error.response?.data?.detail === 'string'
+        ? error.response.data.detail
+        : 'Failed to update study ID';
+      toast({ title: 'Error', description: errorMessage, variant: 'error' });
+    } finally {
+      setSavingStudyId(false);
+    }
+  };
+
   const startEditLabels = (doc: Document) => {
     setEditingDocId(doc.id);
     setEditLabels(doc.labels || []);
@@ -648,39 +687,6 @@ export default function DocumentsPage() {
   const [expandedLabels, setExpandedLabels] = useState<Record<string, boolean>>({});
   const toggleLabels = (id: string) =>
     setExpandedLabels(prev => ({ ...prev, [id]: !prev[id] }));
-
-  /**
-   * One neutral chip for a user label, identical whether the label is staged,
-   * saved, or being edited — it used to render three different ways, so a label
-   * you typed as grey lowercase saved as a shouty violet pill.
-   *
-   * The old version hashed the label name into five hues. That produced actively
-   * misleading output: `included` rendered red, `included` and `excluded`
-   * rendered identically, `high risk` got the exact amber this page uses for
-   * "needs attention", and a label named `pubmed` got the exact green of the
-   * PubMed system badge. A colour nobody chose can't mean anything, and here it
-   * collided with colours that do mean something.
-   *
-   * Casing is preserved (no `uppercase`): it's the user's text, and shouting it
-   * made `COVID-19` and `covid-19` — two distinct labels, since dedupe is
-   * case-sensitive — render identically.
-   */
-  const LabelChip = ({ label, onRemove }: { label: string; onRemove?: () => void }) => (
-    <Tooltip content={label}>
-      <Badge variant="neutral" className="max-w-[9rem] shrink-0">
-        <span className="truncate">{label}</span>
-        {onRemove && (
-          <button
-            onClick={e => { e.stopPropagation(); onRemove(); }}
-            aria-label={`Remove label ${label}`}
-            className="shrink-0 leading-none text-gray-400 transition-colors hover:text-gray-600 dark:hover:text-zinc-300"
-          >
-            <X className="h-2.5 w-2.5" />
-          </button>
-        )}
-      </Badge>
-    </Tooltip>
-  );
 
   if (!selectedProject) {
     return (
@@ -1138,7 +1144,17 @@ export default function DocumentsPage() {
                     const source = sourceChip(doc);
                     const isDuplicate = !!doc.doi && duplicateDois.has(`${doc.project_id}::${doc.doi}`);
                     const isEditing = editingDocId === doc.id;
-                    const titleText = doc.filename.replace(/\.pdf$/i, '');
+                    // The row's title is the study ID ("Raslan 2021"), not the
+                    // filename — which for an EndNote/RIS import is the full
+                    // article title. The filename stays reachable as the tooltip.
+                    const titleText = docLabels[doc.id] || doc.filename.replace(/\.pdf$/i, '');
+                    const isEditingStudyId = editingStudyIdFor === doc.id;
+                    // The paper's own title, shown as content below the citation.
+                    // Falls back to the filename when no title was ever resolved —
+                    // but only when that adds something: for "Raslan 2021.pdf" the
+                    // filename IS the citation, and echoing it twice is noise.
+                    const filenameStem = doc.filename.replace(/\.pdf$/i, '');
+                    const paperTitle = doc.title || (filenameStem !== titleText ? filenameStem : null);
                     const allLabels = doc.labels || [];
                     const labelsExpanded = !!expandedLabels[doc.id];
                     const shownLabels = labelsExpanded ? allLabels : allLabels.slice(0, MAX_VISIBLE_LABELS);
@@ -1200,7 +1216,7 @@ export default function DocumentsPage() {
                           {canSelectDocs && (
                             <input
                               type="checkbox"
-                              aria-label={`Select ${doc.filename}`}
+                              aria-label={`Select ${titleText}`}
                               checked={selectedIds.has(doc.id)}
                               onChange={() => toggleSelect(doc.id)}
                               onClick={e => e.stopPropagation()}
@@ -1219,18 +1235,36 @@ export default function DocumentsPage() {
                               action, so it competed with the states that are.
                               No truncate: the full filename wraps, text-wrap:pretty
                               balances the last line. */}
-                          <div className="flex items-baseline gap-2.5 min-w-0">
-                            <span className={cn(typography.cardTitle.default, "relative z-10 min-w-0 text-gray-900 dark:text-white break-words [text-wrap:pretty]")}>
-                              {titleText}
-                            </span>
-                          </div>
-                          {/* ONE wrapping meta row, in a fixed priority order:
-                              gate → source → duplicate → labels → +N → id → date → DOI.
-                              The coloured thing is leftmost so scanning the list reads a
-                              single left-aligned column of colour; user labels sit AFTER
-                              the system chips so they can never be mistaken for one;
-                              identity comes last because it's a lookup, not a scan. */}
-                          <div className="relative z-10 flex flex-wrap items-center gap-x-2 gap-y-1.5 mt-1.5 text-xs text-gray-400 dark:text-zinc-500">
+                          {/* LINE 1 — the citation, and the chips that qualify it.
+                              The badges used to sit below the title; they belong on
+                              this line because they qualify the STUDY ("this one is
+                              a reference, imported from EndNote, and looks like a
+                              duplicate"), and the line below is now the paper's own
+                              words. Dates and identifiers stay at the bottom: those
+                              are lookups, not scanning. */}
+                          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1.5 min-w-0">
+                            {isEditingStudyId ? (
+                              <input
+                                autoFocus
+                                value={studyIdDraft}
+                                disabled={savingStudyId}
+                                onClick={e => e.stopPropagation()}
+                                onChange={e => setStudyIdDraft(e.target.value)}
+                                onKeyDown={e => {
+                                  e.stopPropagation();
+                                  if (e.key === 'Enter') saveStudyId(doc.id);
+                                  if (e.key === 'Escape') { setEditingStudyIdFor(null); setStudyIdDraft(''); }
+                                }}
+                                onBlur={() => saveStudyId(doc.id)}
+                                placeholder="Author Year — e.g. Jefferson 2026b"
+                                className="relative z-10 min-w-0 flex-1 rounded-md border border-gray-300 bg-white px-2 py-1 text-sm text-gray-900 outline-none focus:border-gray-400 dark:border-[#2a2a2a] dark:bg-[#1a1a1a] dark:text-white"
+                              />
+                            ) : (
+                              <span className={cn(typography.cardTitle.small, "relative z-10 min-w-0 shrink-0 tracking-tight text-gray-900 dark:text-white")}>
+                                {titleText}
+                              </span>
+                            )}
+
                             {/* 1 — the row's single status badge, and the only colour on it */}
                             {gate && (
                               <Tooltip content={gate.tooltip}>
@@ -1302,8 +1336,41 @@ export default function DocumentsPage() {
                                 Less
                               </button>
                             )}
+                          </div>
 
-                            {/* 5 — identity and dates: plain text, first to go when narrow */}
+                          {/* LINE 2 — the paper's own title, as readable text.
+                              It is CONTENT, not a tooltip: a reviewer deciding whether
+                              this is the right study reads the title, and a title you
+                              have to hover to see cannot be scanned down a list of 80
+                              rows. Clamped to two lines so a 40-word trial title can't
+                              push every other row off the screen; click unfolds it in
+                              place. `[&>span]` is not used — the clamp needs to apply
+                              to the element that holds the text.
+                              Rendered as a <button> so it is reachable by keyboard and
+                              announced as expandable, and stopPropagation keeps the
+                              click off the row's own open-the-PDF handler. */}
+                          {/* LINE 2 — the paper's own title, in full.
+                              NOT clamped. A two-line clamp cut these mid-phrase
+                              ("...a multicenter, two-stage..."), which reads as a
+                              broken sentence rather than a shortened one — and the
+                              corpus gives no way to cut them well: only 25% of the
+                              178 stored titles have a colon to split on, and 26 have
+                              no natural break before the limit at all. Measured
+                              rather than assumed: the longest title in the corpus is
+                              249 characters, four lines at this measure, so showing
+                              every title in full costs less height than the ellipsis
+                              cost in readability.
+                              max-w-[78ch] keeps the line length readable; without it
+                              a full-width row runs ~140 characters per line. */}
+                          {paperTitle && (
+                            <p className="relative z-10 mt-1 min-w-0 max-w-[78ch] text-sm font-normal leading-6 tracking-[-0.005em] text-gray-600 dark:text-zinc-400 [text-wrap:pretty]">
+                              {paperTitle}
+                            </p>
+                          )}
+
+                          {/* LINE 3 — identifiers and dates: a lookup, not a scan, so
+                              they sit last and in the quietest type on the row. */}
+                          <div className="relative z-10 flex flex-wrap items-center gap-x-2 gap-y-1.5 mt-1.5 text-xs text-gray-400 dark:text-zinc-500">
                             {(doc.source_type === 'ctgov' ? doc.nct_id : doc.source_type === 'pubmed' ? doc.pmid : null) && (
                               <span className="min-w-0 truncate">
                                 {doc.source_type === 'ctgov' ? doc.nct_id : `PMID ${doc.pmid}`}
@@ -1317,19 +1384,19 @@ export default function DocumentsPage() {
                                 briefly truncated here to stop a long DOI overflowing the
                                 row; `break-all` solves that properly instead, letting it
                                 wrap inside this flex-wrap row rather than pushing it wide.
-                                Never re-add `truncate` or `whitespace-nowrap` here. */}
+                                Never re-add `truncate` or `whitespace-nowrap` here.
+                                No tooltip: it used to carry the paper title, which is
+                                now readable on the row above it. */}
                             {doc.source_type !== 'ctgov' && doc.doi && (
-                              <Tooltip content={doc.title || `doi:${doc.doi}`}>
-                                <a
-                                  href={`https://doi.org/${doc.doi}`}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  onClick={e => e.stopPropagation()}
-                                  className="min-w-0 break-all font-mono hover:text-gray-600 hover:underline dark:hover:text-zinc-300"
-                                >
-                                  doi:{doc.doi}
-                                </a>
-                              </Tooltip>
+                              <a
+                                href={`https://doi.org/${doc.doi}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                onClick={e => e.stopPropagation()}
+                                className="min-w-0 break-all font-mono hover:text-gray-600 hover:underline dark:hover:text-zinc-300"
+                              >
+                                doi:{doc.doi}
+                              </a>
                             )}
                           </div>
                           {/* Label editing (read-only chips now render inline next to the title) */}
@@ -1397,6 +1464,16 @@ export default function DocumentsPage() {
                                     Edit labels
                                   </DropdownMenuItem>
                                 )}
+                                {/* The study ID is the one thing on this row a
+                                    reviewer may legitimately want to overrule —
+                                    two same-author-same-year studies need the
+                                    a/b decision made by a person, not a sort. */}
+                                {can_upload_docs && !isEditingStudyId && (
+                                  <DropdownMenuItem onClick={() => startEditStudyId(doc)}>
+                                    <Pencil className="w-3.5 h-3.5" />
+                                    Edit study ID
+                                  </DropdownMenuItem>
+                                )}
                                 {/* Per-document counterpart to the bulk button. Only
                                     where it can do something: a DOI that was never
                                     looked for, on a parsed document with a PDF to read. */}
@@ -1412,7 +1489,7 @@ export default function DocumentsPage() {
                                 {canDeleteDocs && (
                                   <>
                                     <DropdownMenuSeparator />
-                                    <DropdownMenuItem destructive onClick={() => handleDelete(doc.id, doc.filename)}>
+                                    <DropdownMenuItem destructive onClick={() => handleDelete(doc.id, titleText)}>
                                       <Trash2 className="w-3.5 h-3.5" />
                                       Delete
                                     </DropdownMenuItem>

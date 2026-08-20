@@ -8,6 +8,10 @@ import type { FormCoverage } from '@/services/extractions.service';
 import { useToast } from '@/hooks/use-toast';
 import { formatDate, cn, getErrorMessage } from '@/lib/utils';
 import type { Form, Document } from '@/types/api';
+import { buildLabelMap, documentLabel } from '@/lib/documentLabel';
+import { DocumentTags, TagFilterBar } from '@/components/documents/DocumentTags';
+import { useTagFilter } from '@/hooks/useTagFilter';
+import { docMatchesQuery } from '@/lib/documentTags';
 
 const MAX_DOCS_PER_JOB = 100;
 
@@ -45,6 +49,7 @@ export function RunExtractionDialog({
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const [formSearch, setFormSearch] = useState('');
   const [docSearch, setDocSearch] = useState('');
+  const { activeTags, toggleTag, clearTags, matchesTags } = useTagFilter();
 
   // Draggable divider state
   const [leftWidth, setLeftWidth] = useState(42);
@@ -150,9 +155,12 @@ export function RunExtractionDialog({
   const filteredForms = formSearch.trim()
     ? forms.filter((f) => f.form_name.toLowerCase().includes(formSearch.toLowerCase()))
     : forms;
-  const filteredDocs = docSearch.trim()
-    ? documents.filter((d) => d.filename.toLowerCase().includes(docSearch.toLowerCase()))
-    : documents;
+  const docLabels = buildLabelMap(documents);
+  const filteredDocs = documents.filter(
+    (d) =>
+      docMatchesQuery([docLabels[d.id], d.filename], d.labels, docSearch) &&
+      matchesTags(d.labels),
+  );
   const selectedForm = forms.find((f) => f.id === selectedFormId);
   const docSummary = `${selectedDocIds.size} document${selectedDocIds.size !== 1 ? 's' : ''}`;
   const effectiveDocCount = selectedDocIds.size;
@@ -366,10 +374,11 @@ export function RunExtractionDialog({
                     type="text"
                     value={docSearch}
                     onChange={(e) => setDocSearch(e.target.value)}
-                    placeholder="Search documents..."
+                    placeholder="Search documents or tags..."
                     className="w-full text-sm text-gray-900 dark:text-white bg-gray-50 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg py-1.5 pl-8 pr-3 outline-none focus:border-gray-400 dark:focus:border-[#3f3f3f] placeholder:text-gray-400 dark:placeholder:text-zinc-600"
                   />
                 </div>
+                <TagFilterBar activeTags={activeTags} onToggleTag={toggleTag} onClear={clearTags} />
                 <div className="flex items-center justify-between">
                   <span
                     className={cn(
@@ -436,9 +445,9 @@ export function RunExtractionDialog({
                         <FileText className="w-3.5 h-3.5 text-gray-400 dark:text-zinc-500" />
                       </div>
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <p className="text-sm text-gray-900 dark:text-white truncate leading-snug">
-                            {doc.filename}
+                        <div className="flex min-w-0 items-center gap-2">
+                          <p className="min-w-0 text-sm text-gray-900 dark:text-white truncate leading-snug" title={doc.filename}>
+                            {docLabels[doc.id] ?? doc.filename}
                           </p>
                           {alreadyDone && (
                             <span className="text-[10px] font-medium text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border border-green-200 dark:border-green-800/50 px-1.5 py-0.5 rounded-[4px] flex-shrink-0">
@@ -456,6 +465,11 @@ export function RunExtractionDialog({
                               {doc.source_type === 'ctgov' ? 'No results' : 'Abstract only'}
                             </span>
                           )}
+                          <DocumentTags
+                            labels={doc.labels}
+                            activeTags={activeTags}
+                            onToggleTag={toggleTag}
+                          />
                         </div>
                         <p className="text-xs text-gray-400 dark:text-zinc-500">
                           {formatDate(doc.created_at)}

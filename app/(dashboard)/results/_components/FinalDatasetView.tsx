@@ -4,10 +4,13 @@ import { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useProject } from '@/contexts/ProjectContext';
 import { resultsService, formsService, documentsService } from '@/services';
-import { Spinner, EmptyState } from '@/components/ui';
-import { Download, FileText, ChevronDown, Search, X, Check, ChevronsUpDown } from 'lucide-react';
+import { Spinner } from '@/components/ui';
+import { Download, ChevronDown, Search, X, Check, ChevronsUpDown, Tag } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Tooltip } from '@/components/ui/tooltip';
+import { docMatchesQuery, tagsAsText } from '@/lib/documentTags';
 import type { ExtractionResult, Document } from '@/types/api';
+import { buildLabelMap, documentLabel } from '@/lib/documentLabel';
 
 type SourcePriority = 'best' | 'ai' | 'manual' | 'consensus';
 
@@ -66,15 +69,16 @@ export function FinalDatasetView() {
     enabled: !!selectedProject && !!formId,
   });
 
-  // Fetch documents
-  const docIds = useMemo(() => Array.from(new Set(allResults.map(r => r.document_id))), [allResults]);
+  // Fetch the PROJECT's documents, not just the ones with results for this
+  // form. Two reasons, and the first is a correctness bug: a study ID's a/b
+  // suffix is a whole-project computation, so labelling only result-bearing
+  // documents renders a bare "Mehlisch 2010" here and "Mehlisch 2010a" on
+  // Documents. (It also replaces one request per document with one request,
+  // and shares the cache with every other screen's ['documents', id] query.)
   const { data: docs = [] } = useQuery({
-    queryKey: ['docs-for-final', docIds],
-    queryFn: async () => {
-      const results = await Promise.all(docIds.map(id => documentsService.getById(id).catch(() => null)));
-      return results.filter(Boolean) as Document[];
-    },
-    enabled: docIds.length > 0,
+    queryKey: ['documents', selectedProject?.id],
+    queryFn: () => documentsService.getAll(selectedProject!.id),
+    enabled: !!selectedProject,
   });
   const docMap = useMemo(() => {
     const m: Record<string, Document> = {};
@@ -157,10 +161,12 @@ export function FinalDatasetView() {
     return extractValue(types['ai']?.[field]);
   };
 
-  // Document list
+  // Document list. Labels come from the whole docMap, not just the rows on
+  // screen, so a filtered view cannot change a study's a/b suffix.
+  const docLabels = buildLabelMap(Object.values(docMap));
   const documentIds = Object.keys(grouped);
   const filteredDocIds = searchQuery
-    ? documentIds.filter(id => (docMap[id]?.filename || '').toLowerCase().includes(searchQuery.toLowerCase()))
+    ? documentIds.filter(id => docMatchesQuery([docLabels[id], docMap[id]?.filename], docMap[id]?.labels, searchQuery))
     : documentIds;
 
   // Select all logic
@@ -186,7 +192,7 @@ export function FinalDatasetView() {
     if (format === 'csv') {
       const header = ['Ref ID', 'Document', ...orderedFields];
       const csvRows = rows.map(docId => {
-        const filename = docMap[docId]?.filename || docId;
+        const filename = docLabels[docId] || docMap[docId]?.filename || docId;
         const refId = docMap[docId]?.ref_id ?? '';
         const values = orderedFields.map(f => resolveValue(docId, f));
         return [refId, filename, ...values].map(v => `"${String(v).replace(/"/g, '""')}"`).join(',');
@@ -201,7 +207,7 @@ export function FinalDatasetView() {
       URL.revokeObjectURL(url);
     } else {
       const data = rows.map(docId => {
-        const obj: Record<string, any> = { ref_id: docMap[docId]?.ref_id ?? null, document: docMap[docId]?.filename || docId };
+        const obj: Record<string, any> = { ref_id: docMap[docId]?.ref_id ?? null, document: docLabels[docId] || docMap[docId]?.filename || docId };
         orderedFields.forEach(f => { obj[f] = resolveValue(docId, f); });
         return obj;
       });
@@ -332,7 +338,12 @@ export function FinalDatasetView() {
       {loading ? (
         <div className="flex justify-center py-12"><Spinner size="lg" /></div>
       ) : filteredDocIds.length === 0 ? (
-        <EmptyState icon={FileText} title="No results" description={formId ? 'No extraction results for this form yet' : 'Select a form to view the final dataset'} />
+        <div className="rounded-xl border border-dashed border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] px-6 py-14 text-center">
+          <p className="text-sm font-semibold text-gray-700 dark:text-zinc-300">No final dataset yet</p>
+          <p className="mt-1.5 text-xs text-gray-400 dark:text-zinc-500">
+            {formId ? 'Promote AI or manual results to build the final dataset.' : 'Select a form to view the final dataset.'}
+          </p>
+        </div>
       ) : (
         <div className="rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] overflow-hidden">
           <div className="overflow-x-auto">
@@ -358,7 +369,7 @@ export function FinalDatasetView() {
                     Ref ID
                   </th>
                   {/* Document column */}
-                  <th className="px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400 dark:text-zinc-500 sticky left-0 bg-gray-50/60 dark:bg-[#0a0a0a] min-w-[180px]">
+                  <th className="px-3 py-2.5 text-[11px] font-semibold uppercase tracking-wide text-gray-400 dark:text-zinc-500 sticky left-0 bg-gray-50/60 dark:bg-[#0a0a0a] w-[220px] min-w-[220px] max-w-[220px]">
                     Document
                   </th>
                   {/* Field columns */}
@@ -394,7 +405,7 @@ export function FinalDatasetView() {
               <tbody className="divide-y divide-gray-100 dark:divide-[#1f1f1f]">
                 {filteredDocIds.map(docId => {
                   const checked = selectedRows.has(docId);
-                  const filename = docMap[docId]?.filename || docId.slice(0, 8);
+                  const filename = docLabels[docId] || docMap[docId]?.filename || docId.slice(0, 8);
                   const refId = docMap[docId]?.ref_id;
                   return (
                     <tr key={docId} className={cn('transition-colors', checked ? 'bg-blue-50/50 dark:bg-blue-900/10' : 'hover:bg-gray-50/50 dark:hover:bg-[#0a0a0a]')}>
@@ -414,8 +425,19 @@ export function FinalDatasetView() {
                       <td className="px-3 py-2.5 text-xs font-mono text-gray-400 dark:text-zinc-500 whitespace-nowrap">
                         {refId != null ? String(refId) : ''}
                       </td>
+                      {/* Tags hide behind a hover marker here, not inline chips:
+                          this is a 220px sticky column in a table that already
+                          scrolls sideways, and chips would push every value column
+                          further out of view. Filter by tag via the search box. */}
                       <td className="px-3 py-2.5 text-xs font-medium text-gray-800 dark:text-zinc-300 sticky left-0 bg-white dark:bg-[#111111] truncate max-w-[220px]" title={filename}>
-                        {filename.replace(/\.pdf$/i, '')}
+                        <span className="flex min-w-0 max-w-[196px] items-center gap-1.5">
+                          <span className="truncate">{filename.replace(/\.pdf$/i, '')}</span>
+                          {!!docMap[docId]?.labels?.length && (
+                            <Tooltip content={tagsAsText(docMap[docId]?.labels)} className="max-w-xs whitespace-normal">
+                              <Tag className="h-2.5 w-2.5 shrink-0 text-gray-400 dark:text-zinc-500" />
+                            </Tooltip>
+                          )}
+                        </span>
                       </td>
                       {orderedFields.map(field => {
                         const val = resolveValue(docId, field);

@@ -5,6 +5,7 @@ import { Button } from '@/components/ui';
 import { Input } from '@/components/ui';
 import type { Document } from '@/types/api';
 import { cn } from '@/lib/utils';
+import { buildLabelMap } from '@/lib/documentLabel';
 
 interface PaperSelectorProps {
   documents: Document[];
@@ -17,11 +18,15 @@ export function PaperSelector({ documents, selectedDocIds, onToggle, onClear }: 
   const [isExpanded, setIsExpanded] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
+  // `documents` must be the PROJECT's full list, not a filtered one: a/b
+  // suffixes are computed across all of a project's documents, so a subset
+  // silently renders "Mehlisch 2010" where every other screen says "2010a".
+  const docLabels = buildLabelMap(documents);
   const selectedDocs = documents.filter(doc => selectedDocIds.includes(doc.id));
   const availableDocs = documents.filter(doc => !selectedDocIds.includes(doc.id));
 
   const filteredDocs = availableDocs.filter(doc =>
-    doc.filename.toLowerCase().includes(searchQuery.toLowerCase())
+    (docLabels[doc.id] ?? doc.filename).toLowerCase().includes(searchQuery.toLowerCase())
   );
 
   return (
@@ -81,7 +86,7 @@ export function PaperSelector({ documents, selectedDocIds, onToggle, onClear }: 
                   <FileText className="h-3 w-3 text-gray-600" />
                 </div>
                 <span className="max-w-[300px] truncate text-xs font-medium text-gray-700">
-                  {doc.filename.replace('.pdf', '')}
+                  {docLabels[doc.id] ?? doc.filename.replace('.pdf', '')}
                 </span>
                 <button
                   onClick={() => onToggle(doc.id)}
@@ -128,7 +133,7 @@ export function PaperSelector({ documents, selectedDocIds, onToggle, onClear }: 
                     </div>
                     <div className="flex-1 min-w-0">
                       <p className="text-xs font-medium text-gray-900 truncate">
-                        {doc.filename.replace('.pdf', '')}
+                        {docLabels[doc.id] ?? doc.filename.replace('.pdf', '')}
                       </p>
                       <p className="text-[11px] text-gray-500">
                         {new Date(doc.created_at).toLocaleDateString()}

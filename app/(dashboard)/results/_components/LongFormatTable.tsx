@@ -3,12 +3,15 @@
 import { EMPTY_DISPLAY_TOKENS, FAILED_LABEL } from '@/lib/absence';
 
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
-import { cn } from '@/lib/utils';
+import { cn, modelTagTheme, modelFamilyLabel, modelFamily } from '@/lib/utils';
+import { Badge } from '@/components/ui';
+import { DocumentTags } from '@/components/documents/DocumentTags';
 import type { FormField } from '@/types/api';
 import { transformToLongFormat } from '@/lib/longFormatTransform';
 import { Tooltip } from '@/components/ui/tooltip';
 import { Quote, ScanText, Info } from 'lucide-react';
 import { SourceEvidenceDrawer } from '@/components/source-evidence/SourceEvidenceDrawer';
+import { buildLabelMap, documentLabel } from '@/lib/documentLabel';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -28,6 +31,15 @@ function getSourceText(data: any): string | null {
   return null;
 }
 
+function getSyntheticCaption(data: any): boolean {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  return data.source_location?.synthetic_caption === true;
+}
+function getCaptionImage(data: any): string | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return data.source_location?.caption_image ?? null;
+}
+
 function getPageRef(data: any): number | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   if (typeof data.page === 'number') return data.page;
@@ -41,13 +53,21 @@ function getPageRef(data: any): number | null {
 // ---------------------------------------------------------------------------
 
 interface LongFormatTableProps {
-  results: Array<{ id: string; document_id: string; extracted_data: Record<string, any>; created_at?: string }>;
+  results: Array<{
+    id: string;
+    document_id: string;
+    extracted_data: Record<string, any>;
+    created_at?: string;
+    model_name?: string | null;
+    extraction_type?: string | null;
+  }>;
   documentsMap: Record<
     string,
     {
       id: string;
       filename: string;
       ref_id?: number | null;
+      labels?: string[] | null;
       source_type?: string | null;
       s3_pdf_path?: string | null;
       nct_id?: string | null;
@@ -57,6 +77,12 @@ interface LongFormatTableProps {
   >;
   formFields: FormField[];
   formId?: string;
+  /** Papers the page considers flagged (>half their fields empty). Drives the row badge. */
+  flaggedDocIds?: Set<string>;
+  /** Tags currently filtering the page's results — for chip highlighting only. */
+  activeTags?: string[];
+  /** Toggle a tag on the page's filter. Omit to render tags as plain, unclickable chips. */
+  onToggleTag?: (tag: string) => void;
 }
 
 interface ChipRef {
@@ -64,14 +90,21 @@ interface ChipRef {
   col: string;
 }
 
-export default function LongFormatTable({ results, documentsMap, formFields, formId }: LongFormatTableProps) {
+export default function LongFormatTable({
+  results, documentsMap, formFields, formId, flaggedDocIds, activeTags = [], onToggleTag,
+}: LongFormatTableProps) {
   const { columns, rows } = useMemo(
     () => transformToLongFormat(results, formFields, documentsMap),
     [results, formFields, documentsMap]
   );
 
+  // Same project-wide map transformToLongFormat builds for the "Paper" column,
+  // so the evidence drawer's header cannot disagree with the row it opened from.
+  const docLabels = useMemo(() => buildLabelMap(Object.values(documentsMap)), [documentsMap]);
+
   const [showEvidence, setShowEvidence] = useState(false);
   const [active, setActive] = useState<ChipRef | null>(null);
+
 
   // Column reorder (first/"Paper" column is locked in place)
   const colOrderKey = formId ? `results-col-order:${formId}` : null;
@@ -111,6 +144,25 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
     () => (columns.length === 0 ? columns : [PAPER_COL, ...dataCols]),
     [columns, dataCols, PAPER_COL]
   );
+  /**
+   * `Ref ID` keeps its place in `columns` because `buildColumns` feeds the CSV and
+   * JSON exports as well as this table — dropping it there would change the export.
+   * It just stops being its own column: the number now rides in the paper cell.
+   */
+  const REF_COL = 'Ref ID';
+  const displayColumns = useMemo(() => orderedColumns.filter(c => c !== REF_COL), [orderedColumns]);
+
+  /**
+   * Which model families are on screen. A badge per row only earns its place when
+   * the rows actually differ — one model across the whole table says it once, next
+   * to the form name, not 58 times down the paper column.
+   */
+  const modelFamiliesShown = useMemo(() => {
+    const present = new Set<string>();
+    for (const r of rows) if (r._modelName) present.add(modelFamily(r._modelName));
+    return present;
+  }, [rows]);
+  const showRowModelBadge = modelFamiliesShown.size > 1;
 
   // Flat lookup map: field_name → FormField (includes subform fields)
   const fieldMap = useMemo(() => {
@@ -139,14 +191,14 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
   const chipOrder = useMemo<ChipRef[]>(() => {
     const list: ChipRef[] = [];
     rows.forEach((row, ri) => {
-      orderedColumns.forEach((col, ci) => {
+      displayColumns.forEach((col, ci) => {
         if (ci === 0) return; // Paper column
         const raw = row._rawCells?.[col] ?? resultDataMap[row._resultId]?.[col];
         if (getSourceText(raw)) list.push({ ri, col });
       });
     });
     return list;
-  }, [rows, orderedColumns, resultDataMap]);
+  }, [rows, displayColumns, resultDataMap]);
 
   // Resolve the currently active chip into drawer-shaped props.
   const activeData = useMemo(() => {
@@ -166,15 +218,17 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
       sourceText,
       storedValue,
       page: getPageRef(raw),
+      syntheticCaption: getSyntheticCaption(raw),
+      captionImage: getCaptionImage(raw),
       documentId: row._documentId,
-      documentFilename: doc?.filename ?? row._paperFilename,
+      documentFilename: docLabels[row._documentId] ?? (doc ? documentLabel(doc) : row._paperFilename),
       fieldLabel: formatColumnName(active.col),
       hasPdf: !!doc?.s3_pdf_path,
       sourceType: doc?.source_type ?? null,
       recordId: doc?.nct_id ?? doc?.pmid ?? null,
       doi: doc?.doi ?? null,
     };
-  }, [active, rows, resultDataMap, documentsMap]);
+  }, [active, rows, resultDataMap, documentsMap, docLabels]);
 
   // Prev/next indices into chipOrder for the active chip.
   const activeIndex = useMemo(() => {
@@ -195,7 +249,12 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
     );
   }
 
-  // Detect paper boundaries for visual grouping
+  // Detect paper boundaries for visual grouping.
+  //
+  // Assumes one paper's rows are contiguous, which `transformToLongFormat`
+  // guarantees by emitting each result's rows together. Sort `results` upstream,
+  // never `rows` — a row-level sort scatters a paper's rows and both this and the
+  // once-per-paper identity block below start marking the wrong rows.
   const paperBoundaries = new Set<number>();
   for (let i = 1; i < rows.length; i++) {
     if (rows[i]._documentId !== rows[i - 1]._documentId) {
@@ -211,15 +270,9 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
 
   return (
     <>
-      {/* Stats */}
-      <div className="flex items-center gap-3 mb-2 flex-wrap">
-        <div className="flex items-center gap-3 text-[10px] font-medium text-gray-500 dark:text-zinc-500 uppercase tracking-wider">
-          <span>{rows.length} rows</span>
-          <span className="text-gray-300 dark:text-zinc-700">|</span>
-          <span>{new Set(rows.map(r => r._documentId)).size} papers</span>
-          <span className="text-gray-300 dark:text-zinc-700">|</span>
-          <span>{columns.length - 1} fields</span>
-        </div>
+      {/* One card: controls, table, and the counts that describe it. */}
+      <div className="rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] overflow-hidden">
+      <div className="flex items-center gap-3 flex-wrap px-4 py-2.5 border-b border-gray-100 dark:border-[#1f1f1f]">
         <div className="flex items-center gap-3 text-[10px] font-medium text-gray-500 dark:text-zinc-500 uppercase tracking-wider ml-auto">
           <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-green-200 dark:bg-green-700 inline-block" />Reported</span>
           <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-sm bg-rose-200 dark:bg-rose-700 inline-block" />Not reported (NR) / not applicable (NA)</span>
@@ -243,11 +296,11 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
         </button>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-gray-200 dark:border-zinc-800/50">
+      <div className="overflow-x-auto">
         <table className="w-full text-xs border-separate border-spacing-0">
           <thead>
             <tr>
-              {orderedColumns.map((col, ci) => {
+              {displayColumns.map((col, ci) => {
                 const field = fieldMap[col];
                 const isPaperCol = ci === 0;
                 const isDragOver = dragOverCol === col && !isPaperCol;
@@ -303,7 +356,11 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
                     title={isPaperCol ? undefined : 'Drag to reorder'}
                     className={cn(
                       'sticky top-0 z-20 bg-gray-50 dark:bg-[#0d0d0d] px-3 py-3 text-left text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500 border-b-2 border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 whitespace-nowrap select-none',
-                      ci === 0 && 'sticky left-0 z-40 min-w-[180px]',
+                      // Bounded, not just floored: the paper cell truncates, and
+                      // without a ceiling the widest study name (a fallback that is
+                      // the paper's full title) sets the column width and pushes
+                      // every value column off-screen.
+                      ci === 0 && 'sticky left-0 z-40 w-[220px] min-w-[220px] max-w-[220px]',
                       ci > 0 && 'min-w-[120px]',
                       !isPaperCol && 'cursor-grab active:cursor-grabbing hover:text-gray-600 dark:hover:text-zinc-300',
                       isDragOver && 'bg-indigo-50 dark:bg-indigo-950/40 text-indigo-600 dark:text-indigo-400'
@@ -325,14 +382,19 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
           <tbody>
             {rows.map((row, ri) => {
               const isNewPaper = paperBoundaries.has(ri);
+              // First row of this paper's group — where identity is drawn.
+              const isPaperStart = ri === 0 || isNewPaper;
+              const isFlagged = !!flaggedDocIds?.has(row._documentId);
               return (
                 <tr key={`${row._resultId}-${ri}`}>
-                  {orderedColumns.map((col, ci) => {
+                  {displayColumns.map((col, ci) => {
                     const val = row[col] ?? '';
                     const failed = isFailed(val);
                     const missing = !failed && isMissing(val);
                     const isFirstCol = ci === 0;
 
+                    // A flat field's value covers the whole paper, so the transform
+                    // repeats it on every exploded row and every row renders it.
                     const rawData = !isFirstCol
                       ? (row._rawCells?.[col] ?? resultDataMap[row._resultId]?.[col])
                       : null;
@@ -344,14 +406,63 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
                         key={col}
                         className={cn(
                           'px-3 py-2.5 border-b border-r border-gray-200 dark:border-zinc-800/60 last:border-r-0 align-top',
-                          isFirstCol && 'sticky left-0 z-10 bg-white dark:bg-[#111111] font-semibold text-gray-900 dark:text-white',
+                          isFirstCol && 'sticky left-0 z-10 w-[220px] max-w-[220px] font-semibold text-gray-900 dark:text-white',
+                          isFirstCol && (isFlagged ? 'bg-amber-50/40 dark:bg-[#151005]' : 'bg-white dark:bg-[#111111]'),
                           !isFirstCol && (failed
                             ? 'bg-amber-50 dark:bg-[#1a150d]'
                             : missing ? 'bg-rose-50 dark:bg-[#1a0d0d]' : 'bg-green-50 dark:bg-[#0d1a10]'),
                           isNewPaper && 'border-t-2 border-t-gray-300 dark:border-t-zinc-600'
                         )}
                       >
-                        {failed ? (
+                        {isFirstCol ? (
+                          /* Identity, not data: the ref number and the badges live
+                             here instead of in columns of their own. The badge row is
+                             drawn once per paper — the transform repeats the name on
+                             every exploded row, so repeating the badges would stutter
+                             them down the whole group. Width stays bounded at 196px
+                             (220px cell minus padding), or a fallback full-title study
+                             name blows the column out again. */
+                          <div className="flex max-w-[196px] flex-col gap-1.5">
+                            <div className="flex min-w-0 items-baseline gap-1.5">
+                              <span className="min-w-0 truncate" title={val}>{val}</span>
+                              {!!row[REF_COL] && (
+                                <span className="shrink-0 font-mono text-[10px] font-normal text-gray-300 dark:text-zinc-600">
+                                  #{row[REF_COL]}
+                                </span>
+                              )}
+                            </div>
+                            {isPaperStart && (
+                              <div className="flex flex-wrap items-center gap-1">
+                                {showRowModelBadge && row._modelName && (
+                                  <span
+                                    title={row._modelName}
+                                    className={cn(
+                                      'shrink-0 rounded-full border-0 px-1.5 text-[9px] font-bold uppercase leading-[15px] tracking-wider',
+                                      modelTagTheme(row._modelName),
+                                    )}
+                                  >
+                                    {modelFamilyLabel(row._modelName)}
+                                  </span>
+                                )}
+                                {row._extractionType === 'manual' && (
+                                  <Badge variant="neutral" className="px-1.5 text-[9px] font-bold uppercase leading-[15px] tracking-wider">
+                                    Manual
+                                  </Badge>
+                                )}
+                                {isFlagged && (
+                                  <Badge variant="attention" className="px-1.5 text-[9px] font-bold uppercase leading-[15px] tracking-wider">
+                                    Flagged
+                                  </Badge>
+                                )}
+                                <DocumentTags
+                                  labels={documentsMap[row._documentId]?.labels}
+                                  activeTags={activeTags}
+                                  onToggleTag={onToggleTag}
+                                />
+                              </div>
+                            )}
+                          </div>
+                        ) : failed ? (
                           <span
                             className="font-medium text-amber-600 dark:text-amber-500"
                             title="Extraction failed for this cell — not a statement about the paper"
@@ -391,6 +502,8 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
         </table>
       </div>
 
+      </div>
+
       <SourceEvidenceDrawer
         open={!!active && !!activeData}
         onClose={() => setActive(null)}
@@ -404,6 +517,8 @@ export default function LongFormatTable({ results, documentsMap, formFields, for
         sourceType={activeData?.sourceType ?? null}
         recordId={activeData?.recordId ?? null}
         doi={activeData?.doi ?? null}
+        syntheticCaption={activeData?.syntheticCaption ?? false}
+        captionImage={activeData?.captionImage ?? null}
         onPrev={goPrev}
         onNext={goNext}
         hasPrev={hasPrev}

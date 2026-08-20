@@ -9,6 +9,10 @@ import { assignmentsService, documentsService, projectMembersService } from '@/s
 import type { ReviewAssignment, Document, ProjectMember } from '@/types/api';
 import { useToast } from '@/hooks/use-toast';
 import { ROLE_COLORS } from '@/lib/reviewerColors';
+import { buildLabelMap } from '@/lib/documentLabel';
+import { DocumentTags, TagFilterBar } from '@/components/documents/DocumentTags';
+import { useTagFilter } from '@/hooks/useTagFilter';
+import { docMatchesQuery } from '@/lib/documentTags';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -73,7 +77,10 @@ function MemberAvatar({ userId, name, size = 'sm' }: { userId: string; name: str
 
 interface PaperRow {
   docId: string;
+  /** The row's DISPLAY name — the study ID, not the stored file name. */
   filename: string;
+  /** Document tags (`documents.labels`). */
+  labels: string[];
   cells: Partial<Record<ReviewerRole, ReviewAssignment>>;
   filledForms: number;
   totalForms: number;
@@ -93,10 +100,15 @@ export function AllocationsByPaperView({ projectId }: { projectId: string }) {
 
   const [loading, setLoading]         = useState(true);
   const [documents, setDocuments]     = useState<Document[]>([]);
+  // Unfiltered, and used for nothing but the label map: the rows below show
+  // only `completed` documents, and labelling a subset drops the a/b suffix
+  // that distinguishes two same-author-same-year studies.
+  const [allDocuments, setAllDocuments] = useState<Document[]>([]);
   const [assignments, setAssignments] = useState<ReviewAssignment[]>([]);
   const [members, setMembers]         = useState<ProjectMember[]>([]);
 
   const [search, setSearch]   = useState('');
+  const { activeTags, toggleTag, clearTags, matchesTags } = useTagFilter();
   const [filter, setFilter]   = useState<FilterKey>('all');
   const [pending, setPending] = useState<Map<string, PendingChange>>(new Map());
   const [picker, setPicker]   = useState<{ docId: string; role: ReviewerRole } | null>(null);
@@ -111,6 +123,7 @@ export function AllocationsByPaperView({ projectId }: { projectId: string }) {
         assignmentsService.getProjectAssignments(projectId),
         projectMembersService.listMembers(projectId),
       ]);
+      setAllDocuments(docs as Document[]);
       setDocuments((docs as Document[]).filter(d => d.processing_status === 'completed'));
       setAssignments(asg);
       setMembers(mem);
@@ -145,13 +158,16 @@ export function AllocationsByPaperView({ projectId }: { projectId: string }) {
       if (!byDoc.has(a.document_id)) byDoc.set(a.document_id, {});
       byDoc.get(a.document_id)![a.reviewer_role as ReviewerRole] = a;
     }
+    const labels = buildLabelMap(allDocuments);
     return documents.map(d => {
       const cells = byDoc.get(d.id) ?? {};
       const totalForms = Math.max(...Object.values(cells).map(a => a?.forms_total ?? 0), 0);
       const filledForms = Object.values(cells).reduce((s, a) => s + (a?.forms_completed ?? 0), 0);
-      return { docId: d.id, filename: d.filename, cells, filledForms, totalForms };
+      // `filename` here is the row's display name, and what the search box
+      // matches — the study ID, not the stored file name.
+      return { docId: d.id, filename: labels[d.id] || d.filename, labels: d.labels ?? [], cells, filledForms, totalForms };
     });
-  }, [documents, assignments]);
+  }, [documents, allDocuments, assignments]);
 
   const formsPerRole = useMemo(() => {
     return Math.max(...assignments.map(a => a.forms_total ?? 0), 0);
@@ -179,9 +195,9 @@ export function AllocationsByPaperView({ projectId }: { projectId: string }) {
 
   // Filtered + searched
   const visibleRows = useMemo(() => {
-    const q = search.trim().toLowerCase();
     return rows.filter(r => {
-      if (q && !r.filename.toLowerCase().includes(q)) return false;
+      if (!docMatchesQuery(r.filename, r.labels, search)) return false;
+      if (!matchesTags(r.labels)) return false;
       const r1 = !!r.cells.reviewer_1;
       const r2 = !!r.cells.reviewer_2;
       const adj = !!r.cells.adjudicator;
@@ -195,7 +211,7 @@ export function AllocationsByPaperView({ projectId }: { projectId: string }) {
       if (filter === 'no_adj' && adj) return false;
       return true;
     });
-  }, [rows, search, filter]);
+  }, [rows, search, filter, activeTags]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Effective reviewer for a (docId, role) — considers pending overrides.
   function effectiveReviewer(docId: string, role: ReviewerRole) {
@@ -317,10 +333,11 @@ export function AllocationsByPaperView({ projectId }: { projectId: string }) {
           <input
             value={search}
             onChange={e => setSearch(e.target.value)}
-            placeholder="Search papers by filename…"
+            placeholder="Search papers or tags…"
             className="flex-1 bg-transparent text-[12.5px] text-gray-900 dark:text-white outline-none placeholder-gray-400"
           />
         </div>
+        <TagFilterBar activeTags={activeTags} onToggleTag={toggleTag} onClear={clearTags} />
 
         <div className="inline-flex bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg p-0.5 flex-wrap gap-0.5">
           {filterPills.map(p => (
@@ -417,9 +434,14 @@ export function AllocationsByPaperView({ projectId }: { projectId: string }) {
               {/* Paper */}
               <div className="flex items-center gap-2.5 min-w-0">
                 <RoleDots row={row} pending={pending} />
-                <span className="text-[12.5px] text-gray-700 dark:text-zinc-300 truncate font-mono">
+                <span className="min-w-0 text-[12.5px] text-gray-700 dark:text-zinc-300 truncate font-mono">
                   {row.filename}
                 </span>
+                <DocumentTags
+                  labels={row.labels}
+                  activeTags={activeTags}
+                  onToggleTag={toggleTag}
+                />
               </div>
 
               {/* Reviewer cells */}
