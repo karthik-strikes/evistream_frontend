@@ -26,7 +26,10 @@ import {
   type RobTool, type ToolDomain,
 } from './robTools';
 
-const JUDGMENT = /judgment|judgement/i;
+// `rating` is here because two live forms spell the judgement column
+// `rob_domain1_rating`, and without it `bindForm` returned null for them —
+// 15 saved assessments were invisible on this screen.
+const JUDGMENT = /judgment|judgement|rating/i;
 /** The three spellings the corpus actually uses for the free-text companion. */
 const RATIONALE = /justification|reason|support|rationale/i;
 /** RoB 2's signalling questions — `d1_1_...`. Not judgments; must not be bound. */
@@ -79,7 +82,7 @@ function judgmentCandidates(fields: FormField[]): Candidate[] {
 }
 
 function rationaleFor(name: string, fields: FormField[]): string | null {
-  const stem = name.replace(/[_\s]*(judgment|judgement)$/i, '');
+  const stem = name.replace(/[_\s]*(judgment|judgement|rating)$/i, '');
   const hit = (fields ?? []).find(
     f => f?.field_name && f.field_name !== name
       && f.field_name.startsWith(stem) && RATIONALE.test(f.field_name),
@@ -126,7 +129,7 @@ function bindTool(fields: FormField[], tool: RobTool): { domains: BoundDomain[];
   }
 
   for (const leftover of candidates.filter(c => !claimed.has(c.name))) {
-    const stem = leftover.name.replace(/[_\s]*(judgment|judgement)$/i, '').replace(/_/g, ' ');
+    const stem = leftover.name.replace(/[_\s]*(judgment|judgement|rating)$/i, '').replace(/_/g, ' ');
     domains.push({
       code: '+',
       name: (leftover.description?.split(/(?<=\.)\s/)[0] ?? stem).replace(/\.$/, ''),
@@ -185,103 +188,3 @@ export function bindForm(form: Form): BoundForm | null {
 }
 
 // ── Reading ──────────────────────────────────────────────────────────────────
-
-export interface DomainReading {
-  /** The tool's judgment, translated from whatever the form stored. */
-  canonical: string | null;
-  /** Exactly what is stored, so a translation is always inspectable. */
-  raw: string;
-  rationale: string;
-}
-
-/** The record holding one assessment — a table row, or the record itself. */
-export function assessmentRecord(
-  data: Record<string, any> | undefined,
-  bound: BoundForm,
-  outcome: string,
-): Row | null {
-  if (!bound.tableField) return (data as Row) ?? null;
-  const rows = rowsOf(data, bound.tableField);
-  if (bound.outcomeColumns.length === 0) return rows[0] ?? null;
-  return rows.find(r => outcomeValueOf(r, bound.outcomeColumns) === outcome) ?? null;
-}
-
-export function outcomeValueOf(row: Row, outcomeColumns: string[]): string {
-  for (const col of outcomeColumns) {
-    const v = cellValue(row, col);
-    if (v && v.toUpperCase() !== 'NA') return v;
-  }
-  return '';
-}
-
-export function readDomain(record: Row | null, domain: BoundDomain, tool: RobTool): DomainReading {
-  const raw = domain.column ? cellValue(record ?? undefined, domain.column) : '';
-  return {
-    raw,
-    canonical: raw ? toCanonicalJudgment(raw, tool) : null,
-    rationale: domain.rationaleColumn ? cellValue(record ?? undefined, domain.rationaleColumn) : '',
-  };
-}
-
-export function severityOfCanonical(canonical: string | null, tool: RobTool): Severity {
-  if (!canonical) return 'none';
-  return tool.severity[canonical] ?? 'none';
-}
-
-// ── Writing ──────────────────────────────────────────────────────────────────
-
-export interface DomainWrite {
-  canonical: string;
-  rationale: string;
-}
-
-/**
- * Fold one outcome's judgments into an existing record.
- *
- * Preserves everything it is not asked to change: sibling outcome rows, flat
- * fields, and columns this page has never heard of. A study carries one row per
- * outcome and saving writes the whole record, so a careless merge here silently
- * destroys a colleague's other assessments.
- */
-export function writeAssessment(
-  existing: Record<string, any> | undefined,
-  bound: BoundForm,
-  outcome: string,
-  outcomeColumn: string,
-  writes: Record<string, DomainWrite>,
-): Record<string, any> {
-  const applyTo = (row: Row): Row => {
-    const next: Row = { ...row };
-    for (const domain of bound.domains) {
-      if (!domain.column) continue;
-      const write = writes[domain.column];
-      if (!write) continue;
-      const target = toFormOption(write.canonical, domain.formOptions, bound.tool);
-      // A refusal here is deliberate; the UI has already disabled the control.
-      if (!target || 'ambiguous' in target) continue;
-      next[domain.column] = target.option;
-      if (domain.rationaleColumn) next[domain.rationaleColumn] = write.rationale;
-    }
-    return next;
-  };
-
-  // Flat form: the record itself is the assessment, with no outcome dimension.
-  if (!bound.tableField) return applyTo({ ...(existing ?? {}) });
-
-  const record = { ...(existing ?? {}) };
-  const rows = rowsOf(existing, bound.tableField);
-  const index = bound.outcomeColumns.length === 0
-    ? (rows.length > 0 ? 0 : -1)
-    : rows.findIndex(r => outcomeValueOf(r, bound.outcomeColumns) === outcome);
-
-  const nextRows = index >= 0
-    ? rows.map((r, i) => (i === index ? applyTo(r) : r))
-    : [...rows, applyTo(outcomeColumn ? { [outcomeColumn]: outcome } : {})];
-
-  const original = existing?.[bound.tableField];
-  record[bound.tableField] =
-    original && typeof original === 'object' && !Array.isArray(original) && 'value' in original
-      ? { ...original, value: nextRows }
-      : nextRows;
-  return record;
-}

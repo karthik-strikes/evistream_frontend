@@ -44,6 +44,15 @@ const securityHeaders = [
 ];
 
 const nextConfig = {
+  // Build somewhere else, then swap the finished directory into place.
+  //
+  // `next build` empties and rewrites its output directory as it goes, and
+  // `next start` reads that same directory on every request — so building into
+  // `.next` while the server is live took evistreams.com down for the whole
+  // ~75s build with `ENOENT: .next/required-server-files.json` on every page.
+  // deploy.sh sets NEXT_DIST_DIR to a staging directory; the running server has
+  // it unset, so it keeps serving `.next` until the swap. See frontend/deploy.sh.
+  distDir: process.env.NEXT_DIST_DIR || '.next',
   reactStrictMode: true,
   images: {
     remotePatterns: [],

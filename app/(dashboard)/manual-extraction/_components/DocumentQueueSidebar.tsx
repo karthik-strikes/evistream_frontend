@@ -1,5 +1,6 @@
 'use client';
 
+import { useMemo } from 'react';
 import { FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { Document } from '@/types/api';
@@ -28,17 +29,25 @@ function getDocStatus(doc: Document, doneDocs: Set<string>, partialDocs: Set<str
 
 const statusOrder: Record<DocStatus, number> = { todo: 0, draft: 1, partial: 2, done: 3 };
 
-const statusBadge: Record<DocStatus, { label: string; cls: string }> = {
-  done: { label: 'Done', cls: 'text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800/40' },
-  partial: { label: 'Partial', cls: 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800/40' },
-  draft: { label: 'Draft', cls: 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800/40' },
-  todo: { label: 'Todo', cls: 'text-gray-500 dark:text-zinc-500 bg-gray-50 dark:bg-[#1a1a1a] border-gray-200 dark:border-[#2a2a2a]' },
+// "Partial" and "Draft" are two different facts, not two words for one: partial
+// work is on the server and visible to everyone, a draft never left this
+// browser. The hint says so, because the two badges sit in the same column.
+const statusBadge: Record<DocStatus, { label: string; cls: string; hint: string }> = {
+  done: { label: 'Done', cls: 'text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-900/20 border-green-200 dark:border-green-800/40', hint: 'Saved as complete' },
+  partial: { label: 'Partial', cls: 'text-blue-600 dark:text-blue-400 bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800/40', hint: 'In progress, saved on the server' },
+  draft: { label: 'Draft', cls: 'text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-900/20 border-amber-200 dark:border-amber-800/40', hint: 'Recovered work saved on this computer only — the server has no copy' },
+  todo: { label: 'Todo', cls: 'text-gray-500 dark:text-zinc-500 bg-gray-50 dark:bg-[#1a1a1a] border-gray-200 dark:border-[#2a2a2a]', hint: 'Not started' },
 };
 
 export function DocumentQueueSidebar({ documents, docLabels, currentDocId, doneDocs, partialDocs, formId, onSelectDoc }: DocumentQueueSidebarProps) {
-  const docsWithStatus = documents
-    .map(d => ({ doc: d, status: getDocStatus(d, doneDocs, partialDocs, formId) }))
-    .sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
+  // Memoized because `getDocStatus` reads localStorage, and it used to do so
+  // once per document on every render of this rail.
+  const docsWithStatus = useMemo(
+    () => documents
+      .map(d => ({ doc: d, status: getDocStatus(d, doneDocs, partialDocs, formId) }))
+      .sort((a, b) => statusOrder[a.status] - statusOrder[b.status]),
+    [documents, doneDocs, partialDocs, formId],
+  );
 
   const doneCount = docsWithStatus.filter(d => d.status === 'done').length;
 
@@ -74,7 +83,7 @@ export function DocumentQueueSidebar({ documents, docLabels, currentDocId, doneD
                 <p className="text-[11px] text-gray-700 dark:text-zinc-300 truncate" title={doc.filename}>{docLabels[doc.id] ?? doc.filename}</p>
                 <DocumentTags labels={doc.labels} max={1} className="mt-0.5" />
               </div>
-              <span className={cn("text-[9px] font-semibold px-1 py-0.5 rounded border flex-shrink-0", badge.cls)}>
+              <span title={badge.hint} className={cn("text-[9px] font-semibold px-1 py-0.5 rounded border flex-shrink-0", badge.cls)}>
                 {badge.label}
               </span>
             </button>

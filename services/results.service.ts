@@ -1,5 +1,8 @@
 import { apiClient } from '@/lib/api';
-import type { ExtractionResult, ConsensusSummary, ConsensusResult, SourceIndexResponse, PageMapResponse } from '@/types/api';
+import type {
+  ExtractionResult, ConsensusSummary, ConsensusResult, SourceIndexResponse, PageMapResponse,
+  FormActivityResponse,
+} from '@/types/api';
 
 export interface GetResultsOptions {
   projectId?: string;
@@ -8,6 +11,26 @@ export interface GetResultsOptions {
   extractionId?: string;
   limit?: number;
   offset?: number;
+}
+
+/** One (document, form, role) slot that already holds a manual row. */
+export interface ManualStatusRow {
+  document_id: string;
+  form_id: string;
+  reviewer_role: string | null;
+  is_partial: boolean;
+  is_mine: boolean;
+  /** Who and when. Still no extracted values — enough to draw a contributor
+   *  stack and a "last activity" line for a whole project in one request. */
+  extracted_by: string | null;
+  reviewer_name: string | null;
+  updated_at: string | null;
+}
+
+export interface ResultsStatus {
+  manual: ManualStatusRow[];
+  /** Documents with an AI row — populated only when a formId was given. */
+  ai_document_ids: string[];
 }
 
 export const resultsService = {
@@ -40,30 +63,72 @@ export const resultsService = {
     return all;
   },
 
+  /**
+   * Completion status for a whole project (or one form), with no values.
+   *
+   * `getAll` cannot answer this: the backend caps it at 50 rows per request by
+   * default, newest first, so in a project holding a few thousand AI results
+   * every manual row falls off the page and saved work reads as un-started.
+   * Paginating `getAll` instead would download megabytes of `extracted_data`
+   * to draw a checkmark.
+   */
+  async getStatus(options: { projectId: string; formId?: string }): Promise<ResultsStatus> {
+    const params = new URLSearchParams({ project_id: options.projectId });
+    if (options.formId) params.append('form_id', options.formId);
+    return apiClient.get<ResultsStatus>(`/api/v1/results/status?${params.toString()}`);
+  },
+
   async getById(id: string): Promise<ExtractionResult> {
     return apiClient.get<ExtractionResult>(`/api/v1/results/${id}`);
   },
 
-  async exportCSV(options: GetResultsOptions = {}): Promise<Blob> {
+  /**
+   * Who changed what, when, on this project's results.
+   *
+   * Reads `audit_trail`, which has carried one row per changed field since the
+   * provenance work and had never been rendered anywhere. Blinded server-side:
+   * `old_value`/`new_value` are the extracted values themselves.
+   *
+   * Omit `formId` for the whole project — the Results form list needs every
+   * form's activity at once to draw its cards.
+   */
+  async getActivity(options: {
+    projectId: string;
+    formId?: string;
+    documentId?: string;
+    limit?: number;
+  }): Promise<FormActivityResponse> {
+    const params = new URLSearchParams({ project_id: options.projectId });
+    if (options.formId) params.append('form_id', options.formId);
+    if (options.documentId) params.append('document_id', options.documentId);
+    if (options.limit != null) params.append('limit', String(options.limit));
+    return apiClient.get<FormActivityResponse>(`/api/v1/results/activity?${params.toString()}`);
+  },
+
+  /** `includeSources` adds `<field>_source_page` / `<field>_source_quote`
+   *  columns. Off by default so an existing export is unchanged. */
+  async exportCSV(options: GetResultsOptions & { includeSources?: boolean } = {}): Promise<Blob> {
     if (!options.extractionId) {
       throw new Error('extractionId is required for export');
     }
     const token = apiClient.getToken();
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    const response = await fetch(`/api/v1/results/extraction/${encodeURIComponent(options.extractionId)}/export?format=csv`, { headers });
+    const src = options.includeSources ? '&include_sources=true' : '';
+    const response = await fetch(`/api/v1/results/extraction/${encodeURIComponent(options.extractionId)}/export?format=csv${src}`, { headers });
     if (!response.ok) throw new Error(`Export failed with status ${response.status}`);
     return response.blob();
   },
 
-  async exportJSON(options: GetResultsOptions = {}): Promise<Blob> {
+  async exportJSON(options: GetResultsOptions & { includeSources?: boolean } = {}): Promise<Blob> {
     if (!options.extractionId) {
       throw new Error('extractionId is required for export');
     }
     const token = apiClient.getToken();
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
-    const response = await fetch(`/api/v1/results/extraction/${encodeURIComponent(options.extractionId)}/export?format=json`, { headers });
+    const src = options.includeSources ? '&include_sources=true' : '';
+    const response = await fetch(`/api/v1/results/extraction/${encodeURIComponent(options.extractionId)}/export?format=json${src}`, { headers });
     if (!response.ok) throw new Error(`Export failed with status ${response.status}`);
     return response.blob();
   },
@@ -116,6 +181,17 @@ export const resultsService = {
     } catch {
       return null;
     }
+  },
+
+  /** Delete ONE extraction result row. Requires can_manage_assignments.
+   *
+   *  The only other delete is `DELETE /extractions/{id}`, which removes the
+   *  grouping row and with it EVERY manual result for that form, across all
+   *  documents and reviewers. This one removes exactly the row you name, and the
+   *  server writes the whole row to the audit trail first, so it is recoverable.
+   */
+  async deleteResult(resultId: string): Promise<{ deleted: number }> {
+    return apiClient.delete<{ deleted: number }>(`/api/v1/results/${resultId}`);
   },
 
   async getSourceIndex(resultId: string): Promise<SourceIndexResponse> {

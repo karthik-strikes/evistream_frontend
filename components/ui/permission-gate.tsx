@@ -46,7 +46,6 @@ export function PermissionGate({ permission, children, message, silent = false }
     can_run_manual_extractions: 'run manual extractions',
     can_view_results: 'view results',
     can_adjudicate: 'access consensus',
-    can_qa_review: 'access QA reviews',
     can_manage_assignments: 'manage assignments',
     can_manage_members: 'manage members',
   };

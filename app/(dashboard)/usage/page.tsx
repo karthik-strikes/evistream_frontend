@@ -130,7 +130,7 @@ export default function UsagePage() {
                 emptyHint="No LLM calls in this window."
               />
               <BreakdownCard
-                title="By source (extraction vs codegen)"
+                title="By source (extraction · codegen · figures)"
                 rows={bySource?.rows ?? []}
                 emptyHint="No LLM calls in this window."
               />
@@ -813,6 +813,7 @@ function ByProjectCard({ rows }: { rows: UsageByProjectRow[] }) {
                   <th className="px-3 py-2 font-medium text-right">Total</th>
                   <th className="px-3 py-2 font-medium text-right" title="Recurring per-extraction cost">Extraction</th>
                   <th className="px-3 py-2 font-medium text-right" title="One-time form code generation cost">Building</th>
+                  <th className="px-3 py-2 font-medium text-right" title="Reading each paper's charts into tables — once per document, ~$0.02 a figure">Figures</th>
                   <th className="px-3 py-2 font-medium text-right">Runs</th>
                   <th className="px-3 py-2 font-medium text-right" title="Distinct PDFs covered (re-runs not double-counted)">PDFs</th>
                   <th className="px-3 py-2 font-medium text-right" title="Sum of run durations">Time</th>
@@ -826,6 +827,7 @@ function ByProjectCard({ rows }: { rows: UsageByProjectRow[] }) {
                     <td className="px-3 py-2 text-right tabular-nums font-semibold dark:text-white">${r.total_cost_usd.toFixed(2)}</td>
                     <td className="px-3 py-2 text-right tabular-nums dark:text-zinc-300">${r.extraction_cost_usd.toFixed(2)}</td>
                     <td className="px-3 py-2 text-right tabular-nums dark:text-zinc-300">${r.codegen_cost_usd.toFixed(2)}</td>
+                    <td className="px-3 py-2 text-right tabular-nums dark:text-zinc-300">${(r.figures_cost_usd ?? 0).toFixed(2)}</td>
                     <td className="px-3 py-2 text-right tabular-nums dark:text-zinc-300">
                       {r.runs}
                       {r.failed_runs > 0 && <span className="ml-1 text-[10px] text-red-500">{r.failed_runs}✕</span>}

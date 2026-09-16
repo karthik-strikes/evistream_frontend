@@ -33,11 +33,14 @@ function getInitials(name: string | null, email: string): string {
 interface AvatarProps {
   email: string;
   name?: string | null;
-  size?: 'sm' | 'md' | 'lg';
+  size?: 'xs' | 'sm' | 'md' | 'lg';
   className?: string;
 }
 
 const SIZE_CLASSES = {
+  // xs exists for dense grids — the by-paper allocation table gives a reviewer
+  // cell about 100px, so a 28px avatar leaves no room for the name.
+  xs: 'w-[22px] h-[22px] text-[9px]',
   sm: 'w-7 h-7 text-[11px]',
   md: 'w-9 h-9 text-xs',
   lg: 'w-11 h-11 text-sm',

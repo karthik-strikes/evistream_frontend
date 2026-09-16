@@ -12,6 +12,7 @@ import { formsService, documentsService } from '@/services';
 import { apiClient } from '@/lib/api';
 import { cn, getErrorMessage } from '@/lib/utils';
 import { transformToLongFormat } from '@/lib/longFormatTransform';
+import { boxesFromLocation, type EvidenceBoxes } from '@/lib/sourceBoxes';
 import type { Form, Document, PilotState, PilotFieldFeedback, FormField, FieldPrompt } from '@/types/api';
 import { FieldEditorPane, type UEFCalField, type UEFEditableField } from '@/components/forms/FieldEditorPane';
 import { SourceEvidenceDrawer } from '@/components/source-evidence/SourceEvidenceDrawer';
@@ -53,6 +54,24 @@ function getSyntheticCaption(data: any): boolean {
 function getCaptionImage(data: any): string | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   return data.source_location?.caption_image ?? null;
+}
+function getFromFigure(data: any): boolean {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  return data.source_location?.from_figure === true;
+}
+function getBoxes(data: any): EvidenceBoxes | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return boxesFromLocation(data.source_location);
+}
+function getFigureImage(data: any): string | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return data.source_location?.figure_image ?? null;
+}
+/** Null, not false, when absent — see the twin in results/LongFormatTable. */
+function getFigureVerified(data: any): boolean | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const v = data.source_location?.figure_verified;
+  return typeof v === 'boolean' ? v : null;
 }
 
 const formatFieldName = (f: string) =>
@@ -782,8 +801,12 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
               sourceText: activeSourceText,
               storedValue: rows[active.ri]?.[active.col] != null ? String(rows[active.ri][active.col]) : null,
               page: getPageRef(activeRaw),
+              boxes: getBoxes(activeRaw),
               syntheticCaption: getSyntheticCaption(activeRaw),
               captionImage: getCaptionImage(activeRaw),
+              fromFigure: getFromFigure(activeRaw),
+              figureImage: getFigureImage(activeRaw),
+              figureVerified: getFigureVerified(activeRaw),
               documentId: rows[active.ri]?._documentId ?? null,
               documentFilename: docsMap[rows[active.ri]?._documentId]?.filename ?? rows[active.ri]?._paperFilename ?? null,
               fieldLabel: formatFieldName(active.col),
@@ -1063,6 +1086,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                   documentId={activeData?.documentId ?? null}
                   documentFilename={activeData?.documentFilename ?? null}
                   sourceText={activeData?.sourceText ?? null}
+                  boxes={activeData?.boxes ?? null}
                   storedValue={activeData?.storedValue ?? null}
                   fieldLabel={activeData?.fieldLabel}
                   page={activeData?.page ?? null}
@@ -1072,6 +1096,9 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                   doi={activeData?.doi ?? null}
                   syntheticCaption={activeData?.syntheticCaption ?? false}
                   captionImage={activeData?.captionImage ?? null}
+                  fromFigure={activeData?.fromFigure ?? false}
+                  figureImage={activeData?.figureImage ?? null}
+                  figureVerified={activeData?.figureVerified ?? null}
                   onPrev={goPrev}
                   onNext={goNext}
                   hasPrev={hasPrev}

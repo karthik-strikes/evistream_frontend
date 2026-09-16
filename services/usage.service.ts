@@ -145,6 +145,8 @@ export interface UsageByProjectRow {
   project_name: string;
   extraction_cost_usd: number;
   codegen_cost_usd: number;
+  /** Reading this project's figures into tables — once per document, no form. */
+  figures_cost_usd: number;
   total_cost_usd: number;
   total_tokens: number;
   total_duration_seconds: number;

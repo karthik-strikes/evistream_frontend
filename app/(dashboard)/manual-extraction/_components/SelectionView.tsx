@@ -1,11 +1,15 @@
 'use client';
 
+import { useState } from 'react';
 import { FileText, Play, Loader2, Check } from 'lucide-react';
 import { cn, formatDate } from '@/lib/utils';
-import type { Document, Form } from '@/types/api';
+import type { Document, Form, FormField } from '@/types/api';
 import { DocumentTags, TagFilterBar } from '@/components/documents/DocumentTags';
 import { useTagFilter } from '@/hooks/useTagFilter';
 import { docMatchesQuery } from '@/lib/documentTags';
+import { isTableField } from '../_lib/fieldKinds';
+import { GROUP_PALETTE, GROUP_PREFIX, groupsOf, scopeOf, SCOPE_ROW, SCOPE_STUDY, STUDY_COLOR } from '@/lib/fieldScopes';
+import { GroupSetupDialog, type GroupingProps } from './GroupSetupDialog';
 
 interface SelectionViewProps {
   forms: Form[];
@@ -21,10 +25,13 @@ interface SelectionViewProps {
   starting: boolean;
   doneDocs: Set<string>;
   onSelectForm: (form: Form) => void;
-  onSelectDoc: (doc: Document | null) => void;
+  onSelectDoc: (doc: Document) => void;
   onFormSearch: (value: string) => void;
   onDocSearch: (value: string) => void;
   onStart: () => void;
+  /** Column grouping setup for the selected form. Omitted when the reviewer may
+   *  not edit forms, in which case the panel never renders. */
+  grouping?: GroupingProps;
 }
 
 export function SelectionView({
@@ -43,7 +50,10 @@ export function SelectionView({
   onFormSearch,
   onDocSearch,
   onStart,
+  grouping,
 }: SelectionViewProps) {
+  const [groupingField, setGroupingField] = useState<FormField | null>(null);
+  const tableFields = (selectedForm?.fields ?? []).filter(isTableField);
   const filteredForms = formSearch.trim() ? forms.filter(f => f.form_name.toLowerCase().includes(formSearch.toLowerCase())) : forms;
   const { activeTags, toggleTag, clearTags, matchesTags } = useTagFilter();
   const filteredDocs = documents.filter(
@@ -54,6 +64,17 @@ export function SelectionView({
 
   return (
     <div className="flex flex-col rounded-xl border border-gray-200 dark:border-[#1f1f1f] overflow-hidden bg-white dark:bg-[#111111]" style={{ height: 'calc(100vh - 120px)' }}>
+      {grouping && selectedForm && (
+        <GroupSetupDialog
+          field={groupingField}
+          onClose={() => setGroupingField(null)}
+          saving={!!groupingField && grouping.savingField === `${selectedForm.id}:${groupingField.field_name}`}
+          onSave={async (name, next) => {
+            if (await grouping.onSave(selectedForm.id, name, next)) setGroupingField(null);
+          }}
+          onSuggest={name => grouping.onSuggest(selectedForm.id, name)}
+        />
+      )}
       {/* Two-column body */}
       <div className="flex flex-1 min-h-0">
         {/* Left — Forms */}
@@ -115,6 +136,32 @@ export function SelectionView({
               );
             })}
           </div>
+
+          {/* Column grouping — configuration, so it belongs to choosing the
+              form, not to each paper. Shown once here rather than on every
+              table on every document. */}
+          {grouping && selectedForm && tableFields.length > 0 && (
+            <div className="flex-shrink-0 border-t border-gray-100 bg-gray-50/70 px-5 py-4 dark:border-[#1f1f1f] dark:bg-[#0a0a0a]">
+              <div className="mb-2.5 flex items-baseline gap-2">
+                <span className="text-[11px] font-semibold uppercase tracking-[0.09em] text-gray-500 dark:text-zinc-400">
+                  Column grouping
+                </span>
+                <span className="text-[10.5px] text-gray-400 dark:text-zinc-600">
+                  so you don&apos;t type the same value on every row
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                {tableFields.map(f => (
+                  <GroupingRow
+                    key={f.field_name}
+                    field={f}
+                    busy={grouping.savingField === `${selectedForm.id}:${f.field_name}`}
+                    onEdit={() => setGroupingField(f)}
+                  />
+                ))}
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Right — Documents */}
@@ -169,7 +216,13 @@ export function SelectionView({
                   return (
                     <button
                       key={doc.id}
-                      onClick={() => onSelectDoc(isSel ? null : doc)}
+                      // Re-clicking the selected document used to clear it,
+                      // which silently disabled "Start Extraction" with nothing
+                      // on screen to explain why. The form list above never did
+                      // this, and clearing has no use here — you cannot start
+                      // without a document, and picking a different one is how
+                      // you change your mind.
+                      onClick={() => onSelectDoc(doc)}
                       className={cn(
                         "w-full text-left flex items-center gap-3 px-3.5 py-2.5 rounded-xl border transition-all duration-100 cursor-pointer",
                         isSel
@@ -232,6 +285,121 @@ export function SelectionView({
           }
         </button>
       </div>
+    </div>
+  );
+}
+
+/**
+ * One table's grouping state.
+ *
+ * The bar is the point. Sixteen grey segments say "you retype all of this on
+ * every row" faster than the sentence under it does, and once the table is
+ * tagged the same bar shows at a glance how much of the row was lifted out —
+ * one segment per column, coloured by what that column is a property of.
+ */
+function GroupingRow({ field, busy, onEdit }: {
+  field: FormField;
+  busy: boolean;
+  onEdit: () => void;
+}) {
+  const cols = field.subform_fields ?? [];
+  const groups = groupsOf(field);
+  const shared = cols.filter(c => scopeOf(c) !== SCOPE_ROW).length;
+
+  /** A column's colour and the words for its tooltip. Per-row columns get no
+   *  colour on purpose — grey is the "still retyped" state the bar is about. */
+  const paint = (col: FormField): { color: string | null; what: string } => {
+    const s = scopeOf(col);
+    if (s === SCOPE_STUDY) return { color: STUDY_COLOR, what: 'asked once for the whole paper' };
+    if (s === SCOPE_ROW) return { color: null, what: 'typed on every row' };
+    const name = s.slice(GROUP_PREFIX.length);
+    const gi = groups.indexOf(name);
+    return {
+      color: GROUP_PALETTE[(gi < 0 ? 0 : gi) % GROUP_PALETTE.length],
+      what: `asked once for each ${name}`,
+    };
+  };
+
+  const hasStudy = cols.some(c => scopeOf(c) === SCOPE_STUDY);
+  const usedGroups = groups.filter(g => cols.some(c => scopeOf(c) === GROUP_PREFIX + g));
+
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-gray-100 bg-white px-3.5 py-2.5 transition-colors hover:border-gray-200 dark:border-[#1f1f1f] dark:bg-[#111111] dark:hover:border-[#2a2a2a]">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-baseline gap-2">
+          <span className="truncate text-[13px] font-semibold capitalize leading-tight text-gray-800 dark:text-zinc-200">
+            {field.field_name.replace(/_/g, ' ')}
+          </span>
+          <span className="flex-shrink-0 text-[10.5px] tabular-nums text-gray-400 dark:text-zinc-600">
+            {cols.length} columns
+          </span>
+        </div>
+
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {shared === 0 ? (
+            <span className="text-[11px] text-gray-400 dark:text-zinc-500">
+              You type all {cols.length} values again on every row
+            </span>
+          ) : (
+            <>
+              {hasStudy && (
+                <span
+                  className="rounded-full px-1.5 py-[1.5px] text-[9.5px] font-bold uppercase tracking-wide text-white"
+                  style={{ background: STUDY_COLOR }}
+                >
+                  study
+                </span>
+              )}
+              {usedGroups.map(g => (
+                <span
+                  key={g}
+                  className="rounded-full px-1.5 py-[1.5px] text-[9.5px] font-bold uppercase tracking-wide text-white"
+                  style={{ background: GROUP_PALETTE[groups.indexOf(g) % GROUP_PALETTE.length] }}
+                >
+                  {g}
+                </span>
+              ))}
+              <span className="text-[11px] text-gray-400 dark:text-zinc-500">
+                {shared} asked once · {cols.length - shared} typed on every row
+              </span>
+            </>
+          )}
+        </div>
+
+        {/* One segment per column. Gaps rather than a solid bar so a
+            sixteen-column table still reads as sixteen things. */}
+        <div className="mt-2.5 flex h-[3px] gap-[2px]">
+          {cols.map((c, i) => {
+            const { color, what } = paint(c);
+            return (
+              <span
+                key={`${c.field_name}-${i}`}
+                title={`${c.field_name.replace(/_/g, ' ')} — ${what}`}
+                className={cn(
+                  'h-full flex-1 rounded-full',
+                  !color && 'bg-gray-200 dark:bg-[#2a2a2a]',
+                )}
+                style={color ? { background: color } : undefined}
+              />
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Untagged tables get the inviting button — there is something to gain.
+          Tagged ones get a quiet one: the work is done. */}
+      <button
+        onClick={onEdit}
+        disabled={busy}
+        className={cn(
+          'flex-shrink-0 cursor-pointer rounded-lg border px-3 py-1.5 text-[11.5px] font-semibold transition-colors disabled:opacity-40',
+          shared === 0
+            ? 'border-blue-200 bg-blue-50 text-blue-700 hover:bg-blue-100 dark:border-blue-900/50 dark:bg-blue-950/40 dark:text-blue-300 dark:hover:bg-blue-950/70'
+            : 'border-gray-200 bg-white text-gray-600 hover:bg-gray-50 dark:border-[#2a2a2a] dark:bg-[#1a1a1a] dark:text-zinc-300 dark:hover:bg-[#222]',
+        )}
+      >
+        {busy ? 'Saving…' : shared === 0 ? 'Set up' : 'Edit'}
+      </button>
     </div>
   );
 }

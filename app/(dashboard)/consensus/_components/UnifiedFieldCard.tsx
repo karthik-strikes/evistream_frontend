@@ -35,6 +35,7 @@
 
 import { NR_LABEL, NA_LABEL, canonicalAbsenceLabel, compareKey } from '@/lib/absence';
 import { sourceColors, STATE_COLORS, type SourceKey } from '@/lib/reviewerColors';
+import { boxesFromLocation, type EvidenceBoxes } from '@/lib/sourceBoxes';
 import { cn } from '@/lib/utils';
 import { AlertTriangle, Check, ChevronDown, ChevronRight, Pencil, Quote } from 'lucide-react';
 import { useState } from 'react';
@@ -52,11 +53,35 @@ import {
   type ResolvableField,
 } from '../_lib/resolve';
 
+/**
+ * Is there anything to jump to?
+ *
+ * The three jump gates used to read `meta?.source_text`, so evidence with no
+ * words in it — a box a reviewer dragged round a figure, or a chart reading —
+ * rendered as dead text while the line itself said "box on page 14". A page on
+ * its own is worth a jump too: landing on the right page beats landing on page 1.
+ */
+export function hasJumpableEvidence(meta?: EvidenceMeta): boolean {
+  return !!(meta && (meta.source_text || meta.page != null || meta.boxes || meta.figure_image));
+}
+
 /** Grounding metadata for one source's answer. */
 export interface EvidenceMeta {
   source_text?: string;
   page?: number;
   section?: string;
+  /** Stored rectangles, when the cell records them and the space they are in.
+   *  A reviewer who dragged a box round a figure has to see that box again —
+   *  "cited on page 14" with nothing drawn is not a citation they can check. */
+  boxes?: EvidenceBoxes | null;
+  /** Grounding provenance, forwarded to the viewer so the consensus pane
+   *  labels and highlights a chart-read value the same way /results does.
+   *  See lib/absence.ts:SourceLocation for what each one means. */
+  synthetic_caption?: boolean;
+  caption_image?: string | null;
+  from_figure?: boolean;
+  figure_image?: string | null;
+  figure_verified?: boolean | null;
 }
 
 export interface UnifiedFieldCardProps {
@@ -74,8 +99,16 @@ export interface UnifiedFieldCardProps {
   isActive: boolean;
   onClick: () => void;
   sourceMeta?: { ai?: EvidenceMeta; r1?: EvidenceMeta; r2?: EvidenceMeta };
-  /** Raise a quote to the PDF pane. Absent → evidence renders unclickable. */
-  onJumpToEvidence?: (source: SourceKey, meta: EvidenceMeta) => void;
+  /** Raise a quote to the PDF pane. Absent → evidence renders unclickable.
+   *
+   *  `opts` is how a **table cell** identifies itself: the card knows the column
+   *  and row, the page does not, and without it every cell in a 16-column table
+   *  would announce itself in the PDF pane as the whole field. */
+  onJumpToEvidence?: (
+    source: SourceKey,
+    meta: EvidenceMeta,
+    opts?: { label?: string; value?: any },
+  ) => void;
   id?: string;
 }
 
@@ -180,14 +213,26 @@ function SourceEvidence({
   onJump?: () => void;
   tint?: string;
 }) {
-  if (!meta?.source_text) return null;
-  const text = meta.source_text.length > 110 ? `${meta.source_text.slice(0, 110)}…` : meta.source_text;
+  // A quote is the best case, not the only one. A value read off a chart has a
+  // figure and a page but no sentence, and a table cell often carries only the
+  // page — rendering nothing there told the reviewer "no evidence exists", which
+  // is a different claim from "the evidence is not a sentence".
+  const quote = meta?.source_text?.trim() ?? '';
+  if (!quote && meta?.page == null && !meta?.figure_image && !meta?.boxes) return null;
+  const text = quote
+    ? (quote.length > 110 ? `${quote.slice(0, 110)}…` : quote)
+    : meta?.figure_image ? 'read from the figure'
+    : meta?.boxes ? `box on page ${meta.boxes.page}`
+    : `cited on page ${meta?.page}`;
   const body = (
     <>
       <Quote className="mt-0.5 h-2.5 w-2.5 flex-shrink-0 opacity-50" />
-      <span className="italic leading-relaxed">
+      <span className={cn('leading-relaxed', quote && 'italic')}>
         {text}
-        {meta.page ? <span className={cn('ml-1.5 not-italic font-semibold', tint)}>p.{meta.page}</span> : null}
+        {/* Only alongside a quote: without one the text already says the page. */}
+        {quote && meta?.page
+          ? <span className={cn('ml-1.5 not-italic font-semibold', tint)}>p.{meta.page}</span>
+          : null}
       </span>
     </>
   );
@@ -218,7 +263,7 @@ function SourceEvidence({
  * decorative panel with a mystery ring.
  */
 function SourceBox({
-  sourceKey, value, field, picked, meta, onPick, onSeed, onJump, children,
+  sourceKey, value, field, picked, meta, onPick, onSeed, onJump, onJumpCell, children,
 }: {
   sourceKey: SourceKey;
   value: any;
@@ -228,6 +273,8 @@ function SourceBox({
   onPick?: () => void;
   onSeed?: () => void;
   onJump?: () => void;
+  /** Per-cell jump for a table value rendered inside this box. */
+  onJumpCell?: (rowIdx: number, col: FormField, raw: any) => void;
   children?: React.ReactNode;
 }) {
   const c = sourceColors(sourceKey);
@@ -267,7 +314,7 @@ function SourceBox({
         </div>
       </div>
       <div className="max-h-28 overflow-y-auto text-sm leading-snug text-gray-700 dark:text-zinc-300">
-        {children ?? <DisplayValue value={value} field={field} />}
+        {children ?? <DisplayValue value={value} field={field} onJumpCell={onJumpCell} />}
       </div>
       <SourceEvidence meta={meta} onJump={onJump} tint={c.text} />
     </div>
@@ -354,13 +401,23 @@ function OtherDecisions({
   return <DecisionButton label={customLabel} active={decision === 'custom'} onClick={() => onDecision('custom')} />;
 }
 
-function DisplayValue({ value, field }: { value: any; field?: FormField }) {
+function DisplayValue({ value, field, onJumpCell }: {
+  value: any; field?: FormField;
+  onJumpCell?: (rowIdx: number, col: FormField, raw: any) => void;
+}) {
   if (isUnfilled(value)) {
     return <span className="text-xs italic text-gray-400 dark:text-zinc-600">nothing recorded</span>;
   }
   if (Array.isArray(value)) {
     if (field && isTableField(field)) {
-      return <TableRowsPreview rows={value} cols={field.subform_fields ?? []} compareTo={[]} />;
+      return (
+        <TableRowsPreview
+          rows={value}
+          cols={field.subform_fields ?? []}
+          compareTo={[]}
+          onJumpCell={onJumpCell}
+        />
+      );
     }
     if (value.every(v => typeof v !== 'object' || v === null)) {
       return (
@@ -548,6 +605,24 @@ export function UnifiedFieldCard({
     if (meta && onJumpToEvidence) onJumpToEvidence(key, meta);
   };
 
+  /**
+   * Jump to a **table cell's** own evidence.
+   *
+   * `sourceMeta` is per field, so a table's 16 columns all shared one quote —
+   * the field-level one, which for a table is usually the whole-table note or
+   * nothing at all. Each cell carries its own `{source_text, source_location}`
+   * envelope; this reads that cell's and labels the pane with the column and row
+   * so the reviewer knows which number they are checking.
+   */
+  const jumpCell = (key: SourceKey, rowIdx: number, col: FormField, raw: any) => {
+    const meta = cellMeta(raw);
+    if (!meta || !onJumpToEvidence) return;
+    onJumpToEvidence(key, meta, {
+      label: `${(col.display_name || col.field_name).replace(/_/g, ' ')} · row ${rowIdx + 1}`,
+      value: cellValue(raw),
+    });
+  };
+
   const cardClass = cn(
     'cursor-pointer border-b border-l-[3px] border-b-gray-100 px-4 py-3 transition-colors dark:border-b-[#1a1a1a]',
     resolved ? STATE_COLORS.resolved.border : isActive ? STATE_COLORS.active.border : STATE_COLORS.pending.border,
@@ -571,7 +646,12 @@ export function UnifiedFieldCard({
               meta={sourceMeta?.[only]}
               onPick={() => onDecision('correct')}
               onSeed={() => seedFrom(only)}
-              onJump={sourceMeta?.[only]?.source_text ? () => jump(only) : undefined}
+              onJump={hasJumpableEvidence(sourceMeta?.[only]) ? () => jump(only) : undefined}
+              onJumpCell={
+                onJumpToEvidence
+                  ? (rowIdx, col, raw) => jumpCell(only, rowIdx, col, raw)
+                  : undefined
+              }
             />
           </div>
         ) : (
@@ -653,6 +733,7 @@ export function UnifiedFieldCard({
           onPick={key => onDecision(`accept_${key}` as Decision)}
           onSeed={seedFrom}
           onJump={onJumpToEvidence ? jump : undefined}
+          onJumpCell={onJumpToEvidence ? jumpCell : undefined}
         />
       ) : (
         <div
@@ -669,7 +750,7 @@ export function UnifiedFieldCard({
               meta={sourceMeta?.[key]}
               onPick={() => onDecision(`accept_${key}` as Decision)}
               onSeed={() => seedFrom(key)}
-              onJump={sourceMeta?.[key]?.source_text && onJumpToEvidence ? () => jump(key) : undefined}
+              onJump={hasJumpableEvidence(sourceMeta?.[key]) && onJumpToEvidence ? () => jump(key) : undefined}
             />
           ))}
         </div>
@@ -715,7 +796,23 @@ function cellMeta(raw: any): EvidenceMeta | undefined {
     if (t && t !== 'NR') meta.source_text = raw.source_text;
   }
   if (typeof raw.page === 'number') meta.page = raw.page;
+  const loc = raw.source_location;
+  // The page can live on either the cell or the source_location; /results
+  // already reads both (LongFormatTable.getPageRef) and this side only read
+  // the cell, so a value whose page is on the location got no page at all.
+  if (meta.page === undefined && loc && typeof loc === 'object' && loc.page) {
+    meta.page = Number(loc.page);
+  }
   if (typeof raw.section === 'string' && raw.section.trim()) meta.section = raw.section;
+  const boxes = boxesFromLocation(raw.source_location);
+  if (boxes) meta.boxes = boxes;
+  if (loc && typeof loc === 'object') {
+    if (loc.synthetic_caption === true) meta.synthetic_caption = true;
+    if (loc.caption_image) meta.caption_image = loc.caption_image;
+    if (loc.from_figure === true) meta.from_figure = true;
+    if (loc.figure_image) meta.figure_image = loc.figure_image;
+    if (typeof loc.figure_verified === 'boolean') meta.figure_verified = loc.figure_verified;
+  }
   return Object.keys(meta).length > 0 ? meta : undefined;
 }
 
@@ -750,9 +847,11 @@ function computeRowDiff(row: any, rowIdx: number, cols: FormField[], compareTo: 
 
 /** Label + value + evidence for one column of an expanded row. */
 function RowCell({
-  col, raw, isDiff, fullWidth,
+  col, raw, isDiff, fullWidth, onJump,
 }: {
   col: FormField; raw: any; isDiff: boolean; fullWidth: boolean;
+  /** Absent → the cell's evidence renders as static text, as it used to. */
+  onJump?: () => void;
 }) {
   const val = cellValue(raw);
   return (
@@ -773,12 +872,15 @@ function RowCell({
       )}>
         {val.trim() || 'empty'}
       </p>
-      <SourceEvidence meta={cellMeta(raw)} />
+      <SourceEvidence meta={cellMeta(raw)} onJump={onJump} />
     </div>
   );
 }
 
-function TableRowsPreview({ rows, cols, compareTo }: { rows: any[]; cols: FormField[]; compareTo: any[][] }) {
+function TableRowsPreview({ rows, cols, compareTo, onJumpCell }: {
+  rows: any[]; cols: FormField[]; compareTo: any[][];
+  onJumpCell?: (rowIdx: number, col: FormField, raw: any) => void;
+}) {
   const [showAll, setShowAll] = useState(false);
   if (!rows || rows.length === 0) {
     return <div className="px-1 text-[11px] italic text-gray-400 dark:text-zinc-600">empty</div>;
@@ -790,7 +892,15 @@ function TableRowsPreview({ rows, cols, compareTo }: { rows: any[]; cols: FormFi
       {visible.map((row, i) => {
         const { differs, differingCells } = computeRowDiff(row, i, cols, compareTo);
         return (
-          <TableRowCard key={i} row={row} rowIdx={i} cols={cols} differs={differs} differingCells={differingCells} />
+          <TableRowCard
+            key={i}
+            row={row}
+            rowIdx={i}
+            cols={cols}
+            differs={differs}
+            differingCells={differingCells}
+            onJumpCell={onJumpCell}
+          />
         );
       })}
       {hidden > 0 && <MoreRows hidden={hidden} onShow={() => setShowAll(true)} />}
@@ -810,8 +920,9 @@ function MoreRows({ hidden, onShow }: { hidden: number; onShow: () => void }) {
   );
 }
 
-function TableRowCard({ row, rowIdx, cols, differs, differingCells }: {
+function TableRowCard({ row, rowIdx, cols, differs, differingCells, onJumpCell }: {
   row: any; rowIdx: number; cols: FormField[]; differs: boolean; differingCells: Set<string>;
+  onJumpCell?: (rowIdx: number, col: FormField, raw: any) => void;
 }) {
   const [expanded, setExpanded] = useState(false);
   const summary = cols
@@ -860,6 +971,7 @@ function TableRowCard({ row, rowIdx, cols, differs, differingCells }: {
                 raw={row?.[col.field_name]}
                 isDiff={differingCells.has(col.field_name)}
                 fullWidth={colIdx === cols.length - 1 && cols.length % 2 !== 0}
+                onJump={onJumpCell ? () => onJumpCell(rowIdx, col, row?.[col.field_name]) : undefined}
               />
             ))}
           </div>
@@ -922,7 +1034,7 @@ function TableRowsCompact({ rows, cols, compareTo, expandedRowIdx, onToggle }: {
   );
 }
 
-function TableSourceGrid({ sources, field, picked, sourceMeta, onPick, onSeed, onJump }: {
+function TableSourceGrid({ sources, field, picked, sourceMeta, onPick, onSeed, onJump, onJumpCell }: {
   sources: UnifiedFieldCardProps['sources'];
   field: FormField;
   picked: Set<SourceKey>;
@@ -930,6 +1042,8 @@ function TableSourceGrid({ sources, field, picked, sourceMeta, onPick, onSeed, o
   onPick: (key: SourceKey) => void;
   onSeed: (key: SourceKey) => void;
   onJump?: (key: SourceKey) => void;
+  /** Per-cell evidence, for the expanded row below the grid. */
+  onJumpCell?: (key: SourceKey, rowIdx: number, col: FormField, raw: any) => void;
 }) {
   const cols = field.subform_fields ?? [];
   const [expanded, setExpanded] = useState<{ src: SourceKey; rowIdx: number } | null>(null);
@@ -978,7 +1092,7 @@ function TableSourceGrid({ sources, field, picked, sourceMeta, onPick, onSeed, o
             meta={sourceMeta?.[e.key]}
             onPick={() => onPick(e.key)}
             onSeed={() => onSeed(e.key)}
-            onJump={sourceMeta?.[e.key]?.source_text && onJump ? () => onJump(e.key) : undefined}
+            onJump={hasJumpableEvidence(sourceMeta?.[e.key]) && onJump ? () => onJump(e.key) : undefined}
           >
             {e.absence ? (
               <span className="px-1 text-[11px] italic text-gray-500 dark:text-zinc-400">
@@ -1022,6 +1136,11 @@ function TableSourceGrid({ sources, field, picked, sourceMeta, onPick, onSeed, o
                 raw={expandedRow?.[col.field_name]}
                 isDiff={differingCells.has(col.field_name)}
                 fullWidth={colIdx === cols.length - 1 && cols.length % 2 !== 0}
+                onJump={
+                  onJumpCell
+                    ? () => onJumpCell(expandedEntry.key, expanded!.rowIdx, col, expandedRow?.[col.field_name])
+                    : undefined
+                }
               />
             ))}
           </div>

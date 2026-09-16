@@ -19,7 +19,19 @@ export const auditService = {
     return apiClient.get<AuditEntry[]>(`/api/v1/audit${qs ? `?${qs}` : ''}`);
   },
 
-  async getEntityHistory(entityType: string, entityId: string): Promise<AuditEntry[]> {
-    return apiClient.get<AuditEntry[]>(`/api/v1/audit/entity/${entityType}/${entityId}`);
+  /** Full audit history for one entity.
+   *
+   *  `projectId` is required: the endpoint checks access against it AND now
+   *  filters on it. Before that, an entity id from another project returned
+   *  that project's history to anyone who could name it. */
+  async getEntityHistory(
+    entityType: string,
+    entityId: string,
+    projectId: string,
+  ): Promise<AuditEntry[]> {
+    const qs = new URLSearchParams({ project_id: projectId }).toString();
+    return apiClient.get<AuditEntry[]>(
+      `/api/v1/audit/entity/${entityType}/${entityId}?${qs}`,
+    );
   },
 };

@@ -34,7 +34,8 @@ interface NavigationItem {
   href: string;
   icon: NavIcon;
   badge?: string;
-  permission?: string;
+  /** Single permission, or several — the item shows if the user holds ANY of them. */
+  permission?: string | string[];
 }
 
 interface NavigationSection {
@@ -59,9 +60,12 @@ const navigationSections: NavigationSection[] = [
   {
     title: 'Extraction',
     items: [
-      { name: 'Run Extraction', href: '/extractions', icon: PlayCircle, permission: 'can_view_results' },
-      { name: 'Manual Extract', href: '/manual-extraction', icon: Edit, permission: 'can_run_extractions' },
-      { name: 'Risk of Bias', href: '/risk-of-bias', icon: Shield, badge: 'New', permission: 'can_adjudicate' },
+      { name: 'Run Extraction', href: '/extractions', icon: PlayCircle, permission: ['can_run_extractions', 'can_view_results'] },
+      { name: 'Manual Extract', href: '/manual-extraction', icon: Edit, permission: 'can_run_manual_extractions' },
+      // Gated on EITHER permission (an array is OR). The page was reachable only
+      // by adjudicators, but editing an assessment requires a reviewer seat —
+      // so the people who actually fill it in could not see the link at all.
+      { name: 'Risk of Bias', href: '/risk-of-bias', icon: Shield, badge: 'New', permission: ['can_run_manual_extractions', 'can_adjudicate'] },
       { name: 'Consensus', href: '/consensus', icon: CheckSquare2, permission: 'can_adjudicate' },
       { name: 'Results', href: '/results', icon: BarChart3, permission: 'can_view_results' },
       { name: 'Synthesis', href: '/synthesis', icon: ForestPlotIcon, badge: 'New', permission: 'can_view_results' },
@@ -131,7 +135,8 @@ export function Sidebar() {
     items: section.items.filter(item => {
       if (!item.permission) return true;
       if (isAdmin || perms.isOwner) return true;
-      return !!(perms as Record<string, unknown>)[item.permission];
+      const keys = Array.isArray(item.permission) ? item.permission : [item.permission];
+      return keys.some(k => !!(perms as Record<string, unknown>)[k]);
     }),
   })).filter(section => section.items.length > 0);
 

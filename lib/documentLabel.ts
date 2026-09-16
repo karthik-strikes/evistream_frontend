@@ -152,6 +152,35 @@ export function buildLabelMap(documents: LabelableDocument[]): Record<string, st
 }
 
 /**
+ * `"Badadare 2024"` -> `"Badadare_2024.pdf"` — the name a saved file gets.
+ *
+ * Mirror of `backend/utils/download_names.py:study_file_name`; change one,
+ * change the other. Used for the entries of the browser-built "Download all
+ * PDFs" zip. Single-file downloads are named by the backend instead, because a
+ * cross-origin S3 link ignores the `download` attribute entirely and takes the
+ * name from `Content-Disposition`.
+ */
+export function studyFileName(
+  label?: string | null,
+  fallbackFilename?: string | null,
+  ext = '.pdf',
+): string {
+  let base = (label || '').trim() || filenameStem(fallbackFilename);
+  if (base.toLowerCase().endsWith(ext.toLowerCase())) base = base.slice(0, -ext.length);
+  base = base
+    // Typographic dashes, mapped not dropped: "Abu\u2010Ta'a" is spelled with U+2010.
+    .replace(/[\u2010-\u2015\u2212]/g, '-')
+    // Illegal on Windows, plus control characters.
+    // eslint-disable-next-line no-control-regex
+    .replace(/[<>:"/\\|?*\x00-\x1f]+/g, '')
+    .trim()
+    .replace(/\s+/g, '_')
+    // Windows strips trailing dots and spaces on save.
+    .replace(/^[._]+|[._]+$/g, '');
+  return `${(base || 'document').slice(0, 120)}${ext}`;
+}
+
+/**
  * Single-document label with no collision context — for the caller that holds
  * one row and no project list. Prefer buildLabelMap where the list is at hand:
  * this one cannot know that a second "Polat 2005" exists.

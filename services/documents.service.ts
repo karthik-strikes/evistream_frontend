@@ -1,5 +1,11 @@
 import { apiClient } from '@/lib/api';
-import type { Document } from '@/types/api';
+import type {
+  Document,
+  DocumentFigure,
+  DocumentFiguresResponse,
+  FigureCell,
+  SupplementaryFile,
+} from '@/types/api';
 
 export interface UploadDocumentOptions {
   file: File;
@@ -233,6 +239,79 @@ export const documentsService = {
     return response.json();
   },
 
+  // ── Figures ────────────────────────────────────────────────────────────────
+  // Datalab's own chart digitization is disabled (it was measurably wrong and
+  // the bad numbers reached an export). These back the replacement: our own
+  // vision pass, reviewed by a person on the document detail page.
+
+  async getFigures(id: string): Promise<DocumentFiguresResponse> {
+    return apiClient.get<DocumentFiguresResponse>(`/api/v1/documents/${id}/figures`);
+  },
+
+  /** Fetch a figure image as a blob.
+   *
+   *  Deliberately NOT a plain <img src> URL: auth is a Bearer token held in
+   *  memory (the only cookie is a non-credential `is_logged_in` flag), and a
+   *  browser image request never sends the Authorization header — so every such
+   *  request 401s. Going through apiClient attaches the token, exactly as the
+   *  PDF viewer does with downloadPdfBlob. Caller owns URL.revokeObjectURL.
+   */
+  async downloadImageBlob(id: string, image: string): Promise<Blob> {
+    return apiClient.get<Blob>(
+      `/api/v1/documents/${id}/images/${encodeURIComponent(image)}`,
+      { responseType: 'blob', _skipGlobalToast: true } as any,
+    );
+  },
+
+  /** Run or re-run the pass. Costs one vision call per figure. */
+  async digitizeFigures(id: string, onlyImage?: string): Promise<{ status: string; job_id: string }> {
+    const qs = onlyImage ? `?only_image=${encodeURIComponent(onlyImage)}` : '';
+    return apiClient.post<{ status: string; job_id: string }>(
+      `/api/v1/documents/${id}/figures/digitize${qs}`, {},
+    );
+  },
+
+  /** Confirm a figure as-is (omit `rows`) or save corrections. */
+  async verifyFigure(
+    id: string, image: string,
+    payload: { rows?: Record<string, FigureCell>[]; columns?: string[] } = {},
+  ): Promise<{ status: string; corrected_cells: number; figure: DocumentFigure }> {
+    return apiClient.post(
+      `/api/v1/documents/${id}/figures/${encodeURIComponent(image)}/verify`, payload,
+    );
+  },
+
+  // ── Supplementary material ─────────────────────────────────────────────────
+  // Stored and listed only: never parsed, never fed to extraction.
+
+  async listSupplementary(id: string): Promise<SupplementaryFile[]> {
+    return apiClient.get<SupplementaryFile[]>(`/api/v1/documents/${id}/supplementary`);
+  },
+
+  async uploadSupplementary(id: string, file: File): Promise<SupplementaryFile> {
+    // Raw fetch + FormData, deliberately bypassing apiClient: axios sets
+    // Content-Type: application/json by default, which fights FormData's
+    // auto-generated multipart boundary. Same reason attachPdf does this.
+    const form = new FormData();
+    form.append('file', file);
+    const token = apiClient.getToken();
+    const res = await fetch(`/api/v1/documents/${id}/supplementary`, {
+      method: 'POST',
+      body: form,
+      headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+      credentials: 'include',
+    });
+    if (!res.ok) {
+      const detail = await res.json().catch(() => null);
+      throw new Error(detail?.detail || `Upload failed (${res.status})`);
+    }
+    return res.json();
+  },
+
+  async deleteSupplementary(id: string, fileId: string): Promise<void> {
+    await apiClient.delete(`/api/v1/documents/${id}/supplementary/${fileId}`);
+  },
+
   async downloadMarkdown(id: string): Promise<string> {
     // responseType: 'text' forces axios to hand back the raw string body.
     // Without it, axios's default transform silently JSON.parses ANY
@@ -266,9 +345,19 @@ export const documentsService = {
     } as any);
   },
 
-  async getDownloadUrl(id: string): Promise<string> {
-    const response = await apiClient.get<{ download_url: string; expires_in: number }>(
-      `/api/v1/documents/${id}/download`
+  /**
+   * Presigned S3 URL for the document PDF.
+   *
+   * `attachment: true` makes the browser save it under the study ID
+   * ("Badadare_2024.pdf") instead of displaying it. Leave it off for the
+   * viewers — they need the PDF rendered, not downloaded. The name has to come
+   * from the backend's Content-Disposition: a cross-origin link ignores the
+   * anchor's `download` attribute and falls back to the URL's last path
+   * segment, which here is a 64-character content hash.
+   */
+  async getDownloadUrl(id: string, opts?: { attachment?: boolean }): Promise<string> {
+    const response = await apiClient.get<{ download_url: string; expires_in: number; filename?: string }>(
+      `/api/v1/documents/${id}/download${opts?.attachment ? '?as_attachment=true' : ''}`
     );
     return response.download_url;
   },

@@ -28,6 +28,10 @@
 
 import type { Severity } from './robForm';
 
+// Re-exported so the screens have ONE place to import the vocabulary of a
+// risk-of-bias judgement from, next to the algorithm that produces it.
+export type { Severity };
+
 // ── The answer vocabulary ────────────────────────────────────────────────────
 
 /** RoB 2's five responses, plus the routed-out state. */

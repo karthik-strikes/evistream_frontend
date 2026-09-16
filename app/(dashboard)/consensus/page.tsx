@@ -26,6 +26,7 @@ import { Tooltip } from '@/components/ui/tooltip';
 import { EmptyState } from '@/components/ui';
 import { RingChart } from './_components/RingChart';
 import { AgreedFieldRow, UnifiedFieldCard, type EvidenceMeta } from './_components/UnifiedFieldCard';
+import { boxesFromLocation, type EvidenceBoxes } from '@/lib/sourceBoxes';
 import {
   decisionFromResolutionSource,
   isFieldResolved,
@@ -55,7 +56,13 @@ const PdfHighlightViewer = dynamic(
 type FilterTab = 'all' | 'needs_review' | 'disputed' | 'done';
 type Screen = 'dashboard' | 'review' | 'summary';
 
-type SourceMeta = { source_text?: string; page?: number; section?: string };
+type SourceMeta = {
+  source_text?: string;
+  page?: number;
+  section?: string;
+  /** See lib/sourceBoxes: present only when the geometry's space is recorded. */
+  boxes?: EvidenceBoxes | null;
+};
 
 interface FieldDecision {
   fieldName: string;
@@ -212,8 +219,15 @@ function extractMeta(raw: any): SourceMeta | undefined {
   const text = typeof raw.source_text === 'string' && raw.source_text.trim() && raw.source_text !== 'NR' ? raw.source_text : undefined;
   const page = raw.source_location?.page ? Number(raw.source_location.page) : undefined;
   const section = typeof raw.source_location?.section === 'string' ? raw.source_location.section : undefined;
-  if (!text && !page) return undefined;
-  return { ...(text && { source_text: text }), ...(page && { page }), ...(section && { section }) };
+  // A drawn box is evidence with no words in it, so it counts on its own.
+  const boxes = boxesFromLocation(raw.source_location);
+  if (!text && !page && !boxes) return undefined;
+  return {
+    ...(text && { source_text: text }),
+    ...(page && { page }),
+    ...(section && { section }),
+    ...(boxes && { boxes }),
+  };
 }
 
 /**
@@ -417,7 +431,20 @@ function ConsensusContent() {
 
   // Track what sources are present for this doc
   const [hasR1R2, setHasR1R2] = useState(false);
+  // The exact reviewer rows this adjudication is resolving. `adjudication_results`
+  // has carried reviewer_1_result_id / reviewer_2_result_id since phase 2 and
+  // both live rows have them NULL, because these ids were computed here and then
+  // never sent — so a saved adjudication could not be traced to the answers it
+  // reconciled, and a later re-save by a reviewer was undetectable.
+  const [reviewerResultIds, setReviewerResultIds] = useState<{ r1?: string; r2?: string }>({});
   const [isAiOnly, setIsAiOnly] = useState(false);
+  // Both reader columns written by the SAME person. The screen shows two columns
+  // and an agreement percentage, which an adjudicator reasonably reads as two
+  // independent extractions agreeing — the one guarantee dual review exists to
+  // provide. Three live (document, form) pairs were in this state: someone saved
+  // as R2, was moved to R1, and saved again. Detected and shown, never silently
+  // compared.
+  const [sameAuthorBothSlots, setSameAuthorBothSlots] = useState(false);
 
   // Summary screen state (after submit)
   const [lastReviewDoc, setLastReviewDoc] = useState<ConsensusSummaryDoc | null>(null);
@@ -603,12 +630,32 @@ function ConsensusContent() {
       const aiResult = allResults.find((r: any) => r.extraction_type === 'ai');
       const r1Result = allResults.find((r: any) => r.reviewer_role === 'reviewer_1');
       const r2Result = allResults.find((r: any) => r.reviewer_role === 'reviewer_2');
-      // Fallback: manual extraction (not R1/R2-assigned) treated as R1
-      const manualResult = allResults.find((r: any) => r.extraction_type === 'manual' && !r.reviewer_role);
+      // Fallback: a role-less manual row stands in for R1 ONLY when this paper
+      // has no assigned readers at all — i.e. a solo or unassigned project,
+      // which is what this fallback was written for.
+      //
+      // It must not fire when readers ARE assigned: a paper can now be
+      // extracted by more people than there are seats, and those additional
+      // extractions are also role-less. Promoting one into the R1 column would
+      // put somebody who was never appointed in front of the adjudicator as
+      // "Reviewer 1" — and it would disagree with /adjudication/compare, which
+      // resolves the seats server-side.
+      const hasAssignedReaders = !!(assignmentMap.get(doc.document_id)?.['reviewer_1']
+        || assignmentMap.get(doc.document_id)?.['reviewer_2']);
+      const manualResult = hasAssignedReaders
+        ? undefined
+        : allResults.find((r: any) => r.extraction_type === 'manual' && !r.reviewer_role);
 
       const hasR1 = !!(r1Result || manualResult);
       const hasR2 = !!r2Result;
       setHasR1R2(hasR1 && hasR2);
+      setReviewerResultIds({
+        r1: (r1Result ?? manualResult)?.id,
+        r2: r2Result?.id,
+      });
+      const r1Author = (r1Result ?? manualResult)?.extracted_by;
+      const r2Author = r2Result?.extracted_by;
+      setSameAuthorBothSlots(!!r1Author && !!r2Author && r1Author === r2Author);
       setIsAiOnly(!!aiResult && !hasR1 && !hasR2);
 
       // Normalize AI data (strip .value suffix)
@@ -865,6 +912,8 @@ function ConsensusContent() {
           document_id: reviewDoc.document_id,
           field_resolutions: fieldResolutions,
           status: 'completed',
+          reviewer_1_result_id: reviewerResultIds.r1,
+          reviewer_2_result_id: reviewerResultIds.r2,
         });
       }
 
@@ -1162,6 +1211,23 @@ function ConsensusContent() {
 
     return (
       <DashboardLayout title="Consensus" description="Corpus-level consensus review" fullHeight>
+        {sameAuthorBothSlots && (
+          <div className="mb-3 flex flex-shrink-0 items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2.5 dark:border-amber-500/25 dark:bg-amber-500/10">
+            <AlertTriangle className="mt-px h-3.5 w-3.5 flex-shrink-0 text-amber-600 dark:text-amber-400" />
+            <div className="min-w-0">
+              <p className="text-[12.5px] font-semibold text-amber-900 dark:text-amber-200">
+                Both columns were extracted by the same person
+              </p>
+              <p className="mt-0.5 text-[11.5px] leading-relaxed text-amber-800/90 dark:text-amber-200/75">
+                These are not two independent extractions, so the agreement figure
+                below means nothing — a reviewer always agrees with themselves.
+                Usually this happens when someone saved under one reviewer role,
+                was moved to the other, and saved again. Have a second reviewer
+                extract this paper, or clear the duplicate, before adjudicating.
+              </p>
+            </div>
+          </div>
+        )}
         {/* Header */}
         <div className="mb-3 flex flex-shrink-0 items-center gap-2">
           <button
@@ -1201,6 +1267,7 @@ function ConsensusContent() {
                 documentId={reviewDoc.document_id}
                 filename={reviewDoc.study_label || reviewDoc.filename}
                 sourceText={evidenceFocus?.meta.source_text ?? null}
+                highlightBoxes={evidenceFocus?.meta.boxes ?? null}
                 initialPage={evidenceFocus?.meta.page ?? null}
                 storedValue={
                   evidenceFocus ? (typeof evidenceFocus.value === 'string' ? evidenceFocus.value : JSON.stringify(evidenceFocus.value)) : null
@@ -1208,6 +1275,9 @@ function ConsensusContent() {
                 fieldLabel={
                   evidenceFocus ? `${evidenceFocus.fieldLabel} · ${sourceColors(evidenceFocus.source).label}` : null
                 }
+                captionImage={evidenceFocus?.meta.caption_image ?? null}
+                figureImage={evidenceFocus?.meta.figure_image ?? null}
+                figureVerified={evidenceFocus?.meta.figure_verified ?? null}
               />
             </div>
           </Panel>
@@ -1311,13 +1381,19 @@ function ConsensusContent() {
                       onCorrection={v => updateCorrection(realIdx, v)}
                       isActive={activeField === realIdx}
                       onClick={() => setActiveField(realIdx)}
-                      onJumpToEvidence={(source, meta) => {
+                      onJumpToEvidence={(source, meta, opts) => {
                         setActiveField(realIdx);
                         setEvidenceFocus({
                           source,
-                          fieldLabel: f.field?.display_name || f.fieldName.replace(/_/g, ' '),
+                          // A table cell names itself (`opts.label`): "mean score
+                          // · row 2" beats the field name, which for a table is
+                          // the same string for every one of its cells.
+                          fieldLabel:
+                            opts?.label
+                            ?? f.field?.display_name
+                            ?? f.fieldName.replace(/_/g, ' '),
                           meta,
-                          value: f.sources[source],
+                          value: opts && 'value' in opts ? opts.value : f.sources[source],
                         });
                       }}
                     />

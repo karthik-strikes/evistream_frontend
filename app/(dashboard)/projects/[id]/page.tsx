@@ -258,46 +258,68 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
     );
   }
 
+  // Sections that bring their own cards - no outer container around them
+  const bareSection =
+    activeSection === 'assignments' || activeSection === 'members' || activeSection === 'scope';
+
   return (
     <DashboardLayout>
       <div className="p-6 max-w-5xl mx-auto">
 
         {/* Header */}
-        <div className="mb-6">
+        <div className={activeSection ? 'mb-3' : 'mb-6'}>
           <div className="flex items-start justify-between">
             <div className="flex items-start gap-4">
-              <button
-                onClick={() => router.push('/projects')}
-                aria-label="Back to projects"
-                className="mt-1 flex items-center justify-center w-8 h-8 rounded-lg border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 cursor-pointer hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors shrink-0"
-              >
-                <ArrowLeft size={15} />
-              </button>
-              <div>
-                <div className="flex items-center gap-2.5 mb-1">
-                  <h1 className={cn(typography.page.title, 'text-gray-900 dark:text-white m-0')}>
-                    {proj.name}
-                  </h1>
-                  {isActive && !isProjArchived && (
-                    <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15 px-2 py-0.5 rounded-full">
-                      Active
-                    </span>
-                  )}
-                  {isProjArchived && (
-                    <span className="text-[10px] font-semibold text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-400/15 px-2 py-0.5 rounded-full">
-                      Archived
-                    </span>
+              {activeSection ? (
+                /* Inside a section the section supplies its own heading, so the back
+                   control and the project name collapse into one quiet breadcrumb. */
+                <button
+                  onClick={() => setActiveSection(null)}
+                  title="Back to project hub"
+                  className="-ml-1 flex items-center gap-1.5 rounded-lg px-1 py-0.5 text-[13px] font-medium text-gray-400 dark:text-zinc-500 hover:text-gray-700 dark:hover:text-zinc-200 transition-colors"
+                >
+                  <ArrowLeft size={14} className="shrink-0" />
+                  {proj.name}
+                </button>
+              ) : (
+                <>
+                <button
+                  onClick={() => router.push('/projects')}
+                  aria-label="Back to projects"
+                  title="Back to projects"
+                  className="mt-1 flex items-center justify-center w-8 h-8 rounded-lg border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 cursor-pointer hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors shrink-0"
+                >
+                  <ArrowLeft size={15} />
+                </button>
+                <div>
+                  <div className="flex items-center gap-2.5">
+                    <h1 className={cn(typography.page.title, 'text-gray-900 dark:text-white m-0')}>
+                      {proj.name}
+                    </h1>
+                    {isActive && !isProjArchived && (
+                      <span className="text-[10px] font-semibold text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15 px-2 py-0.5 rounded-full">
+                        Active
+                      </span>
+                    )}
+                    {isProjArchived && (
+                      <span className="text-[10px] font-semibold text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-400/15 px-2 py-0.5 rounded-full">
+                        Archived
+                      </span>
+                    )}
+                  </div>
+                  {proj.description && (
+                    <p className={cn(typography.body.small, 'text-gray-400 dark:text-zinc-500 m-0 mt-1')}>
+                      {proj.description}
+                    </p>
                   )}
                 </div>
-                <p className={cn(typography.body.small, 'text-gray-400 dark:text-zinc-500 m-0')}>
-                  {proj.description || 'No description'}
-                </p>
-              </div>
+                </>
+              )}
             </div>
 
             <div className="flex items-center gap-2 shrink-0 mt-1">
               {/* Archived projects are hidden from the selector, so they can't be made active */}
-              {!isActive && !isProjArchived && (
+              {activeSection === null && !isActive && !isProjArchived && (
                 <button
                   onClick={handleSetActive}
                   disabled={submitting}
@@ -426,16 +448,8 @@ export default function ProjectDetailPage({ params }: { params: Promise<{ id: st
           /* Drilled-in section                                            */
           /* ============================================================ */
           <div>
-            <button
-              onClick={() => setActiveSection(null)}
-              className="flex items-center gap-1.5 text-sm font-medium text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-zinc-200 mb-4 transition-colors"
-            >
-              <ArrowLeft size={14} />
-              Back to hub
-            </button>
-
-            <div className="rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111]">
-              <div className="px-6 py-5">
+            <div className={bareSection ? '' : 'rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111]'}>
+              <div className={bareSection ? '' : 'px-6 py-5'}>
                 {activeSection === 'extractions' && (
                   <ExtractionsSection projectId={id} extractions={extractions} />
                 )}

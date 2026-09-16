@@ -8,6 +8,9 @@ import { useToast } from '@/hooks/use-toast';
 import { Avatar } from '@/components/ui/avatar';
 import { cn } from '@/lib/utils';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
+import {
+  PERMISSION_KEYS, PermissionGroupList, grantedCount, MICRO_LABEL,
+} from '@/components/project/permissionCatalog';
 
 interface UserResult {
   id: string;
@@ -24,7 +27,7 @@ interface ProjectMembersModalProps {
 
 const ROLE_OPTIONS: { value: ProjectRole; label: string; description: string }[] = [
   { value: 'owner',   label: 'Owner',   description: 'Full control — manage everything, promote/demote owners, delete the project' },
-  { value: 'manager', label: 'Manager', description: 'Full access — manage members, run extractions, reach consensus, QA review' },
+  { value: 'manager', label: 'Manager', description: 'Full access — manage members, run extractions, reach consensus' },
   { value: 'member',  label: 'Member',  description: 'Custom permissions — configure individual access below' },
   { value: 'viewer',  label: 'Viewer',  description: 'Read-only — can view documents and results only' },
 ];
@@ -42,17 +45,8 @@ const DEFAULT_MEMBER_PERMISSIONS = {
   can_manage_members: false,
 };
 
-const PERMISSION_LABELS: Record<string, string> = {
-  can_view_docs: 'View Documents',
-  can_upload_docs: 'Upload Documents',
-  can_create_forms: 'Create Forms',
-  can_run_extractions: 'Run AI Extractions',
-  can_run_manual_extractions: 'Run Manual Extractions',
-  can_view_results: 'View Results',
-  can_adjudicate: 'Consensus',
-  can_manage_assignments: 'Manage Assignments',
-  can_manage_members: 'Manage Members',
-};
+// Permission labels, descriptions and grouping live in permissionCatalog so the
+// invite dialog and the Members drawer always offer the identical set.
 
 export function ProjectMembersModal({ projectId, projectName, isOpen, onClose }: ProjectMembersModalProps) {
   const { toast } = useToast();
@@ -171,11 +165,11 @@ export function ProjectMembersModal({ projectId, projectName, isOpen, onClose }:
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
-        className="bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#1f1f1f] rounded-xl shadow-2xl w-full max-w-md"
+        className="bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#1f1f1f] rounded-xl shadow-2xl w-full max-w-lg max-h-[88vh] flex flex-col overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 dark:border-[#1f1f1f]">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100 dark:border-[#1f1f1f] shrink-0">
           <div>
             <h2 className="text-sm font-semibold text-gray-900 dark:text-white">Add Member</h2>
             {projectName && <p className="text-xs text-gray-400 mt-0.5">{projectName}</p>}
@@ -192,7 +186,7 @@ export function ProjectMembersModal({ projectId, projectName, isOpen, onClose }:
             <p className="text-xs text-gray-400 mt-1">You need member management permissions to add users.</p>
           </div>
         ) : (
-          <div className="px-5 py-4 space-y-4">
+          <div className="px-5 py-4 space-y-4 overflow-y-auto">
 
             {/* User search / selected */}
             <div className="space-y-1.5">
@@ -288,30 +282,29 @@ export function ProjectMembersModal({ projectId, projectName, isOpen, onClose }:
             {/* Individual permissions — only for Member role */}
             {selectedRole === 'member' && (
               <div className="space-y-2">
-                <label className="text-xs font-medium text-gray-500 dark:text-gray-400 uppercase tracking-wide">Permissions</label>
-                <div className="grid grid-cols-2 gap-y-2 gap-x-4">
-                  {(Object.keys(PERMISSION_LABELS) as Array<keyof typeof DEFAULT_MEMBER_PERMISSIONS>)
-                    .filter((perm) => perm !== 'can_manage_members' && perm !== 'can_manage_assignments')
-                    .map((perm) => (
-                    <label key={perm} className="flex items-center gap-2 text-sm text-gray-600 dark:text-gray-300 cursor-pointer select-none">
-                      <input
-                        type="checkbox"
-                        checked={memberPerms[perm]}
-                        onChange={(e) => setMemberPerms((prev) => ({ ...prev, [perm]: e.target.checked }))}
-                        className="w-3.5 h-3.5 rounded accent-gray-900 dark:accent-white"
-                      />
-                      {PERMISSION_LABELS[perm]}
-                    </label>
-                  ))}
+                <div className="flex items-end justify-between gap-3">
+                  <label className={MICRO_LABEL}>Custom permissions</label>
+                  <span className="text-[11px] font-semibold tabular-nums text-gray-400 dark:text-zinc-600">
+                    {grantedCount(memberPerms)} of {PERMISSION_KEYS.length} on
+                  </span>
                 </div>
+                <PermissionGroupList
+                  value={memberPerms}
+                  onChange={(key, next) => setMemberPerms((prev) => ({ ...prev, [key]: next }))}
+                />
               </div>
             )}
 
-            {/* Invite button */}
+          </div>
+        )}
+
+        {/* Footer — kept out of the scroll area so the primary action is always reachable */}
+        {!notOwner && (
+          <div className="shrink-0 border-t border-gray-100 dark:border-[#1f1f1f] px-5 py-3.5">
             <button
               onClick={handleInvite}
               disabled={inviting || !selected}
-              className="w-full flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-sm font-semibold text-white bg-gray-900 dark:bg-white dark:text-gray-900 rounded-lg hover:opacity-90 disabled:opacity-40 transition-opacity"
+              className="w-full flex items-center justify-center gap-1.5 px-3.5 py-2.5 text-sm font-semibold text-white bg-gray-900 dark:bg-white dark:text-gray-900 rounded-xl hover:opacity-90 disabled:opacity-40 transition-opacity"
             >
               <UserPlus className="h-3.5 w-3.5" />
               {inviting ? 'Adding…' : 'Add member'}

@@ -44,8 +44,8 @@ export type Decision =
 /**
  * How the field was settled, as stored in `field_resolutions[*].resolution_source`
  * and validated by the backend's `ResolutionSource` Literal. This is the
- * provenance of `final_value` for `data_cleaning_service` and every export, so a
- * wrong label silently poisons any later audit of who decided what.
+ * provenance of `final_value` for every export, so a wrong label silently
+ * poisons any later audit of who decided what.
  */
 export type ResolutionSource =
   | 'agreed'
