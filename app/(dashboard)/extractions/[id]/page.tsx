@@ -89,6 +89,12 @@ export default function ExtractionDetailPage() {
   const [activeTab, setActiveTab] = useState<TabType>('papers');
   const [logs, setLogs] = useState<LogMessage[]>([]);
   const [isExportingCSV, setIsExportingCSV] = useState(false);
+  /** Add the page and quote each value came from, as two extra columns per
+   *  field. Off by default: the stored `source_location` was always dropped
+   *  from exports as too verbose, which left provenance invisible the moment
+   *  the data left the app — this is the opt-in that was missing, not a change
+   *  to what an existing export contains. */
+  const [includeSources, setIncludeSources] = useState(false);
   const [isExportingJSON, setIsExportingJSON] = useState(false);
   const [isRetrying, setIsRetrying] = useState(false);
   const [isRetryingFields, setIsRetryingFields] = useState(false);
@@ -179,7 +185,7 @@ export default function ExtractionDetailPage() {
     if (!extractionId) return;
     try {
       setIsExportingCSV(true);
-      const blob = await resultsService.exportCSV({ extractionId });
+      const blob = await resultsService.exportCSV({ extractionId, includeSources });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -197,7 +203,7 @@ export default function ExtractionDetailPage() {
     if (!extractionId) return;
     try {
       setIsExportingJSON(true);
-      const blob = await resultsService.exportJSON({ extractionId });
+      const blob = await resultsService.exportJSON({ extractionId, includeSources });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -628,6 +634,21 @@ export default function ExtractionDetailPage() {
                 <p className="text-sm text-gray-600 dark:text-zinc-400">
                   Download extraction results in your preferred format.
                 </p>
+                <label className="flex w-fit cursor-pointer select-none items-start gap-2">
+                  <input
+                    type="checkbox"
+                    checked={includeSources}
+                    onChange={e => setIncludeSources(e.target.checked)}
+                    className="mt-0.5 h-3.5 w-3.5 rounded border-gray-300 accent-violet-500 dark:border-zinc-600"
+                  />
+                  <span className="text-xs text-gray-600 dark:text-zinc-400">
+                    Include where each value came from
+                    <span className="block text-[11px] text-gray-400 dark:text-zinc-500">
+                      Adds two columns per field — the page and the quoted sentence. Scalar
+                      fields only; a table&rsquo;s evidence sits inside its rows.
+                    </span>
+                  </span>
+                </label>
                 <div className="flex items-center gap-3">
                   <Button
                     onClick={handleExportCSV}

@@ -370,6 +370,7 @@ export function RowDefinitionSection({
 //    tableModeProps — Fast is the default at every column count; the modes are
 //    named in TABLE_MODE_META above, over unchanged stored values) ──
 
+
 export function FieldEditorPane({ field, cal, editable, structuralEditable = editable, simple = false, focusSubfield = null, tableModeProps, rowDefProps, onFieldPatch, onCalPatch }: FieldEditorPaneProps) {
   const ml = "text-[11px] font-semibold text-gray-500 dark:text-zinc-400 uppercase tracking-wider";
   const fname = field.field_name;
@@ -449,6 +450,39 @@ export function FieldEditorPane({ field, cal, editable, structuralEditable = edi
             )}
           </div>
         </div>
+
+        {/* The flag manual extraction's validation reads.
+            Nothing in this editor could set it, so on every live form
+            `required` was simply absent — and the extraction screen treats
+            absent as optional, which left its red rings, its auto-expanding
+            row and its "you missed this" message unreachable. NR and NA count
+            as answers, so requiring a field asks for a decision, not prose. */}
+        {editable && !isTableField && (
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={field.required === true}
+              onChange={e => onFieldPatch({ required: e.target.checked })}
+              className="w-3.5 h-3.5 rounded border-gray-300 dark:border-zinc-600 accent-violet-500"
+            />
+            <span className="text-[11px] text-gray-500 dark:text-zinc-400">
+              Required — a reviewer cannot save this form until it is answered (NR / NA count)
+            </span>
+          </label>
+        )}
+        {editable && isTableField && (
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={field.required === true}
+              onChange={e => onFieldPatch({ required: e.target.checked })}
+              className="w-3.5 h-3.5 rounded border-gray-300 dark:border-zinc-600 accent-violet-500"
+            />
+            <span className="text-[11px] text-gray-500 dark:text-zinc-400">
+              Required — this table needs at least one row, and every required column filled
+            </span>
+          </label>
+        )}
       </div>
 
       {/* Table callout */}
@@ -614,6 +648,20 @@ export function FieldEditorPane({ field, cal, editable, structuralEditable = edi
                       <input value={sf.field_description || ''} onChange={e => patchSf({ field_description: e.target.value })}
                         placeholder="Description (tells the LLM what this column means)"
                         className="w-full text-xs bg-gray-50 dark:bg-[#141414] border border-gray-200 dark:border-[#2a2a2a] rounded-md px-2 py-1.5 text-gray-800 dark:text-zinc-200 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none" />
+                      {/* Per column, because that is the granularity the
+                          extraction screen validates at — it rings the
+                          offending cell and opens the row it is in. */}
+                      <label className="flex items-center gap-1.5 cursor-pointer select-none">
+                        <input
+                          type="checkbox"
+                          checked={sf.required === true}
+                          onChange={e => patchSf({ required: e.target.checked })}
+                          className="w-3 h-3 rounded border-gray-300 dark:border-zinc-600 accent-violet-500"
+                        />
+                        <span className="text-[10.5px] text-gray-400 dark:text-zinc-500">
+                          Required in every row
+                        </span>
+                      </label>
                       {sf.field_type === 'select' && (
                         <div className="flex flex-col gap-1 mt-1 pt-1.5 border-t border-gray-100 dark:border-[#1f1f1f]">
                           <div className="flex items-center justify-between gap-2">

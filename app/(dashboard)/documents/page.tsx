@@ -23,7 +23,7 @@ import { LabelChip } from '@/components/documents/DocumentTags';
 import { EndNoteImportDialog } from '@/components/documents/EndNoteImportDialog';
 import { CitationImportDialog } from '@/components/documents/CitationImportDialog';
 import type { LiteratureScope } from '@/services/literature.service';
-import { buildLabelMap } from '@/lib/documentLabel';
+import { buildLabelMap, studyFileName } from '@/lib/documentLabel';
 
 interface StagedFile {
   file: File;
@@ -180,7 +180,10 @@ export default function DocumentsPage() {
       const worker = async () => {
         while (queue.length) {
           const doc = queue.shift()!;
-          const base = (doc.filename || `document-${doc.id}`).replace(/\.pdf$/i, '');
+          // Named by the study ID the rows show ("Badadare_2024.pdf"), not by
+          // the stored filename — which for a reference import is the full
+          // article title.
+          const base = studyFileName(docLabels[doc.id] || `document-${doc.id}`, doc.filename).replace(/\.pdf$/i, '');
           try {
             if (kind === 'md') {
               if (doc.processing_status !== 'completed') { failed++; continue; }
@@ -594,12 +597,16 @@ export default function DocumentsPage() {
     }
   };
 
-  const handleDownload = async (documentId: string, filename: string) => {
+  const handleDownload = async (documentId: string, label: string) => {
     try {
-      const url = await documentsService.getDownloadUrl(documentId);
+      // attachment: the S3 link is cross-origin, so the `download` attribute
+      // below is advisory at best — the saved name comes from the backend's
+      // Content-Disposition. Without it the browser uses the URL's last path
+      // segment, which is the 64-character content hash.
+      const url = await documentsService.getDownloadUrl(documentId, { attachment: true });
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', filename);
+      link.setAttribute('download', studyFileName(label));
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -1207,7 +1214,11 @@ export default function DocumentsPage() {
                             setViewingTrialDoc(doc);
                             return;
                           }
-                          handleOpenPdf(doc.id, doc.processing_status);
+                          // A PDF-backed document has a detail page: the paper,
+                          // the values read out of its figures, and anything
+                          // attached to it. The PDF itself is one click further
+                          // in, on that page's [View PDF] button.
+                          router.push(`/documents/${doc.id}`);
                         }}
                       >
                         {/* Checkbox — nudged to sit on the title's first line now
@@ -1444,7 +1455,7 @@ export default function DocumentsPage() {
                           <span className="shrink-0 select-none font-serif italic leading-none text-3xl sm:text-6xl text-gray-200 dark:text-zinc-800">
                             {String(doc.ref_id).padStart(2, '0')}
                           </span>
-                          {((can_upload_docs && doc.processing_status === 'failed') || (can_upload_docs && !isEditing) || canDeleteDocs) && (
+                          {(!!doc.s3_pdf_path || (can_upload_docs && doc.processing_status === 'failed') || (can_upload_docs && !isEditing) || canDeleteDocs) && (
                             <DropdownMenu>
                               <DropdownMenuTrigger asChild>
                                 <button className="w-7 h-7 flex items-center justify-center rounded-md text-gray-400 dark:text-zinc-500 hover:bg-gray-100 dark:hover:bg-[#1f1f1f] transition-colors">
@@ -1456,6 +1467,12 @@ export default function DocumentsPage() {
                                   <DropdownMenuItem onClick={() => handleReprocess(doc.id)} disabled={reprocessingId === doc.id}>
                                     <RotateCcw className="w-3.5 h-3.5" />
                                     {reprocessingId === doc.id ? 'Retrying...' : 'Retry'}
+                                  </DropdownMenuItem>
+                                )}
+                                {doc.s3_pdf_path && (
+                                  <DropdownMenuItem onClick={() => handleDownload(doc.id, titleText)}>
+                                    <Download className="w-3.5 h-3.5" />
+                                    Download PDF
                                   </DropdownMenuItem>
                                 )}
                                 {can_upload_docs && !isEditing && (

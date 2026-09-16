@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect } from 'react';
+import type { EvidenceBoxes } from '@/lib/sourceBoxes';
 import dynamic from 'next/dynamic';
 import { cn } from '@/lib/utils';
 import { MetadataSourceEvidence } from './MetadataSourceEvidence';
@@ -20,6 +21,10 @@ const PdfHighlightViewer = dynamic(
 );
 
 export interface SourceEvidenceDrawerProps {
+  /** Stored rectangles for this cell's evidence, drawn as-is by the viewer.
+   *  This is how a reviewer's own selection — or a box they dragged round a
+   *  figure or a scanned page — shows up again instead of just a page number. */
+  boxes?: EvidenceBoxes | null;
   open: boolean;
   onClose: () => void;
   documentId: string | null;
@@ -31,7 +36,10 @@ export interface SourceEvidenceDrawerProps {
   storedValue?: string | null;
   /** Column / field name shown in the location badge. */
   fieldLabel?: string;
-  /** Currently unused (kept for backwards-compat with older call sites). */
+  /** 1-indexed page the extractor recorded. Forwarded to the viewer as its
+   *  last-resort landing page: it never overrides a real match, so a quote that
+   *  locates cleanly is unaffected, and one that doesn't now opens on the right
+   *  page instead of page 1. */
   page?: number | null;
   onPrev?: () => void;
   onNext?: () => void;
@@ -56,6 +64,16 @@ export interface SourceEvidenceDrawerProps {
   /** Filename of the figure the quote was read from, when it came from an
    *  automatic figure description. Lets the viewer highlight the picture. */
   captionImage?: string | null;
+  /** True when the quote is a row of a figure table we digitized ourselves and
+   *  spliced into the markdown at extraction time. Unlike a synthetic caption,
+   *  this quote is a verbatim line of the text the model read — it is not
+   *  inferred — but the numbers came off a chart by machine, so the reviewer
+   *  must be told to check them against the picture. */
+  fromFigure?: boolean;
+  /** Filename of that figure. Lets the viewer highlight it. */
+  figureImage?: string | null;
+  /** Whether a person had confirmed the figure's table at extraction time. */
+  figureVerified?: boolean | null;
 }
 
 /**
@@ -85,8 +103,13 @@ export function SourceEvidenceDrawer({
   sourceType,
   recordId,
   doi,
+  page = null,
   syntheticCaption = false,
   captionImage = null,
+  fromFigure = false,
+  figureImage = null,
+  figureVerified = null,
+  boxes = null,
 }: SourceEvidenceDrawerProps) {
   // Wrap onClose so we blur whatever button is focused inside the drawer
   // BEFORE flipping aria-hidden to true on its ancestor. Otherwise Chrome
@@ -141,7 +164,59 @@ export function SourceEvidenceDrawer({
         {/* Body — PdfHighlightViewer owns the entire chrome now (filename,
             page input, zoom, prev/next, close all live in its header). */}
         <div className="relative flex-1 min-h-0 bg-gray-50 p-3 dark:bg-[#0a0a0a]">
-          {syntheticCaption && (
+          {fromFigure ? (
+            <div className={cn(
+              'mb-2 flex items-start gap-2.5 rounded-lg border px-3 py-2',
+              figureVerified
+                ? 'border-teal-200/70 bg-teal-50/50 dark:border-teal-900/40 dark:bg-teal-950/20'
+                : 'border-amber-200/80 bg-amber-50/70 dark:border-amber-900/40 dark:bg-amber-950/25',
+            )}>
+              <span
+                aria-hidden
+                className={cn(
+                  'mt-[5px] h-1.5 w-1.5 flex-shrink-0 rounded-full',
+                  figureVerified
+                    ? 'bg-teal-500 dark:bg-teal-400'
+                    : 'bg-amber-500 dark:bg-amber-400',
+                )}
+              />
+              <p className={cn(
+                'text-[11.5px] leading-relaxed',
+                figureVerified
+                  ? 'text-teal-900 dark:text-teal-200/90'
+                  : 'text-amber-900 dark:text-amber-200/90',
+              )}>
+                {figureVerified ? (
+                  <>
+                    <span className="font-semibold">Read from a figure, checked by a reviewer.</span>{' '}
+                    This value comes from the figure&rsquo;s digitized table, which a person has
+                    confirmed against the chart.
+                  </>
+                ) : (
+                  <>
+                    <span className="font-semibold">Read from a figure.</span>{' '}
+                    These numbers were read off the chart image by a model and have not been
+                    checked by a person. The figure is highlighted below — read the value off it
+                    before accepting.
+                  </>
+                )}
+                {documentId && (
+                  <>
+                    {' '}
+                    <a
+                      href={`/documents/${documentId}#figures`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="font-medium underline underline-offset-2 hover:opacity-80"
+                    >
+                      Open the figure card
+                    </a>
+                    {' '}to correct it.
+                  </>
+                )}
+              </p>
+            </div>
+          ) : syntheticCaption ? (
             <div className="mb-2 flex items-start gap-2.5 rounded-lg border border-amber-200/80 bg-amber-50/70 px-3 py-2 dark:border-amber-900/40 dark:bg-amber-950/25">
               <span
                 aria-hidden
@@ -156,7 +231,7 @@ export function SourceEvidenceDrawer({
                   : ' Check it against the figure itself before accepting the value.'}
               </p>
             </div>
-          )}
+          ) : null}
           {!hasPdf && (sourceType === 'ctgov' || sourceType === 'pubmed') ? (
             <MetadataSourceEvidence
               documentId={documentId}
@@ -185,7 +260,11 @@ export function SourceEvidenceDrawer({
               onNext={onNext}
               hasPrev={hasPrev}
               hasNext={hasNext}
+              initialPage={page}
               captionImage={captionImage}
+              figureImage={figureImage}
+              highlightBoxes={boxes ?? null}
+              figureVerified={figureVerified}
             />
           )}
         </div>

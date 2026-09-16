@@ -64,6 +64,16 @@ export interface QuoteMatch {
   localStart: number;
   /** localStart + matched.length. */
   localEnd: number;
+  /** How the block was found.
+   *
+   *  'text'  — matched against block.text; `confidence` is a text-similarity
+   *            score and may be shown to the reviewer as one.
+   *  'image' — found by image-filename identity. `confidence` is 1.0 because
+   *            the join is structural, and it says NOTHING about the quote.
+   *            Never render it as "Verbatim".
+   *
+   *  Optional so existing constructions keep working; absent means 'text'. */
+  kind?: 'text' | 'image';
 }
 
 const PAGE_ID_RE = /\/page\/(\d+)\//;
@@ -203,6 +213,7 @@ export function findQuoteInBlocks(
         confidence: m.confidence,
         localStart: 0,
         localEnd: block.text.length,
+        kind: 'text',
       };
       if (best.confidence >= 1.0) return best; // exact — early exit
     }
@@ -221,7 +232,10 @@ export function findQuoteInBlocks(
  * shown" for the same figure), so matching on text would miss.
  *
  * Confidence is 1.0 because this is a structural identity, not a fuzzy text
- * match — the block literally contains the image the caption describes.
+ * match — the block literally contains the image the caption describes. That
+ * 1.0 is NOT a statement about the quote, so the returned match is tagged
+ * `kind: 'image'`; rendering it through a text-confidence label would tell the
+ * reviewer the quote was found "Verbatim" in the PDF when it never was.
  */
 export function findBlockByImageFile(
   blocks: FlatBlock[],
@@ -230,7 +244,7 @@ export function findBlockByImageFile(
   if (!imageFile || !blocks.length) return null;
   for (const block of blocks) {
     if (block.imageFiles?.includes(imageFile)) {
-      return { block, confidence: 1.0, localStart: 0, localEnd: block.text.length };
+      return { block, confidence: 1.0, localStart: 0, localEnd: block.text.length, kind: 'image' };
     }
   }
   return null;

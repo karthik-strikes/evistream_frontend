@@ -51,6 +51,19 @@ export interface SourceLocation {
   /** Filename of the figure a synthetic caption describes — the viewer's join
    *  key for highlighting the picture instead of the caption text. */
   caption_image?: string;
+  /** True when the quote landed inside a figure table spliced into the markdown
+   *  at extraction time (backend/utils/figure_splice.py). Such a row IS a
+   *  verbatim line of the text the model read — it is not inferred — but it is
+   *  a machine's reading of a chart rather than the authors' words, and it does
+   *  not exist in the PDF's text layer at all. */
+  from_figure?: boolean;
+  /** Filename of the figure the row was read off. The join key for both the
+   *  blocks sidecar (findBlockByImageFile) and GET /documents/{id}/figures. */
+  figure_image?: string;
+  /** Whether a reviewer had confirmed that figure's table AT EXTRACTION TIME.
+   *  Baked into the splice fence, so it goes stale — prefer the live figure
+   *  record (useDocumentFigure) wherever one is loaded. */
+  figure_verified?: boolean;
 }
 
 /** The `{value, source_text, status}` envelope every extracted field uses. */
@@ -61,6 +74,11 @@ export interface ValueCell {
   status?: string;
   error?: string;
   off_options?: string[];
+  /** Who touched this cell and what it said before — stamped server-side by
+   *  `backend/utils/provenance.py` on every human save. Typed and read in
+   *  `lib/provenance.ts`; `unknown` here so this module keeps no dependency on
+   *  it (absence.ts is imported by nearly everything). */
+  provenance?: unknown;
 }
 
 /** Fixed canonical labels. The spec controls meaning via options, not the glyph. */

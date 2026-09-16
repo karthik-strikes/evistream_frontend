@@ -4,18 +4,16 @@
  *   node --experimental-strip-types --import ./lib/__checks__/register-alias.mjs \
  *        lib/__checks__/robForm.check.mts
  *
- * The instrument, the form binding and the judgment translation are checked in
- * `robAdapter.check.mts` against the six real forms. What is left here is the
- * shared scale, the overall rule, envelope reading, and where a study sits in
- * the dual-review pipeline — none of which depend on which tool is in use.
+ * The instrument and the form binding are checked in `robAdapter.check.mts`
+ * against the six real forms, and the algorithm in `rob2.check.mts`. What is
+ * left here is reading a stored cell: the `{value, source_text}` envelope and
+ * the two shapes a repeating table is stored in — neither of which depends on
+ * which tool is in use.
  */
 
 import {
-  assessmentStatus,
   cellValue,
-  overallSeverity,
   rowsOf,
-  type Severity,
 } from '../../app/(dashboard)/risk-of-bias/_lib/robForm.ts';
 
 let passed = 0;
@@ -27,25 +25,7 @@ function check(name: string, condition: boolean, detail = ''): void {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. Overall — worst domain wins, and incomplete never reads as Low
-// ─────────────────────────────────────────────────────────────────────────────
-{
-  const all = (s: Severity[]) => overallSeverity(s);
-  check('all low gives low', all(['low', 'low', 'low', 'low', 'low']) === 'low');
-  check('one concern makes it a concern', all(['low', 'some', 'low']) === 'some');
-  check('one high makes it high', all(['low', 'some', 'high', 'low']) === 'high');
-  check('high beats concerns', all(['some', 'high', 'some']) === 'high');
-  check('order does not matter', all(['high', 'low']) === all(['low', 'high']));
-
-  // The safety property: a half-finished assessment must not look clean.
-  check('an unassessed domain makes the overall unassessed',
-    all(['low', 'low', 'none', 'low']) === 'none');
-  check('unassessed wins even over high', all(['high', 'none']) === 'none');
-  check('no domains at all is unassessed', all([]) === 'none');
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. Reading extraction records
+// Reading a stored cell
 // ─────────────────────────────────────────────────────────────────────────────
 {
   const wrapped = {
@@ -67,29 +47,6 @@ function check(name: string, condition: boolean, detail = ''): void {
   check('a missing column reads empty', cellValue({ c: 'x' }, 'other') === '');
   check('a null column reads empty', cellValue({ c: 'x' }, null) === '');
   check('whitespace is trimmed', cellValue({ c: '  Low  ' }, 'c') === 'Low');
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. Status through the dual-review pipeline
-// ─────────────────────────────────────────────────────────────────────────────
-{
-  const st = (o: Partial<Parameters<typeof assessmentStatus>[0]>) => assessmentStatus({
-    hasAi: false, hasR1: false, hasR2: false, hasAdjudication: false, agreementPct: null, ...o,
-  });
-
-  check('nothing at all is not assessed', st({}) === 'none');
-  check('only an AI pass is a draft', st({ hasAi: true }) === 'draft');
-  check('one reviewer is awaiting the other', st({ hasAi: true, hasR1: true }) === 'awaiting');
-  check('R2 alone also awaits', st({ hasR2: true }) === 'awaiting');
-  check('both reviewers agreeing is agreed',
-    st({ hasR1: true, hasR2: true, agreementPct: 100 }) === 'agreed');
-  check('both reviewers disagreeing is a conflict',
-    st({ hasR1: true, hasR2: true, agreementPct: 80 }) === 'conflict');
-  check('adjudication settles it whatever came before',
-    st({ hasR1: true, hasR2: true, agreementPct: 20, hasAdjudication: true }) === 'agreed');
-  // Unknown agreement must not be invented into a conflict.
-  check('unknown agreement with both reviewers is not a conflict',
-    st({ hasR1: true, hasR2: true, agreementPct: null }) === 'agreed');
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

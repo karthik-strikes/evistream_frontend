@@ -222,6 +222,7 @@ export function ReviewScopeSection({
         </p>
       </div>
 
+      <div className="rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] p-5 space-y-5">
       {mode === 'guided' ? (
         <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1fr)_300px] gap-6">
           {/* ---- chips ---- */}
@@ -399,6 +400,7 @@ export function ReviewScopeSection({
             </Button>
           </div>
         )}
+      </div>
       </div>
 
       <ScopeSuggestionDialog

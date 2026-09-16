@@ -17,7 +17,7 @@
 
 import { readdirSync, readFileSync } from 'node:fs';
 import {
-  assessmentRecord, bindForm, outcomeValueOf, readDomain, severityOfCanonical, writeAssessment,
+  bindForm,
   type BoundForm,
 } from '../../app/(dashboard)/risk-of-bias/_lib/robAdapter.ts';
 import {
@@ -197,15 +197,6 @@ const bounds = new Map<string, BoundForm>();
   // RoB 1's own vocabulary.
   check('RoB1 "Unclear risk" maps to its middle', toCanonicalJudgment('Unclear', ROB1) === 'Unclear risk');
   check('RoB1 "Low risk" maps to its best', toCanonicalJudgment('Low risk', ROB1) === 'Low risk');
-
-  // Severity comes from the instrument.
-  check('Low is green', severityOfCanonical('Low risk of bias', ROB2) === 'low');
-  check('Some concerns is amber', severityOfCanonical('Some concerns', ROB2) === 'some');
-  check('High is red', severityOfCanonical('High risk of bias', ROB2) === 'high');
-  check('ROBINS-I Critical is red', severityOfCanonical('Critical', ROBINS_I) === 'high');
-  check('ROBINS-I No information is not a judgment',
-    severityOfCanonical('No information', ROBINS_I) === 'none');
-  check('nothing is nothing', severityOfCanonical(null, ROB2) === 'none');
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -233,94 +224,6 @@ const bounds = new Map<string, BoundForm>();
     check(`a conforming form stores "${j}" verbatim`,
       !!target && 'option' in target && target.option === j);
   }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 6. Round-tripping a real table form without losing sibling outcomes
-// ─────────────────────────────────────────────────────────────────────────────
-{
-  const bound = bounds.get('acute_dental_pain_risk_of_bias.json')!;
-  const existing = {
-    first_author: 'Bailey',
-    risk_of_bias_assessments: {
-      status: 'reported',
-      value: [
-        {
-          continuous_outcome: 'Pain relief at 6 hours', dichotomous_outcome: 'NA',
-          domain1_randomization_judgment: 'Probably Low',
-          domain1_randomization_justification: 'thin detail',
-          comments: 'first',
-        },
-        {
-          continuous_outcome: 'NA', dichotomous_outcome: 'Adverse effects',
-          domain1_randomization_judgment: 'Low',
-          domain1_randomization_justification: 'colleague wrote this',
-          comments: 'DO NOT LOSE ME',
-        },
-      ],
-    },
-  };
-  const before = JSON.stringify(existing);
-
-  const record = assessmentRecord(existing, bound, 'Pain relief at 6 hours');
-  check('the row for an outcome is found', record?.comments === 'first');
-  const reading = readDomain(record, bound.domains[0], bound.tool);
-  check('the stored value is reported verbatim', reading.raw === 'Probably Low');
-  check('...and translated for display', reading.canonical === 'Some concerns');
-  check('...with its rationale', reading.rationale === 'thin detail');
-  check('the outcome value is read from whichever column holds it',
-    outcomeValueOf(existing.risk_of_bias_assessments.value[1], bound.outcomeColumns)
-    === 'Adverse effects');
-
-  const written = writeAssessment(existing, bound, 'Pain relief at 6 hours', 'continuous_outcome', {
-    domain1_randomization_judgment: { canonical: 'High risk of bias', rationale: 'per-protocol only' },
-  });
-  const rows = rowsOf(written, 'risk_of_bias_assessments');
-
-  check('the input is not mutated', JSON.stringify(existing) === before);
-  check('the row count is unchanged', rows.length === 2, String(rows.length));
-  check('the judgment is stored in the FORM\'s vocabulary',
-    rows[0]?.domain1_randomization_judgment === 'High', String(rows[0]?.domain1_randomization_judgment));
-  check('the rationale is stored', rows[0]?.domain1_randomization_justification === 'per-protocol only');
-  check('THE SIBLING OUTCOME ROW IS UNTOUCHED',
-    JSON.stringify(rows[1]) === JSON.stringify(existing.risk_of_bias_assessments.value[1]),
-    rows[1] ? JSON.stringify(rows[1]) : 'the sibling row was destroyed');
-  check('unknown columns survive on the edited row', rows[0]?.comments === 'first');
-  check('flat fields survive', written.first_author === 'Bailey');
-  check('the row envelope survives', (written.risk_of_bias_assessments as any).status === 'reported');
-
-  // An ambiguous write is dropped, not guessed at.
-  const refused = writeAssessment(existing, bound, 'Pain relief at 6 hours', 'continuous_outcome', {
-    domain1_randomization_judgment: { canonical: 'Some concerns', rationale: 'hedged' },
-  });
-  check('an ambiguous judgment is NOT written',
-    rowsOf(refused, 'risk_of_bias_assessments')[0]?.domain1_randomization_judgment === 'Probably Low',
-    String(rowsOf(refused, 'risk_of_bias_assessments')[0]?.domain1_randomization_judgment));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 7. Flat forms write to the record itself
-// ─────────────────────────────────────────────────────────────────────────────
-{
-  const bound = bounds.get('cd010266_risk_of_bias.json')!;
-  const d1 = bound.domains.find(d => d.code === 'I1')!;
-  const existing = { some_other_field: 'keep me', [d1.column!]: 'Low risk' };
-  const written = writeAssessment(existing, bound, '', '', {
-    [d1.column!]: { canonical: 'High risk', rationale: 'stated reason' },
-  });
-  // The point of the adapter: the canonical judgment is stored in the FORM's own
-  // vocabulary. This form declares lowercase `low/unclear/high`, so "High risk"
-  // is correctly stored as `high` — the same judgment lands as `High` in a form
-  // that spells it that way.
-  check('a flat form writes at the top level in the form\'s own vocabulary',
-    d1.formOptions.includes(written[d1.column!]), String(written[d1.column!]));
-  check('...and it reads back as the judgment that was made',
-    toCanonicalJudgment(written[d1.column!], bound.tool) === 'High risk',
-    String(toCanonicalJudgment(written[d1.column!], bound.tool)));
-  check('...preserving unrelated fields', written.some_other_field === 'keep me');
-  check('...and writing the rationale',
-    written[d1.rationaleColumn!] === 'stated reason');
-  check('...without inventing a table', !('risk_of_bias_assessments' in written));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

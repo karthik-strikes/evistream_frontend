@@ -144,6 +144,77 @@ export interface Document {
    *  accepted this thin-evidence document for extraction. Kept separate from the
    *  status so "the evidence was thin" survives approval. */
   metadata_extraction_approved?: boolean;
+  /** Content hash of the PDF. Names every derived S3 artifact for this document
+   *  (markdown, blocks, images, figures), so the detail page needs it. */
+  content_hash?: string | null;
+  /** Figure images extracted by the parser and stored. */
+  image_count?: number | null;
+  blocks_status?: 'pending' | 'completed' | 'failed' | null;
+  blocks_error?: string | null;
+  /** Figure digitization. `figure_count` is tri-state: null = never attempted,
+   *  0 = attempted and the paper has no data figures, n = n reviewable tables. */
+  figures_status?: 'pending' | 'completed' | 'failed' | null;
+  figures_error?: string | null;
+  figure_count?: number | null;
+}
+
+/** One cell of a digitized figure table — the same {value, source_text, status}
+ *  envelope every extracted field uses (lib/absence.ts). */
+export interface FigureCell {
+  value: string;
+  source_text?: string;
+  status?: string;
+}
+
+/** A figure read out of its image, with the metadata that makes the numbers
+ *  auditable and the state of a reviewer's check. */
+export interface DocumentFigure {
+  figure_id: string;
+  /** Filename, and the join key to GET /documents/{id}/images/{image}. */
+  image: string;
+  title: string | null;
+  page: number | null;
+  bbox: number[] | null;
+  block_type: string | null;
+  /** `completed` = a table was read. `not_a_chart` = a micrograph or diagram,
+   *  read successfully but with nothing to tabulate. `failed` = see `error`. */
+  status?: 'completed' | 'not_a_chart' | 'failed';
+  error?: string | null;
+  is_data_chart?: boolean;
+  columns?: string[];
+  rows?: Record<string, FigureCell>[];
+  x_axis_label?: string | null;
+  y_axis_label?: string | null;
+  y_axis_range?: string | null;
+  /** SEM | SD | IQR | 95% CI | range, as the caption names it. A mean without
+   *  its dispersion cannot enter a meta-analysis. */
+  dispersion_measure?: string | null;
+  /** The model's own assessment. A confident wrong answer is worse than an
+   *  uncertain one, so this drives what a reviewer checks first. */
+  confidence?: 'high' | 'medium' | 'low';
+  notes?: string | null;
+  verified?: boolean;
+  verified_by?: string | null;
+  verified_at?: string | null;
+  corrected_cells?: number;
+  digitized_at?: string | null;
+  prompt_version?: number;
+}
+
+export interface DocumentFiguresResponse {
+  figures: DocumentFigure[];
+  figures_status: 'pending' | 'completed' | 'failed' | null;
+  figures_error: string | null;
+  figure_count: number | null;
+}
+
+export interface SupplementaryFile {
+  id: string;
+  document_id: string;
+  filename: string;
+  size_bytes: number | null;
+  content_type: string | null;
+  created_at: string;
 }
 
 // ClinicalTrials.gov — normalized trial shape returned by
@@ -308,6 +379,12 @@ export interface FormField {
   // read with keyColumnsOf() and keep writing anchor_columns.
   key_columns?: string[];
   anchor_columns?: string[];
+  // Linked groups: what this column is a property of. On a subform column,
+  // 'study' | 'row' | `group:<name>`; absent means 'row', which is what every
+  // column did before scopes existed. On the table field itself, `groups` is
+  // the list of names that field declares. Read through _lib/linkedGroups.
+  scope?: string;
+  groups?: string[];
 }
 
 /**
@@ -344,6 +421,29 @@ export interface FieldEditUpdate {
   extraction_strategy?: TableFieldExtractionStrategy;
   key_columns?: string[];        // see FormField — dual-written during migration
   anchor_columns?: string[];
+  // Linked groups. Sent together: the handler drops any scope naming a group
+  // this list does not declare, so removing a group demotes its columns to
+  // per-row rather than leaving a dangling reference.
+  groups?: string[];
+  column_scopes?: Record<string, string>;
+}
+
+/** One column's proposed scope, from POST /forms/{id}/fields/{name}/suggest-groups. */
+export interface SuggestedColumnScope {
+  column: string;
+  /** 'study' | 'row' | `group:<name>` — already reconciled server-side. */
+  scope: string;
+  reason: string;
+}
+
+export interface SuggestGroupsResponse {
+  groups: string[];
+  columns: SuggestedColumnScope[];
+  notes: string;
+  /** What the server had to fix in the model's answer — an invented column, an
+   *  unanswered one, a measured result it tried to share. Shown, not hidden. */
+  warnings: string[];
+  cached: boolean;
 }
 
 export interface FieldEditsResponse {
@@ -509,6 +609,9 @@ export interface ExtractionResult {
   reviewer_role: string | null;
   model_name?: string | null;
   created_at: string;
+  /** When the row was last written. Added with the column in Sep 2026; older
+   *  clients and rows may not carry it, hence optional. */
+  updated_at?: string | null;
 }
 
 export interface ConsensusResult {
@@ -890,7 +993,7 @@ export interface AdjudicationResult {
 
 /**
  * How an adjudicator settled one field — the provenance of `final_value`, which
- * the data-cleaning surface and every export read. Mirrors the backend's
+ * every export reads. Mirrors the backend's
  * `ResolutionSource` Literal in `app/models/schemas.py`; the two must stay in
  * step or a save 422s.
  *
@@ -925,48 +1028,6 @@ export interface AdjudicationSummary {
   in_progress: number;
   completed: number;
   avg_agreement_pct: number | null;
-}
-
-// ============================================================================
-// QA Reviews
-// ============================================================================
-
-export interface QAReview {
-  id: string;
-  project_id: string;
-  form_id: string;
-  document_id: string;
-  qa_reviewer_id: string;
-  source_result_id: string | null;
-  source_adjudication_id: string | null;
-  status: 'pending' | 'in_progress' | 'passed' | 'flagged';
-  field_comments: Record<string, FieldComment>;
-  overall_comment: string | null;
-  flagged_field_count: number;
-  total_fields_reviewed: number;
-  created_at: string;
-  updated_at: string;
-  document_filename?: string;
-  document_label?: string;
-}
-
-export interface FieldComment {
-  issue_type: 'incorrect_value' | 'missing_data' | 'formatting' | 'inconsistency';
-  comment: string;
-  severity: 'minor' | 'major' | 'critical';
-  suggested_value?: string;
-  resolved: boolean;
-  resolved_by: string | null;
-  resolved_at: string | null;
-}
-
-export interface QADashboard {
-  total_reviews: number;
-  passed: number;
-  flagged: number;
-  pending: number;
-  pass_rate: number;
-  field_error_rates: Record<string, number>;
 }
 
 // ============================================================================
@@ -1009,55 +1070,6 @@ export interface VocabularySearchResult {
 }
 
 // ============================================================================
-// Validation Rules
-// ============================================================================
-
-export interface ValidationRule {
-  id: string;
-  form_id: string;
-  field_name: string;
-  rule_type: 'range' | 'format' | 'required' | 'cross_field' | 'regex';
-  rule_config: Record<string, any>;
-  severity: 'error' | 'warning' | 'info';
-  message: string;
-  is_active: boolean;
-  created_by: string | null;
-  created_at: string;
-}
-
-// ============================================================================
-// Data Cleaning
-// ============================================================================
-
-export interface DataCleaningRow {
-  document_id: string;
-  filename: string;
-  /** Study ID for display, resolved server-side across the whole project. */
-  study_label?: string;
-  data_source: 'adjudicated' | 'reviewer_1' | 'ai' | 'manual';
-  values: Record<string, any>;
-  violations: DataViolation[];
-}
-
-export interface DataViolation {
-  field_name: string;
-  rule_id: string;
-  severity: 'error' | 'warning' | 'info';
-  message: string;
-}
-
-export interface BulkEditRequest {
-  project_id: string;
-  form_id: string;
-  edits: Array<{
-    document_id: string;
-    field_name: string;
-    old_value: any;
-    new_value: any;
-  }>;
-}
-
-// ============================================================================
 // Audit Trail
 // ============================================================================
 
@@ -1073,6 +1085,45 @@ export interface AuditEntry {
   new_value: any;
   metadata: Record<string, any> | null;
   created_at: string;
+  /** Resolved server-side by `audit_service.with_user_names`. A trail that
+   *  names the actor as a raw UUID cannot be read by a human, which is why
+   *  nothing ever rendered this table. */
+  user_name: string | null;
+  user_email: string | null;
+}
+
+/** One thing a person did to a form's results. `GET /results/activity`.
+ *
+ *  Structured, not pre-phrased: the wording lives in
+ *  `results/_components/activityCopy.ts` next to the screen that renders it,
+ *  the same way `lib/activity-helpers.ts` owns the existing feed's copy. */
+export interface FormActivityEntry {
+  id: string;
+  created_at: string;
+  user_id: string;
+  user_name: string | null;
+  user_email: string | null;
+  entity_type: string;
+  action: string;
+  form_id: string | null;
+  document_id: string | null;
+  /** "Raslan 2021" — resolved project-wide so the a/b suffix matches every
+   *  other screen. */
+  study_label: string | null;
+  field_name: string | null;
+  reviewer_role: string | null;
+  is_partial: boolean;
+  /** A table field's is a shape summary (`{row_count, changed_columns}`), not a
+   *  value. Readers must handle both. */
+  old_value: any;
+  new_value: any;
+  changed_columns: string[] | null;
+}
+
+export interface FormActivityResponse {
+  entries: FormActivityEntry[];
+  /** True when the page filled up, so the UI can say "showing the latest N". */
+  truncated: boolean;
 }
 
 // ============================================================================

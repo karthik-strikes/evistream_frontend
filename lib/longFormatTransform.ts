@@ -33,6 +33,9 @@ export interface LongFormatRow {
   /** Raw wrapped cell envelopes ({value, source_text, ...}) keyed by column name —
    *  used by the renderer to surface per-cell source evidence. */
   _rawCells?: Record<string, any>;
+  /** Which person saved this row, for the paper cell's avatar. Underscore-prefixed
+   *  so it stays OUT of `columns` and cannot change the export's shape. */
+  _extractedBy?: string | null;
   [key: string]: any;
 }
 
@@ -90,23 +93,43 @@ export function extractScalar(data: any): string {
       const v = data.value;
       if (v == null) return '';
       if (Array.isArray(v)) return formatArray(v);
+      // An envelope whose `value` is itself an object — the model returned
+      // structure where the spec declared a scalar. `String(v)` gave the literal
+      // "[object Object]", in the table AND in every CSV/JSON export, on 68 live
+      // AI cells (e.g. `final_diagnosis_patients` holding a count-per-category
+      // map). Flatten it instead: the numbers are the whole point of the cell.
+      if (typeof v === 'object') return formatObject(v);
       return String(v);
     }
-    return JSON.stringify(data);
+    // A bare object with neither a status nor a `value`. One rule for objects
+    // everywhere, so a nested map reads the same at any depth — this used to be
+    // `JSON.stringify`, which put braces and escaped quotes in a spreadsheet
+    // cell (the live `final_diagnosis_patients` payloads nest two deep).
+    return formatObject(data);
   }
   return String(data);
 }
 
-/** Extract scalar from a subfield entry value (may be raw or wrapped). */
+/**
+ * One `key: value` line per entry, recursing so a nested map still reads.
+ *
+ * Deliberately not `JSON.stringify`: this lands in a spreadsheet cell that a
+ * reviewer has to read, and quotes and braces are noise there.
+ */
+function formatObject(o: Record<string, any>): string {
+  return Object.entries(o)
+    .map(([k, v]) => `${k}: ${extractScalar(v)}`)
+    .join('; ');
+}
+
+/** Extract scalar from a subfield entry value (may be raw or wrapped).
+ *
+ *  Delegates to `extractScalar`, which handles every shape this used to handle
+ *  plus the two it got wrong: an object-valued envelope (rendered
+ *  "[object Object]") and an array (rendered with `String`'s bare commas
+ *  instead of `formatArray`). */
 function extractSubfieldValue(entry: any, key: string): string {
-  if (!entry || entry[key] == null) return '';
-  const raw = entry[key];
-  if (typeof raw === 'object' && raw !== null) {
-    const sd = statusDisplay(raw);
-    if (sd !== null) return sd;
-    if ('value' in raw) return raw.value == null ? '' : String(raw.value);
-  }
-  return String(raw);
+  return extractScalar(entry?.[key]);
 }
 
 // ---------------------------------------------------------------------------
@@ -269,6 +292,11 @@ export function transformToLongFormat(
       _documentId: result.document_id,
       _modelName: result.model_name ?? null,
       _extractionType: result.extraction_type ?? null,
+      // Which seat a manual row speaks for, or null for an additional
+      // extraction. Underscore-prefixed so it stays OUT of `columns` — this is
+      // for the on-screen chip only and must not change the export's shape.
+      _reviewerRole: (result as any).reviewer_role ?? null,
+      _extractedBy: (result as any).extracted_by ?? null,
       Paper: paper,
       'Ref ID': doc?.ref_id != null ? String(doc.ref_id) : '',
     };
@@ -369,6 +397,8 @@ function fallbackTransform(
       _documentId: r.document_id,
       _modelName: (r as any).model_name ?? null,
       _extractionType: (r as any).extraction_type ?? null,
+      _reviewerRole: (r as any).reviewer_role ?? null,
+      _extractedBy: (r as any).extracted_by ?? null,
       Paper: paperLabels[r.document_id] ?? filenameStem(doc?.filename ?? r.document_id),
       'Ref ID': doc?.ref_id != null ? String(doc.ref_id) : '',
     };

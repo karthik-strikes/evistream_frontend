@@ -44,8 +44,28 @@ export const assignmentsService = {
     );
   },
 
-  async clearAssignments(projectId: string, reviewerUserId?: string): Promise<{ deleted: number }> {
-    const qs = reviewerUserId ? `?reviewer_user_id=${reviewerUserId}` : '';
-    return apiClient.delete<{ deleted: number }>(`/api/v1/assignments/project/${projectId}${qs}`);
+  /**
+   * Delete a project's assignments. `reviewerUserId` narrows to one person,
+   * and adding `reviewerRole` narrows to that person's rows for a single role —
+   * the allocations list is grouped by (reviewer, role), so its per-row remove
+   * must not take the other two roles with it.
+   */
+  async clearAssignments(
+    projectId: string,
+    reviewerUserId?: string,
+    reviewerRole?: string,
+  ): Promise<{ deleted: number }> {
+    const params = new URLSearchParams();
+    if (reviewerUserId) params.append('reviewer_user_id', reviewerUserId);
+    if (reviewerRole) params.append('reviewer_role', reviewerRole);
+    const qs = params.toString();
+    return apiClient.delete<{ deleted: number }>(
+      `/api/v1/assignments/project/${projectId}${qs ? `?${qs}` : ''}`
+    );
+  },
+
+  /** Clear one cell of the allocation grid: one document, one role. */
+  async deleteAssignment(assignmentId: string): Promise<{ deleted: number }> {
+    return apiClient.delete<{ deleted: number }>(`/api/v1/assignments/${assignmentId}`);
   },
 };

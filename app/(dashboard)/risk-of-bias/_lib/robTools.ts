@@ -14,6 +14,7 @@
  */
 
 import type { Severity } from './robForm';
+import { ROB2_SIGNALLING } from './rob2';
 
 export type ToolId = 'rob2' | 'robins_i' | 'rob1';
 
@@ -192,6 +193,46 @@ const OUTCOME_FIELD = 'outcome_assessed';
  * preset is that the storage matches the standard by construction, which is the
  * only way `toFormOption` above never has to refuse a write.
  */
+/**
+ * The signalling-question columns, for the one tool whose questions we encode.
+ *
+ * Named `d1_1` … `d5_3` with the question itself in the description: the prefix
+ * is what `columnPatternFor` matches on, and a descriptive tail would be free
+ * to drift (`d2_6_itt` vs `d2_6_appropriate_analysis`) without adding anything
+ * the description does not already say. Each answer gets a `_reason` sibling —
+ * the quote lives in the cell's own `source_text` envelope, so this is for the
+ * one-line reading that turns a quote into an answer.
+ *
+ * ROBINS-I and RoB 1 get none: ROBINS-I's questions are not encoded here yet,
+ * and RoB 1 has none to encode. Those forms stay judgement-only, which is what
+ * `bindSignalling().usable` detects.
+ */
+function signallingColumns(tool: RobTool) {
+  if (tool.id !== 'rob2') return [];
+  return ROB2_SIGNALLING.flatMap(domain =>
+    domain.questions.flatMap(q => {
+      const stem = `d${q.id.replace('.', '_')}`;
+      const options = ['Yes', 'Probably yes', 'Probably no', 'No'];
+      if (q.noInformationOption !== false) options.push('No information');
+      return [
+        {
+          field_name: stem,
+          field_type: 'select',
+          field_description: `${domain.code} signalling question ${q.id} — ${q.text}`,
+          options,
+          required: false,
+        },
+        {
+          field_name: `${stem}_reason`,
+          field_type: 'text',
+          field_description: `Why this answer to ${q.id}? One line, referring to the paper.`,
+          required: false,
+        },
+      ];
+    }),
+  );
+}
+
 export function presetFormFields(tool: RobTool) {
   const domainColumns = tool.domains.flatMap(d => {
     const slug = `${d.code.toLowerCase()}_${d.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '')}`;
@@ -213,7 +254,17 @@ export function presetFormFields(tool: RobTool) {
     ];
   });
 
+  const trialLevel = tool.id === 'rob2'
+    // The six questions about the trial itself live at the top of the record,
+    // answered once and read by every result. Copying them into each result's
+    // row was the earlier design, and it meant several records to keep in step
+    // and a reviewer looking at answers they never gave.
+    ? signallingColumns(tool).filter(f =>
+      /^d(1_[123]|2_[123])(_reason)?$/.test(f.field_name))
+    : [];
+
   return [
+    ...trialLevel,
     {
       field_name: 'first_author',
       field_type: 'text',
@@ -231,12 +282,39 @@ export function presetFormFields(tool: RobTool) {
         'One row per outcome assessed for risk of bias. Risk of bias is judged per outcome, '
         + 'so create a separate row for each outcome this trial reports.',
       subform_fields: [
+        // The result this entry assesses, by id. Keyed on the id rather than the
+        // outcome name because renaming an outcome would otherwise orphan its
+        // assessment, and two results sharing a name would share an assessment.
+        {
+          field_name: 'result_id',
+          field_type: 'text',
+          field_description:
+            'Which result this row assesses, by its id in the project result registry. '
+            + 'Filled in by the risk-of-bias workspace; do not type one.',
+        },
+        {
+          field_name: 'result_version',
+          field_type: 'text',
+          field_description:
+            'The version of that result\u2019s identity this assessment was made against, so a '
+            + 'later correction to the identity marks the assessment stale rather than '
+            + 'silently re-pointing it.',
+        },
         {
           field_name: OUTCOME_FIELD,
           field_type: 'text',
-          field_description: 'Which outcome this row assesses.',
+          field_description: 'Which result this row assesses, in words — for reading and export.',
         },
+        ...signallingColumns(tool),
         ...domainColumns,
+        {
+          field_name: 'rob_workflow',
+          field_type: 'text',
+          field_description:
+            'Workflow bookkeeping for this assessment as JSON — which domains the reviewer '
+            + 'confirmed, whether they declared it complete, and any judgement they overrode '
+            + 'along with why. Not part of the instrument.',
+        },
         {
           field_name: 'comments',
           field_type: 'text',

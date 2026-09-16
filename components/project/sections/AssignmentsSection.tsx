@@ -1,58 +1,50 @@
 'use client';
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+/**
+ * Assignments — set up who reads what.
+ *
+ * Two tabs: **Set up** walks the three decisions in order (team → split →
+ * confirm), **Allocations** shows and edits what came out of it. The set-up
+ * flow used to be one long page of role cards, a stats bar, a scope summary and
+ * an action bar, with no indication of what to do first; the numbered steps are
+ * the same three decisions, in the order you have to make them.
+ */
 
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Users, UserPlus, Loader2, AlertTriangle, Search, ChevronsLeft, ChevronsRight,
-  Plus, Minus, X, Scale, LayoutGrid,
+  Users, Loader2, AlertTriangle, Search, Plus, Minus, X, Check,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { assignmentsService, formsService, projectMembersService, documentsService, projectsService } from '@/services';
-import type { AssignmentProgress, ProjectMember, Form, Document } from '@/types/api';
+import type { AssignmentProgress, ProjectMember, Form, Document, ReviewAssignment } from '@/types/api';
 import { useToast } from '@/hooks/use-toast';
-import { Avatar } from '@/components/ui/avatar';
 import { AllocationsView } from './AllocationsView';
 import { PermissionGate } from '@/components/ui/permission-gate';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
+import {
+  ROLE_DEFS, ROLE_BY_KEY, RolePill, SegGroup, SegButton,
+  ReviewerAvatar, memberDisplayName, canTakeRole,
+  type ReviewerRoleKey,
+} from './allocationShared';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 interface AssignmentsSectionProps {
   projectId: string;
+  /** Held by the project page for its own header; this section only writes it. */
   progress: AssignmentProgress | null;
   onProgressChange: (p: AssignmentProgress | null) => void;
 }
 
-type RoleKey = 'r1' | 'r2' | 'adj';
-type ReviewerRoleValue = 'reviewer_1' | 'reviewer_2' | 'adjudicator';
 type SplitEntry = { userId: string; share: number };
-type SplitState = Record<RoleKey, SplitEntry[]>;
+type SplitState = Record<ReviewerRoleKey, SplitEntry[]>;
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+const EMPTY_SPLIT: SplitState = { reviewer_1: [], reviewer_2: [], adjudicator: [] };
 
-const ROLE_DEFS: { key: RoleKey; tag: string; name: string; desc: string; api: ReviewerRoleValue }[] = [
-  { key: 'r1',  tag: 'R1',  name: 'Reviewer 1',  desc: 'First independent extraction. Blind to R2.',   api: 'reviewer_1'  },
-  { key: 'r2',  tag: 'R2',  name: 'Reviewer 2',  desc: 'Second independent extraction. Blind to R1.', api: 'reviewer_2'  },
-  { key: 'adj', tag: 'Cons', name: 'Consensus reviewer', desc: 'Resolves R1 vs R2 disagreements.',     api: 'adjudicator' },
-];
-
-// Soft-tinted pills — colored text on 15% bg, matches MembersSection's ROLE_BADGE.
-const ROLE_PILL: Record<RoleKey, string> = {
-  r1:  'text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-400/15',
-  r2:  'text-violet-600 dark:text-violet-400 bg-violet-100 dark:bg-violet-400/15',
-  adj: 'text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15',
-};
-
-// Tiny color dot (next to share row) — solid but small
-const ROLE_DOT: Record<RoleKey, string> = {
-  r1: 'bg-blue-500', r2: 'bg-violet-500', adj: 'bg-amber-500',
-};
+/** Shares get their own tint per person so the split bar reads as a split. */
+const SEGMENT_FADE = ['', 'opacity-75', 'opacity-[0.55]', 'opacity-40', 'opacity-30'];
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-function displayName(m: ProjectMember): string {
-  return m.full_name || m.email || 'Unknown';
-}
 
 function balanceEntries(list: SplitEntry[], total: number): SplitEntry[] {
   if (!list.length) return list;
@@ -61,12 +53,8 @@ function balanceEntries(list: SplitEntry[], total: number): SplitEntry[] {
   return list.map((e, i) => ({ ...e, share: per + (i < rem ? 1 : 0) }));
 }
 
-function buildBulkPayload(
-  role: ReviewerRoleValue,
-  entries: SplitEntry[],
-  docIds: string[],
-): { document_id: string; reviewer_user_id: string; reviewer_role: ReviewerRoleValue }[] {
-  const rows: { document_id: string; reviewer_user_id: string; reviewer_role: ReviewerRoleValue }[] = [];
+function buildBulkPayload(role: ReviewerRoleKey, entries: SplitEntry[], docIds: string[]) {
+  const rows: { document_id: string; reviewer_user_id: string; reviewer_role: ReviewerRoleKey }[] = [];
   let cursor = 0;
   for (const entry of entries) {
     for (let i = 0; i < entry.share && cursor < docIds.length; i++, cursor++) {
@@ -76,83 +64,86 @@ function buildBulkPayload(
   return rows;
 }
 
-// ─── Role pill (soft-tint) ────────────────────────────────────────────────────
+/**
+ * Papers that hold all three roles. A cascade cleanup (demoting a member to
+ * viewer, say) can wipe one role and leave the other two, and such a paper must
+ * land back in the "needs reviewers" bucket rather than look covered.
+ */
+function fullyAssignedDocIds(rows: Pick<ReviewAssignment, 'document_id' | 'reviewer_role'>[]): Set<string> {
+  const byDoc = new Map<string, Set<string>>();
+  for (const a of rows) {
+    if (!byDoc.has(a.document_id)) byDoc.set(a.document_id, new Set());
+    byDoc.get(a.document_id)!.add(a.reviewer_role);
+  }
+  const out = new Set<string>();
+  byDoc.forEach((roles, docId) => {
+    if (ROLE_DEFS.every(r => roles.has(r.key))) out.add(docId);
+  });
+  return out;
+}
 
-function RoleTag({ role }: { role: RoleKey }) {
-  const r = ROLE_DEFS.find(d => d.key === role)!;
+function errorDetail(err: unknown, fallback: string): string {
   return (
-    <span className={cn(
-      'inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold',
-      ROLE_PILL[role],
-    )}>
-      {r.tag}
-    </span>
+    (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
+    (err as Error)?.message ||
+    fallback
   );
 }
 
 // ─── Main component ───────────────────────────────────────────────────────────
 
-export function AssignmentsSection({ projectId, progress, onProgressChange }: AssignmentsSectionProps) {
+export function AssignmentsSection({ projectId, onProgressChange }: AssignmentsSectionProps) {
   const { toast } = useToast();
   const perms = useProjectPermissions();
   const containerRef = useRef<HTMLDivElement>(null);
 
   const [loading, setLoading] = useState(true);
+  const [view, setView] = useState<'setup' | 'allocations'>('setup');
 
-  // Reviewer blinding (project-level; governs every form in this project)
-  const [reviewSettings, setReviewSettings] = useState<{ blinding: 'none' | 'partial' | 'full'; hide_ai_results: boolean }>({ blinding: 'none', hide_ai_results: false });
-  const [savingReviewSettings, setSavingReviewSettings] = useState(false);
+  const [reviewSettings, setReviewSettings] = useState<{ blinding: 'none' | 'partial' | 'full'; hide_ai_results: boolean }>(
+    { blinding: 'none', hide_ai_results: false },
+  );
+  // Which switch is mid-save — drives its spinner and disables the pair.
+  const [savingPrivacyKey, setSavingPrivacyKey] = useState<'blinding' | 'hide_ai_results' | null>(null);
 
-  // Data
-  const [forms, setForms]         = useState<Form[]>([]);
-  const [members, setMembers]     = useState<ProjectMember[]>([]);
-  const [docIds, setDocIds]       = useState<string[]>([]);
+  const [forms, setForms]       = useState<Form[]>([]);
+  const [members, setMembers]   = useState<ProjectMember[]>([]);
+  const [docIds, setDocIds]     = useState<string[]>([]);
   const [assignedDocIds, setAssignedDocIds] = useState<Set<string>>(new Set());
 
-  // View tab
-  const [view, setView] = useState<'create' | 'allocations'>('create');
+  const [roleState, setRoleState] = useState<SplitState>(EMPTY_SPLIT);
+  const [openAdd, setOpenAdd]     = useState<ReviewerRoleKey | null>(null);
+  const [addSearch, setAddSearch] = useState('');
+  const [override, setOverride]   = useState(false);
 
-  // Unified state — every role is a list of people with shares.
-  // 1 person at full share = "same reviewer for all docs"; >1 person = "split workload".
-  const [roleState, setRoleState]   = useState<SplitState>({ r1: [], r2: [], adj: [] });
-  const [openAdd, setOpenAdd]       = useState<RoleKey | null>(null);
-  const [addSearch, setAddSearch]   = useState('');
-
-  // Allow same person across non-conflicting roles (R1+Adj or R2+Adj). Never R1=R2 for same doc.
-  const [override, setOverride] = useState(false);
-
-  const [assigning, setAssigning]         = useState(false);
+  const [assigning, setAssigning]             = useState(false);
   const [confirmReassign, setConfirmReassign] = useState(false);
-  const [assignMode, setAssignMode] = useState<'new' | 'all'>('all');
+  const [assignMode, setAssignMode]           = useState<'new' | 'all'>('all');
+  const [successMsg, setSuccessMsg]           = useState('');
 
-  // ── Derived ──────────────────────────────────────────────────────────────
+  // ── Derived ───────────────────────────────────────────────────────────────
 
-  const activeForms   = forms.filter(f => f.status === 'active');
-  const docCount      = docIds.length;
-  const formCount     = activeForms.length;
-  const existingCount = progress?.total_assignments ?? 0;
+  const activeForms = forms.filter(f => f.status === 'active');
+  const formCount   = activeForms.length;
+  const docCount    = docIds.length;
 
-  // Docs already allocated vs docs added since last run
   const alreadyAllocatedCount = docIds.filter(id => assignedDocIds.has(id)).length;
   const newUnallocatedCount   = docIds.filter(id => !assignedDocIds.has(id)).length;
   const hasExistingAllocations = assignedDocIds.size > 0;
 
-  // Allocation target — only new papers in 'new' mode, all papers in 'all' mode.
-  const targetDocIds = assignMode === 'new'
-    ? docIds.filter(id => !assignedDocIds.has(id))
-    : docIds;
-  const targetCount = targetDocIds.length;
+  const targetDocIds = assignMode === 'new' ? docIds.filter(id => !assignedDocIds.has(id)) : docIds;
+  const targetCount  = targetDocIds.length;
 
-  // ── Load ─────────────────────────────────────────────────────────────────
+  const roleTotal = (role: ReviewerRoleKey) => roleState[role].reduce((s, e) => s + e.share, 0);
+  const memberOf   = (userId: string) => members.find(m => m.user_id === userId);
+
+  // ── Load ──────────────────────────────────────────────────────────────────
 
   const loadData = useCallback(async () => {
-    if (!perms.can_manage_assignments) {
-      setLoading(false);
-      return;
-    }
+    if (!perms.can_manage_assignments) { setLoading(false); return; }
     setLoading(true);
 
-    // Each call is isolated — one 403/500 must not zero out every stat card.
+    // Isolated, so one 403/500 does not zero out every panel.
     const [formsRes, membersRes, docsRes, progRes, existingRes, projectRes] = await Promise.allSettled([
       formsService.getAll(projectId),
       projectMembersService.listMembers(projectId),
@@ -170,44 +161,28 @@ export function AssignmentsSection({ projectId, progress, onProgressChange }: As
       setReviewSettings({ blinding: rs?.blinding ?? 'none', hide_ai_results: rs?.hide_ai_results ?? false });
     }
 
-    if (docsRes.status === 'fulfilled') {
-      const completedDocs = (docsRes.value as Document[])
-        .filter(d => d.processing_status === 'completed')
-        .map(d => d.id);
-      setDocIds(completedDocs);
-    } else {
-      setDocIds([]);
-    }
+    setDocIds(
+      docsRes.status === 'fulfilled'
+        ? (docsRes.value as Document[]).filter(d => d.processing_status === 'completed').map(d => d.id)
+        : [],
+    );
 
-    // A doc is "fully allocated" only when it has R1 + R2 + Adj rows. If a
-    // cascade cleanup (e.g. demoting a member to viewer) wiped one role, the
-    // doc must land in the "new papers" bucket so the missing slot can be
-    // refilled — otherwise the leftover R2/Adj rows make it look covered.
-    const rolesByDoc = new Map<string, Set<string>>();
-    if (existingRes.status === 'fulfilled') {
-      for (const a of existingRes.value as { document_id: string; reviewer_role: string }[]) {
-        if (!rolesByDoc.has(a.document_id)) rolesByDoc.set(a.document_id, new Set());
-        rolesByDoc.get(a.document_id)!.add(a.reviewer_role);
-      }
-    }
-    const existingSet = new Set<string>();
-    rolesByDoc.forEach((roles, docId) => {
-      if (roles.has('reviewer_1') && roles.has('reviewer_2') && roles.has('adjudicator')) {
-        existingSet.add(docId);
-      }
-    });
-    setAssignedDocIds(existingSet);
-    setAssignMode(existingSet.size > 0 ? 'new' : 'all');
+    const existing = existingRes.status === 'fulfilled'
+      ? fullyAssignedDocIds(existingRes.value)
+      : new Set<string>();
+    setAssignedDocIds(existing);
+    setAssignMode(existing.size > 0 ? 'new' : 'all');
 
     if (progRes.status === 'fulfilled' && progRes.value) onProgressChange(progRes.value);
 
-    const failures: string[] = [];
-    if (formsRes.status === 'rejected')    failures.push('forms');
-    if (membersRes.status === 'rejected')  failures.push('members');
-    if (docsRes.status === 'rejected')     failures.push('documents');
-    if (progRes.status === 'rejected')     failures.push('progress');
-    if (existingRes.status === 'rejected') failures.push('assignments');
-    if (projectRes.status === 'rejected') failures.push('review settings');
+    const failures = [
+      formsRes.status === 'rejected' && 'forms',
+      membersRes.status === 'rejected' && 'members',
+      docsRes.status === 'rejected' && 'documents',
+      progRes.status === 'rejected' && 'progress',
+      existingRes.status === 'rejected' && 'assignments',
+      projectRes.status === 'rejected' && 'review settings',
+    ].filter(Boolean) as string[];
     if (failures.length) {
       toast({
         title: 'Some data failed to load',
@@ -215,45 +190,25 @@ export function AssignmentsSection({ projectId, progress, onProgressChange }: As
         variant: 'error',
       });
     }
-
     setLoading(false);
   }, [projectId, onProgressChange, toast, perms.can_manage_assignments]);
 
   useEffect(() => { loadData(); }, [loadData]);
 
-  const saveReviewSettings = async (next: { blinding: 'none' | 'partial' | 'full'; hide_ai_results: boolean }) => {
-    const prev = reviewSettings;
-    setReviewSettings(next);
-    setSavingReviewSettings(true);
-    try {
-      await projectsService.updateReviewSettings(projectId, next);
-      toast({ title: 'Saved', description: 'Reviewer blinding settings updated.', variant: 'success' });
-    } catch (err: any) {
-      setReviewSettings(prev);
-      toast({ title: 'Error', description: err?.message || 'Failed to update review settings', variant: 'error' });
-    } finally {
-      setSavingReviewSettings(false);
-    }
-  };
-
-  // Auto-rebalance shares when the allocation target changes (mode toggle, doc list change).
+  // Rebalance when the target changes (mode toggle, new upload) — but never
+  // clobber a split the user has already balanced by hand.
   useEffect(() => {
     setRoleState(prev => {
-      const r1Total = prev.r1.reduce((s, e) => s + e.share, 0);
-      const r2Total = prev.r2.reduce((s, e) => s + e.share, 0);
-      const adjTotal = prev.adj.reduce((s, e) => s + e.share, 0);
-      // Only rebalance if a role's total doesn't match — avoids clobbering user-set splits unnecessarily.
-      if (r1Total === targetCount && r2Total === targetCount && adjTotal === targetCount) return prev;
+      if (ROLE_DEFS.every(r => prev[r.key].reduce((s, e) => s + e.share, 0) === targetCount)) return prev;
       return {
-        r1: balanceEntries(prev.r1, targetCount),
-        r2: balanceEntries(prev.r2, targetCount),
-        adj: balanceEntries(prev.adj, targetCount),
+        reviewer_1:  balanceEntries(prev.reviewer_1, targetCount),
+        reviewer_2:  balanceEntries(prev.reviewer_2, targetCount),
+        adjudicator: balanceEntries(prev.adjudicator, targetCount),
       };
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [targetCount]);
 
-  // Close dropdowns on outside click
   useEffect(() => {
     const handler = (e: MouseEvent) => {
       if (!containerRef.current?.contains(e.target as Node)) setOpenAdd(null);
@@ -262,125 +217,177 @@ export function AssignmentsSection({ projectId, progress, onProgressChange }: As
     return () => document.removeEventListener('mousedown', handler);
   }, []);
 
-  // ── Role-list actions ────────────────────────────────────────────────────
+  // ── Review settings ───────────────────────────────────────────────────────
 
-  function setRole(role: RoleKey, entries: SplitEntry[]) {
+  /**
+   * Two independent switches, not one three-way choice. They map straight onto
+   * the two orthogonal fields `blinding_service` already reads: `blinding`
+   * ('partial' | 'none') is the reader-vs-reader blind, `hide_ai_results` is
+   * the AI blind. The old dropdown coupled them — "Fully blind" was the only
+   * way to hide AI — so "hide AI but let the readers compare" was unreachable.
+   * 'full' is the legacy spelling of 'partial': read it, write 'partial'.
+   */
+  const blindReaders = reviewSettings.blinding !== 'none';
+  const hideAiFromReviewers = reviewSettings.hide_ai_results === true;
+
+  const savePrivacy = async (
+    key: 'blinding' | 'hide_ai_results',
+    patch: Partial<typeof reviewSettings>,
+  ) => {
+    const prev = reviewSettings;
+    const merged = { ...prev, ...patch };
+    // One switch at a time, but the endpoint replaces the whole object — so
+    // send the merged pair, or flipping one would silently reset the other.
+    const next = {
+      blinding: (merged.blinding === 'none' ? 'none' : 'partial') as 'none' | 'partial',
+      hide_ai_results: merged.hide_ai_results,
+    };
+    setReviewSettings(next);
+    setSavingPrivacyKey(key);
+    try {
+      await projectsService.updateReviewSettings(projectId, next);
+      toast({ title: 'Saved', description: 'Reviewer privacy updated.', variant: 'success' });
+    } catch (err) {
+      setReviewSettings(prev);
+      toast({ title: 'Error', description: errorDetail(err, 'Failed to update review settings'), variant: 'error' });
+    } finally {
+      setSavingPrivacyKey(null);
+    }
+  };
+
+  // ── Team + split actions ──────────────────────────────────────────────────
+
+  const setRole = (role: ReviewerRoleKey, entries: SplitEntry[]) =>
     setRoleState(s => ({ ...s, [role]: entries }));
-  }
 
-  function roleTotal(role: RoleKey) {
-    return roleState[role].reduce((s, e) => s + e.share, 0);
-  }
-
-  function handleAutoBalance(role: RoleKey) {
-    setRole(role, balanceEntries(roleState[role], targetCount));
-  }
-
-  function handleStepShare(role: RoleKey, idx: number, delta: number) {
-    setRoleState(prev => {
-      const list = [...prev[role]];
-      const otherTotal = list.reduce((s, e, i) => s + (i === idx ? 0 : e.share), 0);
-      const max = targetCount - otherTotal;
-      const next = Math.max(0, Math.min(list[idx].share + delta, max));
-      list[idx] = { ...list[idx], share: next };
-      return { ...prev, [role]: list };
-    });
-  }
-
-  function handleRemove(role: RoleKey, idx: number) {
-    setRole(role, roleState[role].filter((_, i) => i !== idx));
-  }
-
-  function handleAdd(role: RoleKey, userId: string) {
-    if (roleState[role].find(e => e.userId === userId)) return;
-    // If first person added, give them everything; else auto-rebalance.
-    const next = [...roleState[role], { userId, share: 0 }];
-    setRole(role, balanceEntries(next, targetCount));
+  const addPerson = (role: ReviewerRoleKey, userId: string) => {
+    if (roleState[role].some(e => e.userId === userId)) return;
+    setRole(role, balanceEntries([...roleState[role], { userId, share: 0 }], targetCount));
     setOpenAdd(null);
-  }
+    setSuccessMsg('');
+  };
 
-  // ── Blind-review conflict detection ──────────────────────────────────────
+  const removePerson = (role: ReviewerRoleKey, userId: string) => {
+    setRole(role, balanceEntries(roleState[role].filter(e => e.userId !== userId), targetCount));
+    setSuccessMsg('');
+  };
 
-  // Documents where the same user is both R1 and R2 — never allowed.
+  const stepShare = (role: ReviewerRoleKey, userId: string, delta: number) => {
+    setRoleState(prev => {
+      const list = prev[role];
+      const others = list.reduce((s, e) => s + (e.userId === userId ? 0 : e.share), 0);
+      const max = targetCount - others;
+      return {
+        ...prev,
+        [role]: list.map(e =>
+          e.userId === userId ? { ...e, share: Math.max(0, Math.min(e.share + delta, max)) } : e),
+      };
+    });
+  };
+
+  const setMode = (mode: 'new' | 'all') => {
+    setAssignMode(mode);
+    setSuccessMsg('');
+    const total = mode === 'all' ? docCount : newUnallocatedCount;
+    setRoleState(prev => ({
+      reviewer_1:  balanceEntries(prev.reviewer_1, total),
+      reviewer_2:  balanceEntries(prev.reviewer_2, total),
+      adjudicator: balanceEntries(prev.adjudicator, total),
+    }));
+  };
+
+  // ── Conflicts + readiness ─────────────────────────────────────────────────
+
+  const r1Users = new Set(roleState.reviewer_1.map(e => e.userId));
+  const r2Users = new Set(roleState.reviewer_2.map(e => e.userId));
+
+  /** Papers where the same person would be both readers — never allowed. */
   const blindConflictCount = (() => {
-    const r1Pay = buildBulkPayload('reviewer_1', roleState.r1, targetDocIds);
-    const r2Pay = buildBulkPayload('reviewer_2', roleState.r2, targetDocIds);
-    if (!r1Pay.length || !r2Pay.length) return 0;
-    const r1Map = new Map(r1Pay.map(a => [a.document_id, a.reviewer_user_id]));
-    return r2Pay.filter(a => r1Map.get(a.document_id) === a.reviewer_user_id).length;
+    const r1 = buildBulkPayload('reviewer_1', roleState.reviewer_1, targetDocIds);
+    const r2 = buildBulkPayload('reviewer_2', roleState.reviewer_2, targetDocIds);
+    if (!r1.length || !r2.length) return 0;
+    const byDoc = new Map(r1.map(a => [a.document_id, a.reviewer_user_id]));
+    return r2.filter(a => byDoc.get(a.document_id) === a.reviewer_user_id).length;
   })();
 
-  // R1=R2 for ALL docs (single-mode form of the conflict)
-  const allR1EqR2 =
-    roleState.r1.length === 1 && roleState.r2.length === 1 &&
-    roleState.r1[0].userId === roleState.r2[0].userId;
+  const conflictR1R2 = [...r1Users].some(u => r2Users.has(u)) || blindConflictCount > 0;
+  const consOverlap  = !conflictR1R2
+    && roleState.adjudicator.some(e => r1Users.has(e.userId) || r2Users.has(e.userId));
 
-  // R1 / Adj or R2 / Adj overlap (allowed under override)
-  const adjOverlap = (() => {
-    const r1Users = new Set(roleState.r1.map(e => e.userId));
-    const r2Users = new Set(roleState.r2.map(e => e.userId));
-    const adjUsers = new Set(roleState.adj.map(e => e.userId));
-    return [...adjUsers].some(u => r1Users.has(u) || r2Users.has(u));
+  const ineligible = ROLE_DEFS.flatMap(r =>
+    roleState[r.key]
+      .filter(e => !canTakeRole(memberOf(e.userId), r.key))
+      .map(e => `${memberDisplayName(memberOf(e.userId))} (${r.name})`));
+
+  const readiness: { ready: boolean; msg: string } = (() => {
+    if (members.length < 2) return { ready: false, msg: '' };
+    if (targetCount === 0) return { ready: false, msg: '' };
+    const missing = ROLE_DEFS.filter(r => roleState[r.key].length === 0);
+    if (missing.length) {
+      return { ready: false, msg: `Add at least one person to: ${missing.map(r => r.name).join(', ')}.` };
+    }
+    if (conflictR1R2) {
+      return { ready: false, msg: 'The same person cannot be both readers — fix step 1.' };
+    }
+    if (consOverlap && !override) {
+      return { ready: false, msg: 'Your consensus reviewer is also a reader — tick the box in step 1 to allow it, or pick someone else.' };
+    }
+    if (ineligible.length) {
+      return { ready: false, msg: `Missing permission: ${ineligible.join(', ')}. Remove them, or grant the permission under Members.` };
+    }
+    for (const r of ROLE_DEFS) {
+      const gap = targetCount - roleTotal(r.key);
+      if (gap !== 0) {
+        return {
+          ready: false,
+          msg: gap > 0
+            ? `${r.name} still has ${gap} of ${targetCount} papers unassigned — fix step 2.`
+            : `${r.name} is over-allocated by ${-gap} papers — fix step 2.`,
+        };
+      }
+    }
+    return { ready: true, msg: '' };
   })();
 
   // ── Submit ────────────────────────────────────────────────────────────────
 
-  function handleSubmitClick() {
-    // 'all' mode overwrites existing — confirm first. 'new' mode is additive, no confirm.
-    if (assignMode === 'all' && hasExistingAllocations) {
-      setConfirmReassign(true);
-    } else {
-      doSubmit();
-    }
-  }
+  const handleSubmitClick = () => {
+    if (!readiness.ready) return;
+    // 'all' overwrites existing picks — confirm. 'new' only fills gaps.
+    if (assignMode === 'all' && hasExistingAllocations) setConfirmReassign(true);
+    else doSubmit();
+  };
 
   async function doSubmit() {
     setConfirmReassign(false);
     setAssigning(true);
     try {
-      const assignments = ROLE_DEFS.flatMap(r =>
-        buildBulkPayload(r.api, roleState[r.key], targetDocIds),
-      );
+      const assignments = ROLE_DEFS.flatMap(r => buildBulkPayload(r.key, roleState[r.key], targetDocIds));
       const result = await assignmentsService.bulkCreate({ project_id: projectId, assignments });
+
       const prog = await assignmentsService.getProgress(projectId).catch(() => null);
       if (prog) onProgressChange(prog);
-      // Refresh assigned doc IDs after new assignments — switch to 'new' mode now that everything is allocated.
-      assignmentsService.getProjectAssignments(projectId).catch(() => []).then(rows => {
-        const next = new Set<string>(rows.map((a: { document_id: string }) => a.document_id));
-        setAssignedDocIds(next);
-        if (next.size > 0) setAssignMode('new');
-      });
-      toast({ title: 'Assignments created', description: `${result.length} assignments created` });
+
+      const rows = await assignmentsService.getProjectAssignments(projectId).catch(() => []);
+      const covered = fullyAssignedDocIds(rows);
+      setAssignedDocIds(covered);
+      if (covered.size > 0) setAssignMode('new');
+
+      setSuccessMsg(`${result.length} assignment${result.length !== 1 ? 's' : ''} created across ${targetCount} paper${targetCount !== 1 ? 's' : ''}.`);
+      toast({ title: 'Assignments created', description: `${result.length} assignments created`, variant: 'success' });
     } catch (err) {
-      // Surface the backend's actual reason — usually "user X lacks can_run_extractions"
-      // or a blind-review conflict — rather than a generic message.
-      const detail =
-        (err as { response?: { data?: { detail?: string } } })?.response?.data?.detail ||
-        (err as Error)?.message ||
-        'Failed to create assignments';
-      toast({ title: 'Could not create assignments', description: detail, variant: 'error' });
+      // Surface the backend's reason — usually a missing permission or a blind conflict.
+      toast({
+        title: 'Could not create assignments',
+        description: errorDetail(err, 'Failed to create assignments'),
+        variant: 'error',
+      });
     } finally {
       setAssigning(false);
     }
   }
 
-  // ── Can submit ────────────────────────────────────────────────────────────
-
-  const canSubmit = (() => {
-    if (members.length < 2) return false;
-    if (targetCount === 0) return false;               // nothing to assign
-    if (blindConflictCount > 0) return false;          // hard block — never override
-    if (adjOverlap && !override) return false;
-    return ROLE_DEFS.every(r =>
-      roleState[r.key].length > 0 && roleTotal(r.key) === targetCount,
-    );
-  })();
-
-  const totalAssignments = ROLE_DEFS.reduce((s, r) => s + roleTotal(r.key), 0);
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Render
-  // ─────────────────────────────────────────────────────────────────────────
+  // ── Render ────────────────────────────────────────────────────────────────
 
   if (loading) {
     return (
@@ -390,610 +397,584 @@ export function AssignmentsSection({ projectId, progress, onProgressChange }: As
     );
   }
 
+  const showSteps = targetCount > 0 && members.length >= 2;
+
   return (
     <PermissionGate permission="can_manage_assignments">
-    <div ref={containerRef} className="space-y-6">
+    <div ref={containerRef} className="space-y-4">
 
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
+      {/* ── Header ───────────────────────────────────────────────────────────── */}
       <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h2 className="text-lg font-semibold tracking-tight text-gray-900 dark:text-white">
-            Assignments
-          </h2>
-          <p className="text-sm text-gray-400 dark:text-zinc-500 mt-0.5">
-            {view === 'create'
-              ? 'Add reviewers to each role. Add one person to cover all papers, or several to split the workload.'
-              : 'See which papers each reviewer has been allocated across all roles.'}
+          <h2 className="text-lg font-semibold tracking-tight text-gray-900 dark:text-white">Assignments</h2>
+          <p className="text-[13px] text-gray-400 dark:text-zinc-500 mt-0.5 max-w-[58ch]">
+            {view === 'setup'
+              ? 'Two people read every paper independently, and a third settles disagreements. Set up who does what here.'
+              : 'What each reviewer has on their plate. Hand a paper to someone else in one click.'}
           </p>
         </div>
-        <div className="inline-flex bg-gray-100 dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg p-0.5 flex-shrink-0">
-          <button
-            type="button"
-            onClick={() => setView('create')}
-            className={cn(
-              'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium transition-all',
-              view === 'create'
-                ? 'bg-white dark:bg-[#2a2a2a] text-gray-900 dark:text-white shadow-sm'
-                : 'text-gray-500 dark:text-zinc-500 hover:text-gray-700 dark:hover:text-zinc-300',
-            )}
-          >
-            <UserPlus className="h-3 w-3" />
-            Create
-          </button>
-          <button
-            type="button"
-            onClick={() => setView('allocations')}
-            className={cn(
-              'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium transition-all',
-              view === 'allocations'
-                ? 'bg-white dark:bg-[#2a2a2a] text-gray-900 dark:text-white shadow-sm'
-                : 'text-gray-500 dark:text-zinc-500 hover:text-gray-700 dark:hover:text-zinc-300',
-            )}
-          >
-            <LayoutGrid className="h-3 w-3" />
-            Allocations
-          </button>
-        </div>
-      </div>
-
-      {/* ── Reviewer blinding (project-level) ──────────────────────────────── */}
-      <div className="border border-gray-200 dark:border-[#1f1f1f] rounded-xl bg-white dark:bg-[#111111] p-4">
-        <div className="flex items-start justify-between gap-4 flex-wrap">
-          <div>
-            <h3 className="text-[13px] font-semibold text-gray-900 dark:text-white">Reviewer blinding</h3>
-            <p className="text-[12px] text-gray-400 dark:text-zinc-500 mt-0.5">
-              Controls whether R1 and R2 can see each other&apos;s manual answers. Applies to every form in this project.
-            </p>
-          </div>
-          <div className="flex items-center gap-3 flex-wrap">
-            <select
-              value={reviewSettings.blinding}
-              onChange={e => saveReviewSettings({ ...reviewSettings, blinding: e.target.value as 'none' | 'partial' | 'full' })}
-              disabled={savingReviewSettings}
-              className="text-[12.5px] bg-gray-50 dark:bg-[#141414] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-3 py-1.5 text-gray-800 dark:text-zinc-200 focus:outline-none disabled:opacity-50"
-            >
-              <option value="none">Off — everyone sees everything</option>
-              <option value="partial">Partial — R1/R2 blind to each other</option>
-              <option value="full">Full — R1/R2 blind to each other</option>
-            </select>
-            <label className="inline-flex items-center gap-2 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={reviewSettings.hide_ai_results}
-                onChange={e => saveReviewSettings({ ...reviewSettings, hide_ai_results: e.target.checked })}
-                disabled={savingReviewSettings}
-                className="accent-amber-500"
-              />
-              <span className="text-[12px] text-gray-500 dark:text-zinc-400">Hide AI results too</span>
-            </label>
-          </div>
-        </div>
+        <SegGroup className="flex-shrink-0">
+          <SegButton active={view === 'setup'} onClick={() => setView('setup')}>Set up</SegButton>
+          <SegButton active={view === 'allocations'} onClick={() => setView('allocations')}>Allocations</SegButton>
+        </SegGroup>
       </div>
 
       {view === 'allocations' && (
-        <AllocationsView projectId={projectId} onSwitchToCreate={() => setView('create')} />
+        <AllocationsView projectId={projectId} onSwitchToCreate={() => setView('setup')} />
       )}
 
-      {view === 'create' && (<>
+      {view === 'setup' && (<>
 
-      {/* ── Stats bar — neutral, hairline-divided ────────────────────────── */}
-      <div className="grid grid-cols-2 md:grid-cols-4 gap-px bg-gray-100 dark:bg-[#1f1f1f] rounded-xl overflow-hidden border border-gray-100 dark:border-[#1f1f1f]">
-        {([
-          { label: 'Documents',            value: docCount,       sub: 'Completed and assignable' },
-          { label: 'Active forms',         value: formCount,      sub: 'Per assignment'           },
-          { label: 'Project members',      value: members.length, sub: 'Available to assign'      },
-          { label: 'Existing assignments', value: existingCount,  sub: 'Upserted on re-assign', accent: existingCount > 0 },
-        ] as { label: string; value: number; sub: string; accent?: boolean }[]).map((s) => (
-          <div key={s.label} className="bg-white dark:bg-[#111111] px-4 py-4">
-            <p className="text-xs text-gray-400 dark:text-zinc-500 mb-1">{s.label}</p>
-            <p className={cn('text-2xl font-bold tracking-tight tabular-nums', s.accent ? 'text-amber-500' : 'text-gray-900 dark:text-white')}>{s.value}</p>
-            <p className="text-[11px] text-gray-400 dark:text-zinc-600 mt-0.5">{s.sub}</p>
-          </div>
-        ))}
-      </div>
-
-      {/* ── Confirm re-assign dialog ───────────────────────────────────────── */}
-      {confirmReassign && (
-        <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setConfirmReassign(false)}>
-          <div className="bg-white dark:bg-[#111111] rounded-2xl border border-gray-200 dark:border-[#1f1f1f] shadow-2xl p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
-            <div className="flex items-start justify-between mb-4">
-              <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-400/15 flex items-center justify-center">
-                <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400" />
-              </div>
-              <button type="button" onClick={() => setConfirmReassign(false)} className="text-gray-300 dark:text-zinc-600 hover:text-gray-500 p-1">
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-            <h3 className="text-[14px] font-semibold text-gray-900 dark:text-white mb-1">Re-assign papers?</h3>
-            <p className="text-[12.5px] text-gray-500 dark:text-zinc-400 mb-2 leading-relaxed">
-              <strong className="text-gray-700 dark:text-zinc-200 tabular-nums">{alreadyAllocatedCount}</strong> paper{alreadyAllocatedCount !== 1 ? 's' : ''} already have assignments.
-              Submitting will overwrite them with the new reviewer picks.
+        {/* ── What is already allocated ─────────────────────────────────────── */}
+        {/* One banner at a time: the mode choice only exists while there are new
+            papers to choose between, and "Re-assign everything" carries its own
+            warning once it is the mode in force. */}
+        {hasExistingAllocations && (newUnallocatedCount > 0 || assignMode === 'all') && (
+          <div className="rounded-xl border border-blue-200 dark:border-blue-900/60 bg-blue-50/70 dark:bg-blue-950/20 px-4 py-3">
+            <p className="text-[13px] text-gray-700 dark:text-zinc-300">
+              <b className="font-semibold text-blue-800 dark:text-blue-300 tabular-nums">
+                {alreadyAllocatedCount} paper{alreadyAllocatedCount !== 1 ? 's' : ''} already have reviewers.
+              </b>{' '}
+              {newUnallocatedCount > 0
+                ? <><span className="tabular-nums">{newUnallocatedCount}</span> newer paper{newUnallocatedCount !== 1 ? 's' : ''} still need them.</>
+                : 'You are about to replace all of them.'}
             </p>
-            {newUnallocatedCount > 0 && (
-              <p className="text-[12.5px] text-gray-500 dark:text-zinc-400 mb-5 leading-relaxed">
-                <strong className="text-emerald-600 dark:text-emerald-400 tabular-nums">{newUnallocatedCount}</strong> new paper{newUnallocatedCount !== 1 ? 's' : ''} will also be assigned for the first time.
+            <div className="flex gap-2 mt-2.5 flex-wrap">
+              {newUnallocatedCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setMode('new')}
+                className={cn(
+                  'px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-colors',
+                  assignMode === 'new'
+                    ? 'border-emerald-200 dark:border-emerald-900/60 bg-emerald-50 dark:bg-emerald-400/10 text-emerald-700 dark:text-emerald-300'
+                    : 'border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-400 dark:text-zinc-500 hover:text-gray-700 dark:hover:text-zinc-300',
+                )}
+              >
+                Assign the <span className="tabular-nums">{newUnallocatedCount}</span> new paper{newUnallocatedCount !== 1 ? 's' : ''}
+              </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setMode('all')}
+                className={cn(
+                  'px-3 py-1.5 rounded-lg text-[12px] font-semibold border transition-colors',
+                  assignMode === 'all'
+                    ? 'border-amber-200 dark:border-amber-900/60 bg-amber-50 dark:bg-amber-400/10 text-amber-700 dark:text-amber-300'
+                    : 'border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-400 dark:text-zinc-500 hover:text-gray-700 dark:hover:text-zinc-300',
+                )}
+              >
+                Re-assign all <span className="tabular-nums">{docCount}</span> papers
+              </button>
+            {assignMode === 'all' && newUnallocatedCount === 0 && (
+              <button
+                type="button"
+                onClick={() => setMode('new')}
+                className="px-3 py-1.5 rounded-lg text-[12px] font-semibold border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#111111] text-gray-400 dark:text-zinc-500 hover:text-gray-700 dark:hover:text-zinc-300 transition-colors"
+              >
+                Leave them as they are
+              </button>
+            )}
+            </div>
+            {assignMode === 'all' && (
+              <p className="text-[12px] text-amber-700 dark:text-amber-400 mt-2">
+                This replaces every existing reviewer pick when you press Create.
               </p>
             )}
-            {newUnallocatedCount === 0 && <div className="mb-5" />}
-            <div className="flex gap-2">
-              <button type="button" onClick={() => setConfirmReassign(false)}
-                className="flex-1 px-4 py-2 rounded-lg border border-gray-200 dark:border-[#2a2a2a] text-[12.5px] font-medium text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
-                Cancel
-              </button>
-              <button type="button" onClick={doSubmit} disabled={assigning}
-                className="flex-1 px-4 py-2 rounded-lg bg-gray-900 dark:bg-white text-white dark:text-black text-[12.5px] font-semibold hover:bg-gray-700 dark:hover:bg-zinc-100 disabled:opacity-40 transition-colors flex items-center justify-center gap-2">
-                {assigning ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <UserPlus className="h-3.5 w-3.5" />}
-                Yes, re-assign
-              </button>
-            </div>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* ── Existing allocations banner with mode toggle ──────────────────── */}
-      {hasExistingAllocations && (
-        <div className="border border-amber-200 dark:border-amber-900/60 bg-amber-50/60 dark:bg-amber-950/20 rounded-xl px-4 py-3 space-y-3">
-          <div className="flex items-start gap-3">
-            <div className="flex-shrink-0 w-7 h-7 rounded-lg bg-amber-100 dark:bg-amber-400/15 flex items-center justify-center mt-0.5">
-              <AlertTriangle className="h-3.5 w-3.5 text-amber-600 dark:text-amber-400" />
-            </div>
-            <div className="flex-1 min-w-0 text-[12.5px] leading-relaxed">
-              <span className="font-semibold text-gray-800 dark:text-zinc-200">
-                <span className="tabular-nums">{alreadyAllocatedCount}</span> paper{alreadyAllocatedCount !== 1 ? 's' : ''} already allocated
-                {newUnallocatedCount > 0 && <>, <span className="tabular-nums">{newUnallocatedCount}</span> new paper{newUnallocatedCount !== 1 ? 's' : ''} added since last run</>}.
-              </span>{' '}
-              <span className="text-amber-700 dark:text-amber-300">
-                {assignMode === 'new'
-                  ? newUnallocatedCount > 0
-                    ? 'Existing assignments stay untouched — only the new papers will be assigned below.'
-                    : 'No new papers to assign. Switch to "Re-assign everything" if you want to overwrite the existing picks.'
-                  : 'Submitting will overwrite all existing reviewer picks.'}
-              </span>
-            </div>
-          </div>
-
-          {/* Mode toggle */}
-          <div className="inline-flex bg-white/70 dark:bg-[#1a1a1a]/60 border border-amber-200/70 dark:border-amber-900/40 rounded-lg p-0.5">
+        {/* ── Just created ──────────────────────────────────────────────────── */}
+        {successMsg && (
+          <div className="flex items-center justify-between gap-3 flex-wrap rounded-xl border border-emerald-200 dark:border-emerald-900/60 bg-emerald-50/70 dark:bg-emerald-950/20 px-4 py-3">
+            <p className="text-[13px] font-medium text-emerald-700 dark:text-emerald-300 flex items-center gap-2">
+              <Check className="h-4 w-4 flex-shrink-0" />
+              {successMsg}
+            </p>
             <button
               type="button"
-              onClick={() => setAssignMode('new')}
-              disabled={newUnallocatedCount === 0}
-              className={cn(
-                'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium transition-all',
-                assignMode === 'new'
-                  ? 'bg-emerald-50 dark:bg-emerald-400/10 text-emerald-700 dark:text-emerald-300 ring-1 ring-emerald-200/70 dark:ring-emerald-400/20'
-                  : 'text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed',
-              )}
+              onClick={() => setView('allocations')}
+              className="text-[12px] font-semibold text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-900/60 bg-white dark:bg-[#111111] rounded-lg px-3 py-1.5 hover:bg-emerald-50 dark:hover:bg-emerald-950/40 transition-colors"
             >
-              Assign new papers only
-              <span className={cn('tabular-nums text-[11px]', assignMode === 'new' ? 'text-emerald-500/70 dark:text-emerald-400/70' : 'text-gray-400 dark:text-zinc-600')}>{newUnallocatedCount}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setAssignMode('all')}
-              className={cn(
-                'flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[12px] font-medium transition-all',
-                assignMode === 'all'
-                  ? 'bg-amber-50 dark:bg-amber-400/10 text-amber-700 dark:text-amber-300 ring-1 ring-amber-200/70 dark:ring-amber-400/20'
-                  : 'text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300',
-              )}
-            >
-              Re-assign everything
-              <span className={cn('tabular-nums text-[11px]', assignMode === 'all' ? 'text-amber-500/70 dark:text-amber-400/70' : 'text-gray-400 dark:text-zinc-600')}>{docCount}</span>
+              View allocations →
             </button>
           </div>
-        </div>
-      )}
+        )}
 
-      {/* ── Scope summary ──────────────────────────────────────────────────── */}
-      {docCount > 0 && formCount > 0 && (
-        <div className="flex items-center gap-4 flex-wrap border border-gray-200 dark:border-[#1f1f1f] rounded-xl px-4 py-3 bg-white dark:bg-[#111111]">
-          <span className="text-[12.5px] text-gray-400 dark:text-zinc-500">
-            Each reviewer completes:
-          </span>
-          <div className="flex items-baseline gap-2 font-mono text-[13px] tabular-nums">
-            <span className="text-[18px] font-bold text-gray-900 dark:text-white">{docCount}</span>
-            <span className="text-gray-400">docs</span>
-            <span className="text-gray-300 dark:text-zinc-600">×</span>
-            <span className="text-[18px] font-bold text-gray-900 dark:text-white">{formCount}</span>
-            <span className="text-gray-400">forms</span>
-            <span className="text-gray-300 dark:text-zinc-600">=</span>
-            <span className="inline-flex items-center gap-1.5 bg-gray-900 dark:bg-white text-white dark:text-gray-900 rounded-lg px-3 py-1">
-              <span className="text-[15px] font-bold">{docCount * formCount}</span>
-              <span className="text-[10.5px] opacity-70">form completions / reviewer</span>
-            </span>
+        {/* ── Nothing to do ─────────────────────────────────────────────────── */}
+        {targetCount === 0 && members.length >= 2 && !successMsg && (
+          <div className="flex items-center justify-between gap-3 flex-wrap rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] px-4 py-3">
+            <p className="text-[13px] text-gray-600 dark:text-zinc-400">
+              {docCount === 0
+                ? 'No papers are ready for review yet — upload and process documents first.'
+                : 'Every paper has its reviewers — there is nothing to assign right now.'}
+            </p>
+            {docCount > 0 && (
+              <button
+                type="button"
+                onClick={() => setMode('all')}
+                className="text-[12px] font-semibold text-gray-500 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-3 py-1.5 hover:text-gray-900 dark:hover:text-white transition-colors"
+              >
+                Start over — re-assign everything
+              </button>
+            )}
           </div>
-        </div>
-      )}
+        )}
 
-      {/* ── Hard block: <2 members ─────────────────────────────────────────── */}
-      {members.length < 2 ? (
-        <div className="border border-dashed border-gray-200 dark:border-[#2a2a2a] rounded-xl p-8 text-center bg-white dark:bg-[#111111]">
-          <div className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-gray-100 dark:bg-[#1a1a1a] mb-3">
-            <Users className="h-5 w-5 text-gray-400" />
+        {/* ── Hard block: fewer than two members ────────────────────────────── */}
+        {members.length < 2 && (
+          <div className="border border-dashed border-gray-200 dark:border-[#2a2a2a] rounded-xl p-8 text-center bg-white dark:bg-[#111111]">
+            <div className="inline-flex items-center justify-center w-11 h-11 rounded-xl bg-gray-100 dark:bg-[#1a1a1a] mb-3">
+              <Users className="h-5 w-5 text-gray-400" />
+            </div>
+            <h4 className="text-[14px] font-semibold text-gray-900 dark:text-white mb-1.5">
+              You need at least two people
+            </h4>
+            <p className="text-[12.5px] text-gray-500 dark:text-zinc-400 max-w-sm mx-auto">
+              Every paper is read twice, independently, so the two readers have to be different people.
+              Invite collaborators to this project first.
+            </p>
           </div>
-          <h4 className="text-[14px] font-semibold text-gray-900 dark:text-white mb-1.5">
-            You need at least 2 members to assign reviewers
-          </h4>
-          <p className="text-[12.5px] text-gray-500 dark:text-zinc-400 max-w-sm mx-auto">
-            Dual-blind review needs an R1 and an R2. Invite collaborators to this project first.
-          </p>
-        </div>
-      ) : (
-        <>
-          {/* ── R1 = R2 hard block ────────────────────────────────────────── */}
-          {(allR1EqR2 || blindConflictCount > 0) && (
-            <div className="flex items-start gap-2.5 border border-red-200 dark:border-red-900/60 bg-red-50/60 dark:bg-red-950/20 rounded-xl px-4 py-3">
-              <AlertTriangle className="h-4 w-4 text-red-500 flex-shrink-0 mt-0.5" />
-              <p className="text-[12.5px] text-gray-700 dark:text-zinc-300">
-                <strong>
-                  {allR1EqR2
-                    ? 'R1 and R2 cannot be the same person.'
-                    : `${blindConflictCount} paper${blindConflictCount !== 1 ? 's' : ''} have the same person as both R1 and R2.`}
-                </strong>{' '}
-                Blind review requires R1 and R2 to be different people for every paper. This cannot be overridden.
-              </p>
-            </div>
-          )}
+        )}
 
-          {/* ── Soft warning: <3 members ──────────────────────────────────── */}
-          {members.length < 3 && (
-            <div className="flex items-start gap-3 border border-amber-200 dark:border-amber-900/60 bg-amber-50/60 dark:bg-amber-950/20 rounded-xl p-4">
-              <div className="flex-shrink-0 w-8 h-8 rounded-lg bg-amber-100 dark:bg-amber-400/15 flex items-center justify-center">
-                <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="text-[13px] font-semibold text-gray-900 dark:text-white mb-0.5">
-                  Only {members.length} project member{members.length !== 1 ? 's' : ''} — dual-blind review needs 3 distinct people
-                </div>
-                <p className="text-[12.5px] text-gray-600 dark:text-zinc-400">
-                  You can still proceed by reusing one person across the consensus reviewer role, but they won&apos;t be a fully independent third opinion.
-                </p>
-                <label className="inline-flex items-center gap-2 mt-2.5 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    className="accent-amber-500 w-3.5 h-3.5 cursor-pointer"
-                    checked={override}
-                    onChange={e => setOverride(e.target.checked)}
-                  />
-                  <span className="text-[12.5px] text-gray-700 dark:text-zinc-300">
-                    I understand — allow the consensus reviewer to also be R1 or R2
-                  </span>
-                </label>
-              </div>
-            </div>
-          )}
+        {showSteps && (<>
 
-          {/* ── Adjudicator overlap soft warning (override on) ──────────── */}
-          {adjOverlap && override && !blindConflictCount && !allR1EqR2 && (
-            <div className="flex items-start gap-2.5 border border-amber-200 dark:border-amber-900/60 bg-amber-50/60 dark:bg-amber-950/20 rounded-xl px-4 py-3">
-              <AlertTriangle className="h-4 w-4 text-amber-500 flex-shrink-0 mt-0.5" />
-              <p className="text-[12.5px] text-gray-600 dark:text-zinc-400">
-                Consensus reviewer is also an R1 or R2 on some papers. They&apos;ll see both reviews when reaching consensus — proceed only if that&apos;s acceptable.
-              </p>
-            </div>
-          )}
-
-          {/* ── Reviewers heading ─────────────────────────────────────────── */}
-          <div className="flex items-center justify-between">
-            <h3 className="text-[10.5px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500">
-              Reviewers
-            </h3>
-            <span className="text-[11.5px] text-gray-400 dark:text-zinc-500">
-              Tip: Add one person for &ldquo;same reviewer for all papers&rdquo;, or several to split the workload.
-            </span>
-          </div>
-
-          {/* ── Role cards — neutral surface, soft-tint pills ─────────────── */}
-          <div className="space-y-3">
-            {ROLE_DEFS.map(r => {
-              const list      = roleState[r.key];
-              const total     = roleTotal(r.key);
-              const remaining = targetCount - total;
-              const isAddOpen = openAdd === r.key;
+          {/* ── Step 1 — the team ──────────────────────────────────────────── */}
+          <StepCard
+            n={1}
+            title="Pick the review team"
+            sub="Two people read every paper independently. A third settles any disagreements."
+          >
+            {ROLE_DEFS.map(role => {
+              const list = roleState[role.key];
+              const eligible = members.filter(m => canTakeRole(m, role.key));
+              const blockedCount = members.length - eligible.length;
+              const options = eligible.filter(m => !list.some(e => e.userId === m.user_id));
+              const asChips = options.length <= 6;
+              const isAddOpen = openAdd === role.key;
 
               return (
-                <div
-                  key={r.key}
-                  className="border border-gray-200 dark:border-[#1f1f1f] rounded-xl bg-white dark:bg-[#111111] p-4"
-                >
-                  {/* Role header */}
-                  <div className="flex items-center justify-between flex-wrap gap-2 mb-1">
-                    <div className="flex items-center gap-2 flex-wrap">
-                      <RoleTag role={r.key} />
-                      <span className="text-[13px] font-semibold text-gray-900 dark:text-white">
-                        {r.name}
-                      </span>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => handleAutoBalance(r.key)}
-                      disabled={list.length <= 1}
-                      className="flex items-center gap-1.5 text-[11.5px] font-medium text-gray-500 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2.5 py-1 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
-                    >
-                      <Scale className="h-3 w-3" />
-                      Distribute evenly
-                    </button>
+                <div key={role.key} className="border-t border-gray-100 dark:border-[#1a1a1a] pt-3.5 mt-3.5 first:border-t-0 first:pt-0 first:mt-0">
+                  <div className="flex items-baseline gap-2 flex-wrap">
+                    <RolePill role={role.key} />
+                    <span className="text-[13.5px] font-semibold text-gray-900 dark:text-white">{role.name}</span>
+                    <span className="text-[12.5px] text-gray-400 dark:text-zinc-500">{role.desc}</span>
                   </div>
-                  <p className="text-[12px] text-gray-400 dark:text-zinc-500 mb-3">
-                    {r.desc}
-                  </p>
 
-                  {/* Distribution bar (only when >1 person) */}
-                  {list.length > 1 && (
-                    <div className="h-1 rounded-full bg-gray-100 dark:bg-[#1a1a1a] overflow-hidden flex mb-3">
-                      {list.map((e) => {
-                        const pct = targetCount ? (e.share / targetCount * 100) : 0;
-                        return (
-                          <div
-                            key={e.userId}
-                            style={{ flexBasis: `${pct}%` }}
-                            className={cn('h-full transition-all', ROLE_DOT[r.key])}
-                          />
-                        );
-                      })}
-                      {remaining > 0 && targetCount > 0 && (
-                        <div
-                          style={{ flexBasis: `${remaining / targetCount * 100}%` }}
-                          className="h-full bg-gray-100 dark:bg-[#1a1a1a]"
-                        />
-                      )}
-                    </div>
-                  )}
-
-                  {/* Members list */}
-                  {list.length > 0 && (
-                    <div className="space-y-1.5 mb-3">
-                      {list.map((entry, idx) => {
-                        const member  = members.find(m => m.user_id === entry.userId);
-                        if (!member) return null;
-                        const pct    = targetCount ? Math.round(entry.share / targetCount * 100) : 0;
-                        const canDec = entry.share > 0;
-                        const canInc = remaining > 0;
-
-                        return (
-                          <div
-                            key={entry.userId}
-                            className="grid grid-cols-[1fr_auto_auto_auto] items-center gap-2.5 px-2.5 py-2 border border-gray-100 dark:border-[#1a1a1a] rounded-lg"
+                  <div className="flex gap-2 flex-wrap mt-2.5">
+                    {list.map(entry => {
+                      const m = memberOf(entry.userId);
+                      const name = memberDisplayName(m);
+                      return (
+                        <span
+                          key={entry.userId}
+                          className="inline-flex items-center gap-2 pl-1 pr-2.5 py-1 rounded-full border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#141414]"
+                        >
+                          <ReviewerAvatar userId={entry.userId} name={name} email={m?.email} size="xs" />
+                          <span className="text-[12.5px] font-medium text-gray-800 dark:text-zinc-200">{name}</span>
+                          <button
+                            type="button"
+                            onClick={() => removePerson(role.key, entry.userId)}
+                            title={`Remove ${name}`}
+                            className="text-gray-300 dark:text-zinc-600 hover:text-red-500 transition-colors"
                           >
-                            <div className="flex items-center gap-2 min-w-0">
-                              <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', ROLE_DOT[r.key])} />
-                              <Avatar email={member.email} name={member.full_name} size="sm" />
-                              <div className="min-w-0">
-                                <div className="text-[12.5px] font-medium text-gray-800 dark:text-zinc-200 truncate">
-                                  {displayName(member)}
-                                </div>
-                                <div className="text-[11px] text-gray-400 dark:text-zinc-500 truncate">
-                                  {member.email}
-                                </div>
-                              </div>
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      );
+                    })}
+
+                    {asChips ? options.map(m => (
+                      <button
+                        key={m.user_id}
+                        type="button"
+                        onClick={() => addPerson(role.key, m.user_id)}
+                        className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-dashed border-gray-300 dark:border-[#3a3a3a] text-[12.5px] font-medium text-gray-500 dark:text-zinc-400 hover:border-gray-400 dark:hover:border-zinc-500 hover:text-gray-900 dark:hover:text-white transition-colors"
+                      >
+                        <Plus className="h-3 w-3" />
+                        {memberDisplayName(m)}
+                      </button>
+                    )) : (
+                      <div className="relative">
+                        <button
+                          type="button"
+                          onClick={() => { setOpenAdd(isAddOpen ? null : role.key); setAddSearch(''); }}
+                          className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full border border-dashed border-gray-300 dark:border-[#3a3a3a] text-[12.5px] font-medium text-gray-500 dark:text-zinc-400 hover:border-gray-400 dark:hover:border-zinc-500 hover:text-gray-900 dark:hover:text-white transition-colors"
+                        >
+                          <Plus className="h-3 w-3" />
+                          Add person
+                        </button>
+                        {isAddOpen && (
+                          <div className="absolute top-[calc(100%+6px)] left-0 z-40 w-[280px] bg-white dark:bg-[#141414] border border-gray-200 dark:border-[#2a2a2a] rounded-xl shadow-xl overflow-hidden">
+                            <div className="flex items-center gap-2 px-3 py-2.5 border-b border-gray-100 dark:border-[#1f1f1f]">
+                              <Search className="h-3 w-3 text-gray-400 flex-shrink-0" />
+                              <input
+                                autoFocus
+                                value={addSearch}
+                                onChange={e => setAddSearch(e.target.value)}
+                                placeholder="Search members…"
+                                className="flex-1 bg-transparent text-[13px] text-gray-900 dark:text-white outline-none placeholder-gray-400"
+                              />
                             </div>
-
-                            {/* Stepper */}
-                            {list.length > 1 ? (
-                              <div className="flex items-center border border-gray-200 dark:border-[#2a2a2a] rounded-lg overflow-hidden">
-                                {([[-5, ChevronsLeft, entry.share < 5], [-1, Minus, !canDec], [1, Plus, !canInc], [5, ChevronsRight, remaining < 5]] as [number, React.ComponentType<{ className?: string }>, boolean][]).map(([d, Icon, dis]) => (
+                            <div className="max-h-56 overflow-y-auto p-1">
+                              {(() => {
+                                const q = addSearch.trim().toLowerCase();
+                                const shown = options.filter(m =>
+                                  !q || memberDisplayName(m).toLowerCase().includes(q) || (m.email || '').toLowerCase().includes(q));
+                                if (!shown.length) {
+                                  return <p className="text-center text-[12.5px] text-gray-400 py-5">No members found</p>;
+                                }
+                                return shown.map(m => (
                                   <button
-                                    key={d}
+                                    key={m.user_id}
                                     type="button"
-                                    onClick={() => handleStepShare(r.key, idx, d)}
-                                    disabled={dis}
-                                    className="w-6 h-6 flex items-center justify-center text-gray-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                                    onClick={() => addPerson(role.key, m.user_id)}
+                                    className="w-full flex items-center gap-2.5 px-2 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-[#1f1f1f] text-left transition-colors"
                                   >
-                                    <Icon className={cn(d === -5 || d === 5 ? 'h-3 w-3' : 'h-2.5 w-2.5')} />
-                                  </button>
-                                ))}
-                                <span className="font-mono text-[12px] font-semibold text-gray-800 dark:text-zinc-200 min-w-[48px] text-center px-1 border-l border-gray-200 dark:border-[#2a2a2a] tabular-nums">
-                                  {entry.share}
-                                </span>
-                              </div>
-                            ) : (
-                              <span className="font-mono text-[12px] font-semibold text-gray-800 dark:text-zinc-200 tabular-nums px-2">
-                                {entry.share} doc{entry.share !== 1 ? 's' : ''}
-                              </span>
-                            )}
-
-                            {/* Percent */}
-                            <span className="font-mono text-[11px] text-gray-400 dark:text-zinc-500 min-w-[32px] text-right tabular-nums">
-                              {pct}%
-                            </span>
-
-                            {/* Remove */}
-                            <button
-                              type="button"
-                              onClick={() => handleRemove(r.key, idx)}
-                              className="w-6 h-6 flex items-center justify-center rounded text-gray-300 dark:text-zinc-600 hover:bg-red-50 dark:hover:bg-red-900/20 hover:text-red-500 transition-colors"
-                            >
-                              <X className="h-3 w-3" />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-
-                  {/* Add member */}
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (isAddOpen) { setOpenAdd(null); }
-                        else { setOpenAdd(r.key); setAddSearch(''); }
-                      }}
-                      className="w-full flex items-center justify-center gap-1.5 text-[12.5px] font-medium text-gray-400 dark:text-zinc-500 border border-dashed border-gray-200 dark:border-[#2a2a2a] rounded-lg py-2 hover:bg-gray-50 dark:hover:bg-[#0d0d0d] hover:text-gray-600 dark:hover:text-zinc-300 transition-colors"
-                    >
-                      <Plus className="h-3.5 w-3.5" />
-                      {list.length === 0 ? `Add ${r.tag}` : `Add another ${r.tag}`}
-                    </button>
-
-                    {isAddOpen && (
-                      <div className="absolute top-[calc(100%+6px)] left-0 right-0 bg-white dark:bg-[#111111] border border-gray-200 dark:border-[#1f1f1f] rounded-xl shadow-lg z-30 overflow-hidden">
-                        <div className="flex items-center gap-2 px-3 py-2.5 border-b border-gray-100 dark:border-[#1a1a1a] sticky top-0 bg-white dark:bg-[#111111]">
-                          <Search className="h-3 w-3 text-gray-400 flex-shrink-0" />
-                          <input
-                            autoFocus
-                            value={addSearch}
-                            onChange={e => setAddSearch(e.target.value)}
-                            placeholder="Search members…"
-                            className="flex-1 bg-transparent text-[13px] text-gray-900 dark:text-white outline-none placeholder-gray-400"
-                          />
-                        </div>
-                        <div className="max-h-52 overflow-y-auto">
-                          {(() => {
-                            const lq = addSearch.toLowerCase();
-                            const visible = members.filter(m =>
-                              !addSearch.trim() ||
-                              displayName(m).toLowerCase().includes(lq) ||
-                              (m.email || '').toLowerCase().includes(lq),
-                            );
-                            if (visible.length === 0) {
-                              return (
-                                <div className="text-center text-[12.5px] text-gray-400 py-5">
-                                  No members found
-                                </div>
-                              );
-                            }
-                            return visible.map(m => {
-                              const alreadyAdded = !!list.find(e => e.userId === m.user_id);
-                              return (
-                                <div
-                                  key={m.user_id}
-                                  onClick={() => !alreadyAdded && handleAdd(r.key, m.user_id)}
-                                  className={cn(
-                                    'flex items-center gap-2.5 px-3 py-2.5 border-b border-gray-50 dark:border-[#0d0d0d] last:border-b-0',
-                                    alreadyAdded
-                                      ? 'opacity-40 cursor-not-allowed'
-                                      : 'cursor-pointer hover:bg-gray-50 dark:hover:bg-[#1a1a1a]',
-                                  )}
-                                >
-                                  <Avatar email={m.email} name={m.full_name} size="sm" />
-                                  <div className="flex-1 min-w-0">
-                                    <div className="text-[12.5px] font-medium text-gray-800 dark:text-zinc-200 truncate">
-                                      {displayName(m)}
-                                    </div>
-                                    <div className="text-[11px] text-gray-400 truncate">{m.email}</div>
-                                  </div>
-                                  {alreadyAdded && (
-                                    <span className="text-[11px] text-gray-400 font-mono flex-shrink-0">
-                                      already added
+                                    <ReviewerAvatar userId={m.user_id} name={memberDisplayName(m)} email={m.email} size="sm" />
+                                    <span className="min-w-0">
+                                      <span className="block text-[12.5px] font-medium text-gray-800 dark:text-zinc-200 truncate">
+                                        {memberDisplayName(m)}
+                                      </span>
+                                      <span className="block text-[11px] text-gray-400 truncate">{m.email}</span>
                                     </span>
-                                  )}
-                                </div>
-                              );
-                            });
-                          })()}
-                        </div>
+                                  </button>
+                                ));
+                              })()}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
                   </div>
 
-                  {/* Coverage footer */}
-                  <div className="mt-2.5 text-[11.5px] flex items-center gap-2">
-                    {list.length === 0 ? (
-                      <span className="text-gray-400">
-                        No {r.key === 'adj' ? 'consensus reviewer' : r.tag} yet — add at least one person.
-                      </span>
-                    ) : remaining > 0 ? (
-                      <>
-                        <span className="text-amber-600 dark:text-amber-400 font-semibold">
-                          {remaining} doc{remaining !== 1 ? 's' : ''} unassigned
-                        </span>
-                        <span className="text-gray-400">
-                          · {list.length === 1 ? 'click Distribute evenly to give them all' : `${list.length} people sharing`}
-                        </span>
-                      </>
-                    ) : remaining < 0 ? (
-                      <span className="text-red-500 font-semibold">
-                        Over-allocated by {-remaining}
-                      </span>
-                    ) : (
-                      <>
-                        <span className="text-emerald-600 dark:text-emerald-400 font-semibold">
-                          ✓ All {targetCount} {assignMode === 'new' && hasExistingAllocations ? 'new ' : ''}docs covered
-                        </span>
-                        {list.length > 1 && (
-                          <span className="text-gray-400">
-                            · {list.length} people sharing this role
-                          </span>
-                        )}
-                      </>
-                    )}
-                  </div>
+                  {list.length === 0 && (
+                    <p className="text-[12px] text-amber-600 dark:text-amber-400 mt-2">Add at least one person.</p>
+                  )}
+                  {blockedCount > 0 && (
+                    <p className="text-[11.5px] text-gray-400 dark:text-zinc-500 mt-2">
+                      {blockedCount} member{blockedCount !== 1 ? 's' : ''} can&apos;t take this role — they {role.blockedHint}.
+                      A project manager can change that under Members.
+                    </p>
+                  )}
                 </div>
               );
             })}
-          </div>
 
-          {/* ── Action bar ────────────────────────────────────────────────── */}
-          <div className={cn(
-            'flex items-center gap-3 px-4 py-3.5 border rounded-xl',
-            canSubmit
-              ? 'bg-white dark:bg-[#111111] border-gray-200 dark:border-[#1f1f1f]'
-              : 'bg-gray-50 dark:bg-[#0d0d0d] border-gray-200 dark:border-[#1f1f1f]',
-          )}>
-            <div className="flex-1 min-w-0 text-[13px] text-gray-600 dark:text-zinc-400">
-              {(() => {
-                const missing = ROLE_DEFS.filter(r => roleState[r.key].length === 0).map(r => r.tag);
-                if (missing.length) {
-                  return (
-                    <>
-                      Add at least one person to:{' '}
-                      <strong className="text-gray-700 dark:text-zinc-200">{missing.join(', ')}</strong>.
-                    </>
-                  );
-                }
-                if (targetCount === 0) {
-                  return (
-                    <span className="text-gray-500">
-                      No new papers to assign. Switch to &ldquo;Re-assign everything&rdquo; in the banner above to overwrite existing picks.
-                    </span>
-                  );
-                }
-                const gaps = ROLE_DEFS.filter(r => roleTotal(r.key) !== targetCount);
-                if (gaps.length) {
-                  return (
-                    <>
-                      <span className="text-amber-600 dark:text-amber-400 font-medium">Coverage gap:</span>{' '}
-                      {gaps.map(r => `${r.tag} (${targetCount - roleTotal(r.key)} unassigned)`).join(', ')}.
-                    </>
-                  );
-                }
-                if (blindConflictCount > 0 || allR1EqR2) {
-                  return (
-                    <span className="text-red-500 font-medium">
-                      Resolve the R1/R2 conflict above before continuing.
-                    </span>
-                  );
-                }
-                const newOnly = assignMode === 'new' && hasExistingAllocations;
-                return (
-                  <>
-                    Ready to {newOnly ? 'assign' : 'create'}{' '}
-                    <strong className="text-gray-900 dark:text-white tabular-nums">{totalAssignments}</strong>{' '}
-                    assignment{totalAssignments !== 1 ? 's' : ''} across{' '}
-                    <strong className="text-gray-900 dark:text-white tabular-nums">{targetCount}</strong>{' '}
-                    {newOnly ? 'new ' : ''}document{targetCount !== 1 ? 's' : ''}.
-                  </>
-                );
-              })()}
-            </div>
+            {conflictR1R2 && (
+              <div className="rounded-lg border border-red-200 dark:border-red-900/60 bg-red-50/70 dark:bg-red-950/20 px-3.5 py-2.5 mt-3.5">
+                <p className="text-[12.5px] text-red-800 dark:text-red-300">
+                  <b className="font-semibold">The same person can&apos;t read a paper twice.</b>{' '}
+                  {blindConflictCount > 0 && [...r1Users].every(u => !r2Users.has(u))
+                    ? `${blindConflictCount} paper${blindConflictCount !== 1 ? 's' : ''} would land on one person as both readers — change the split in step 2.`
+                    : 'Pick different people for the two reader roles.'}{' '}
+                  This one cannot be overridden.
+                </p>
+              </div>
+            )}
 
+            {consOverlap && (
+              <div className="rounded-lg border border-gray-200 dark:border-[#2a2a2a] bg-gray-50 dark:bg-[#0d0d0d] px-3.5 py-2.5 mt-3.5">
+                <p className="text-[12.5px] text-gray-600 dark:text-zinc-400">
+                  Your consensus reviewer is also one of the readers, so they&apos;ll see both reviews when settling disagreements.
+                </p>
+                <label className="inline-flex items-center gap-2 mt-1.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={override}
+                    onChange={e => setOverride(e.target.checked)}
+                    className="w-3.5 h-3.5 accent-gray-900 dark:accent-white cursor-pointer"
+                  />
+                  <span className="text-[12.5px] text-gray-700 dark:text-zinc-300">That&apos;s fine — allow it</span>
+                </label>
+              </div>
+            )}
+          </StepCard>
+
+          {/* ── Step 2 — the split ─────────────────────────────────────────── */}
+          <StepCard
+            n={2}
+            title="Split the papers"
+            sub="Papers are split evenly by default. Adjust if someone should take more or fewer."
+          >
+            {ROLE_DEFS.every(r => roleState[r.key].length === 0) ? (
+              <p className="text-[12.5px] text-gray-400 dark:text-zinc-500 mt-3">Add people in step 1 first.</p>
+            ) : ROLE_DEFS.map(role => {
+              const list = roleState[role.key];
+              if (!list.length) return null;
+              const total     = roleTotal(role.key);
+              const remaining = targetCount - total;
+              const multi     = list.length > 1;
+
+              return (
+                <div key={role.key} className="border-t border-gray-100 dark:border-[#1a1a1a] pt-3.5 mt-3.5">
+                  <div className="flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <RolePill role={role.key} />
+                      <span className="text-[13px] font-semibold text-gray-900 dark:text-white">{role.name}</span>
+                    </div>
+                    {multi && (
+                      <button
+                        type="button"
+                        onClick={() => setRole(role.key, balanceEntries(list, targetCount))}
+                        className="text-[11.5px] font-semibold text-gray-500 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2.5 py-1 hover:text-gray-900 dark:hover:text-white transition-colors"
+                      >
+                        Split evenly
+                      </button>
+                    )}
+                  </div>
+
+                  {multi && (
+                    <div className="h-1.5 rounded-full bg-gray-100 dark:bg-[#1a1a1a] overflow-hidden flex mt-2.5">
+                      {list.map((e, i) => (
+                        <div
+                          key={e.userId}
+                          className={cn('h-full transition-all', role.dot, SEGMENT_FADE[i % SEGMENT_FADE.length])}
+                          style={{ width: `${targetCount ? (e.share / targetCount) * 100 : 0}%` }}
+                        />
+                      ))}
+                    </div>
+                  )}
+
+                  {list.map(entry => {
+                    const m = memberOf(entry.userId);
+                    const name = memberDisplayName(m);
+                    const pct = targetCount ? Math.round((entry.share / targetCount) * 100) : 0;
+                    return (
+                      <div
+                        key={entry.userId}
+                        className="grid items-center gap-3 py-2"
+                        style={{ gridTemplateColumns: '1fr auto auto' }}
+                      >
+                        <div className="flex items-center gap-2 min-w-0">
+                          <ReviewerAvatar userId={entry.userId} name={name} email={m?.email} size="sm" />
+                          <span className="text-[13px] font-medium text-gray-800 dark:text-zinc-200 truncate">{name}</span>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {multi && (
+                            <button
+                              type="button"
+                              onClick={() => stepShare(role.key, entry.userId, -1)}
+                              disabled={entry.share <= 0}
+                              className="w-6 h-6 flex items-center justify-center rounded-md border border-gray-200 dark:border-[#2a2a2a] text-gray-500 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                            >
+                              <Minus className="h-3 w-3" />
+                            </button>
+                          )}
+                          <span className="text-[12.5px] font-semibold text-gray-800 dark:text-zinc-200 tabular-nums min-w-[72px] text-center">
+                            {entry.share} paper{entry.share !== 1 ? 's' : ''}
+                          </span>
+                          {multi && (
+                            <button
+                              type="button"
+                              onClick={() => stepShare(role.key, entry.userId, 1)}
+                              disabled={remaining <= 0}
+                              className="w-6 h-6 flex items-center justify-center rounded-md border border-gray-200 dark:border-[#2a2a2a] text-gray-500 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                            >
+                              <Plus className="h-3 w-3" />
+                            </button>
+                          )}
+                        </div>
+                        <span className="text-[11.5px] font-medium text-gray-400 dark:text-zinc-500 tabular-nums w-9 text-right">
+                          {pct}%
+                        </span>
+                      </div>
+                    );
+                  })}
+
+                  {remaining > 0 && (
+                    <p className="text-[12px] font-medium text-amber-600 dark:text-amber-400">
+                      <span className="tabular-nums">{remaining}</span> of {targetCount} papers still unassigned — press + or Split evenly.
+                    </p>
+                  )}
+                  {remaining < 0 && (
+                    <p className="text-[12px] font-medium text-red-600 dark:text-red-400">
+                      Over-allocated by <span className="tabular-nums">{-remaining}</span> papers.
+                    </p>
+                  )}
+                  {remaining === 0 && (
+                    <p className="text-[12px] font-medium text-emerald-600 dark:text-emerald-400">
+                      ✓ All {targetCount} papers covered
+                    </p>
+                  )}
+                </div>
+              );
+            })}
+          </StepCard>
+
+          {/* ── Step 3 — confirm ───────────────────────────────────────────── */}
+          <StepCard
+            n={3}
+            title="Confirm and create"
+            sub={
+              <>
+                Each of the three roles covers <span className="tabular-nums">{targetCount}</span> paper{targetCount !== 1 ? 's' : ''} ×{' '}
+                <span className="tabular-nums">{formCount}</span> form{formCount !== 1 ? 's' : ''} ={' '}
+                <b className="font-semibold text-gray-900 dark:text-white tabular-nums">{targetCount * formCount} form completions</b>.
+              </>
+            }
+          >
+            {formCount === 0 && (
+              <p className="text-[12.5px] font-medium text-amber-600 dark:text-amber-400 mb-3">
+                This project has no active form yet, so reviewers will have nothing to fill in. You can still allocate the papers.
+              </p>
+            )}
+            {readiness.msg && (
+              <p className="text-[12.5px] font-medium text-amber-600 dark:text-amber-400 mb-3">{readiness.msg}</p>
+            )}
             <button
               type="button"
               onClick={handleSubmitClick}
-              disabled={!canSubmit || assigning}
-              className="flex items-center gap-1.5 text-xs font-semibold text-white dark:text-gray-900 bg-gray-900 dark:bg-white rounded-lg px-3 py-1.5 hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed transition-opacity whitespace-nowrap flex-shrink-0"
+              disabled={!readiness.ready || assigning}
+              className={cn(
+                'inline-flex items-center gap-2 rounded-lg px-5 py-2.5 text-[13px] font-semibold transition-colors',
+                readiness.ready
+                  ? 'bg-gray-900 dark:bg-white text-white dark:text-black hover:bg-gray-700 dark:hover:bg-zinc-100'
+                  : 'bg-gray-100 dark:bg-[#1a1a1a] text-gray-400 dark:text-zinc-600 cursor-not-allowed',
+                assigning && 'opacity-60',
+              )}
             >
-              {assigning
-                ? <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                : <UserPlus className="h-3.5 w-3.5" />}
-              Create assignments
+              {assigning && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+              Create <span className="tabular-nums">{targetCount * ROLE_DEFS.length}</span> assignments
             </button>
+          </StepCard>
+        </>)}
+
+        {/* ── Reviewer privacy ──────────────────────────────────────────────── */}
+        <section className="border border-gray-200 dark:border-[#1f1f1f] rounded-xl bg-white dark:bg-[#111111] overflow-hidden">
+          <div className="px-5 py-4 border-b border-gray-100 dark:border-[#1f1f1f]">
+            <h3 className="text-[13.5px] font-semibold text-gray-900 dark:text-white">Reviewer privacy</h3>
+            <p className="text-[12.5px] text-gray-400 dark:text-zinc-500 mt-0.5 leading-relaxed">
+              Applies to the whole project. Tie-breakers and project managers always see everything.
+            </p>
           </div>
-        </>
-      )}
+
+          <PrivacyToggle
+            label="Blind the two readers to each other"
+            description="Reviewer 1 and Reviewer 2 can't see each other's answers until both have finished."
+            checked={blindReaders}
+            saving={savingPrivacyKey === 'blinding'}
+            disabled={savingPrivacyKey !== null}
+            onChange={v => savePrivacy('blinding', { blinding: v ? 'partial' : 'none' })}
+          />
+          <PrivacyToggle
+            label="Hide AI results from reviewers"
+            description="Reviewers extract with no AI answers visible anywhere."
+            checked={hideAiFromReviewers}
+            saving={savingPrivacyKey === 'hide_ai_results'}
+            disabled={savingPrivacyKey !== null}
+            onChange={v => savePrivacy('hide_ai_results', { hide_ai_results: v })}
+            last
+          />
+        </section>
+
+        {/* ── Confirm re-assign everything ──────────────────────────────────── */}
+        {confirmReassign && (
+          <div className="fixed inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center z-50 p-4" onClick={() => setConfirmReassign(false)}>
+            <div className="bg-white dark:bg-[#111111] rounded-2xl border border-gray-200 dark:border-[#1f1f1f] shadow-2xl p-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
+              <div className="flex items-start justify-between mb-4">
+                <div className="w-10 h-10 rounded-xl bg-amber-100 dark:bg-amber-400/15 flex items-center justify-center">
+                  <AlertTriangle className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+                </div>
+                <button type="button" onClick={() => setConfirmReassign(false)} className="text-gray-300 dark:text-zinc-600 hover:text-gray-500 p-1">
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <h3 className="text-[14px] font-semibold text-gray-900 dark:text-white mb-1">Replace the existing picks?</h3>
+              <p className="text-[12.5px] text-gray-500 dark:text-zinc-400 mb-5 leading-relaxed">
+                <strong className="text-gray-700 dark:text-zinc-200 tabular-nums">{alreadyAllocatedCount}</strong> paper
+                {alreadyAllocatedCount !== 1 ? 's' : ''} already have reviewers, and this replaces every one of those picks.
+                Answers reviewers have already saved are kept.
+              </p>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setConfirmReassign(false)}
+                  className="flex-1 px-4 py-2 rounded-lg border border-gray-200 dark:border-[#2a2a2a] text-[12.5px] font-medium text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] transition-colors">
+                  Cancel
+                </button>
+                <button type="button" onClick={doSubmit} disabled={assigning}
+                  className="flex-1 px-4 py-2 rounded-lg bg-gray-900 dark:bg-white text-white dark:text-black text-[12.5px] font-semibold hover:bg-gray-700 dark:hover:bg-zinc-100 disabled:opacity-40 transition-colors flex items-center justify-center gap-2">
+                  {assigning && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                  Yes, re-assign
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
       </>)}
     </div>
     </PermissionGate>
+  );
+}
+
+// ─── Reviewer-privacy switch row ──────────────────────────────────────────────
+
+function PrivacyToggle({
+  label, description, checked, onChange, saving, disabled, last,
+}: {
+  label: string;
+  description: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+  saving: boolean;
+  disabled: boolean;
+  last?: boolean;
+}) {
+  return (
+    <div className={cn(
+      'flex items-start justify-between gap-6 px-5 py-4',
+      !last && 'border-b border-gray-100 dark:border-[#1f1f1f]',
+    )}>
+      <div className="flex-1 min-w-0">
+        <p className="text-[13px] font-medium text-gray-900 dark:text-white">{label}</p>
+        <p className="text-[12.5px] text-gray-400 dark:text-zinc-500 mt-0.5 leading-relaxed">{description}</p>
+      </div>
+      <div className="flex items-center gap-2 flex-shrink-0 pt-0.5">
+        {saving && <Loader2 className="h-3.5 w-3.5 animate-spin text-gray-300 dark:text-zinc-600" />}
+        <button
+          type="button"
+          role="switch"
+          aria-checked={checked}
+          aria-label={label}
+          disabled={disabled}
+          onClick={() => onChange(!checked)}
+          className={cn(
+            'relative inline-flex h-5 w-9 items-center rounded-full transition-colors',
+            'disabled:opacity-50 disabled:cursor-not-allowed',
+            checked ? 'bg-emerald-600 dark:bg-emerald-500' : 'bg-gray-200 dark:bg-[#2a2a2a]',
+          )}
+        >
+          <span
+            className="inline-block h-3.5 w-3.5 rounded-full bg-white shadow-sm transition-transform"
+            style={{ transform: checked ? 'translateX(18px)' : 'translateX(2px)' }}
+          />
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ─── Step card ────────────────────────────────────────────────────────────────
+
+function StepCard({
+  n, title, sub, children,
+}: {
+  n: number;
+  title: string;
+  sub: React.ReactNode;
+  children: React.ReactNode;
+}) {
+  return (
+    <section className="border border-gray-200 dark:border-[#1f1f1f] rounded-xl bg-white dark:bg-[#111111] p-5">
+      <div className="flex items-start gap-3">
+        <span className="w-[22px] h-[22px] mt-px rounded-full bg-gray-900 dark:bg-white text-white dark:text-black text-[11px] font-semibold inline-flex items-center justify-center flex-shrink-0">
+          {n}
+        </span>
+        <div className="min-w-0">
+          <h3 className="text-[15px] font-semibold text-gray-900 dark:text-white">{title}</h3>
+          <p className="text-[12.5px] text-gray-400 dark:text-zinc-500 mt-0.5">{sub}</p>
+        </div>
+      </div>
+      <div className="mt-3.5">{children}</div>
+    </section>
   );
 }

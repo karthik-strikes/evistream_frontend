@@ -8,8 +8,12 @@ import {
 } from '../_lib/absenceInput';
 
 import { useState } from 'react';
+import { Quote, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { FormField } from '@/types/api';
+import { useFieldSourcing } from '../_lib/SourcingContext';
+import { isRequiredField } from '../_lib/fieldKinds';
+import { FieldLabel } from './FormChrome';
 
 const inputCls = "w-full px-3 py-2 text-sm text-gray-900 dark:text-white bg-white dark:bg-[#1a1a1a] border border-gray-200 dark:border-[#2a2a2a] rounded-lg outline-none focus:border-gray-400 dark:focus:border-[#3f3f3f] transition-colors placeholder:text-gray-300 dark:placeholder:text-zinc-600";
 
@@ -37,7 +41,9 @@ interface FieldRendererProps {
   field: FormField;
   value: any;
   onChange: (value: any) => void;
-  index: number;
+  /** Vestigial. The form numbers its *sections* now, not every input — a
+   *  per-field number cost a 28px gutter on a pane that has none to spare. */
+  index?: number;
   isAiPrefilled?: boolean;
   id?: string;
   compact?: boolean;
@@ -46,6 +52,143 @@ interface FieldRendererProps {
    * FormField for a key with no schema entry and so have no example to offer.
    */
   placeholder?: string;
+  /**
+   * Identity of this cell for reviewer-supplied source quotes — `field_name` for
+   * a scalar, `field[row].column` for a table cell. Omitted outside manual
+   * extraction, where the sourcing context is absent and all of this is inert.
+   */
+  sourceKey?: string;
+}
+
+/**
+ * The evidence line for one cell — the reviewer's own quote, or the AI's.
+ *
+ * Modelled on /consensus (`UnifiedFieldCard.SourceEvidence`), which had this
+ * right first: show the **quote itself** with the page in bold, and make the
+ * whole thing the button back to the PDF. The old chip here said only "p.1",
+ * which told a reviewer nothing about what they had cited, and "no source" /
+ * "highlight in PDF →" read as status labels rather than as something to do.
+ *
+ * Table cells stay on one short line: thirty full quotes inside a row grid is
+ * unreadable, so `compact` keeps the page marker and moves the quote into the
+ * tooltip. Silent unless the cell actually has evidence or owes some — a nag on
+ * every field is how the feature gets switched off.
+ */
+function SourceChip({ sourceKey, compact }: { sourceKey?: string; compact?: boolean }) {
+  const { enabled, isActive, source, ai, owes, clear, reveal } = useFieldSourcing(sourceKey);
+  if (!enabled || (!source && !owes && !ai)) return null;
+
+  const mine = !!source;
+  const page = source ? source.source_location?.page ?? null : ai?.page ?? null;
+  const quote = (source ? source.source_text : ai?.text) ?? '';
+  // A drawn box has no words to show. Say so, rather than showing an empty quote.
+  const isRegion = mine && !quote.trim();
+  // `page` is genuinely optional: a location can carry boxes without one, and a
+  // legacy cell can carry a quote alone. Never render the word "undefined".
+  const label = isRegion
+    ? (page != null ? `box on p.${page}` : 'box drawn in the PDF')
+    : quote.trim()
+      ? quote.length > 110 ? `${quote.slice(0, 110)}…` : quote
+      : page != null ? `p.${page}` : 'source';
+
+  if (source || (!owes && ai)) {
+    const tint = mine
+      ? 'text-teal-700 dark:text-teal-300'
+      : 'text-gray-500 dark:text-zinc-500';
+    const hover = mine
+      ? 'hover:border-teal-400 dark:hover:border-teal-600'
+      : 'hover:border-gray-400 dark:hover:border-zinc-500';
+    const where = page != null ? ` (page ${page})` : '';
+    const title = mine
+      ? (isRegion ? `Show this box in the PDF${where}` : `Show this passage in the PDF${where}`)
+      : `The AI cited this${page != null ? ` on page ${page}` : ''} — click to check it`;
+
+    if (compact) {
+      return (
+        <span className="inline-flex max-w-full items-center gap-1">
+          <button
+            type="button"
+            onClick={reveal}
+            title={quote ? `${title}\n\n“${quote}”` : title}
+            className={cn(
+              'inline-flex min-w-0 items-center gap-1 rounded border px-1.5 py-px text-[10px] font-medium transition-colors',
+              mine
+                ? 'border-teal-200 bg-teal-50/70 text-teal-700 hover:border-teal-400 dark:border-teal-800/60 dark:bg-teal-900/20 dark:text-teal-300'
+                : 'border-gray-200 bg-gray-50/80 text-gray-500 hover:border-gray-400 dark:border-[#2a2a2a] dark:bg-[#151515] dark:text-zinc-500',
+            )}
+          >
+            <Quote className="h-2.5 w-2.5 flex-none" />
+            <span className="truncate">
+              {isRegion
+                ? (page != null ? `box p.${page}` : 'box')
+                : mine
+                  ? (page != null ? `p.${page}` : 'cited')
+                  : page != null ? `AI p.${page}` : 'AI'}
+            </span>
+          </button>
+          {mine && (
+            <button
+              type="button"
+              onClick={clear}
+              aria-label="Remove source"
+              className="flex-none text-teal-600/60 transition-opacity hover:text-teal-700 dark:text-teal-400/60"
+            >
+              <X className="h-2.5 w-2.5" />
+            </button>
+          )}
+        </span>
+      );
+    }
+
+    return (
+      <div className="mt-1.5 flex items-start gap-1">
+        <button
+          type="button"
+          onClick={reveal}
+          title={title}
+          className={cn(
+            'flex min-w-0 flex-1 gap-1 border-l-2 border-gray-200 pl-2 text-left text-[10px] transition-colors dark:border-[#2a2a2a]',
+            tint, hover,
+          )}
+        >
+          <Quote className="mt-0.5 h-2.5 w-2.5 flex-shrink-0 opacity-50" />
+          <span className={cn('leading-relaxed', !isRegion && 'italic')}>
+            {label}
+            {page != null && !isRegion && (
+              <span className={cn('ml-1.5 font-semibold not-italic', tint)}>p.{page}</span>
+            )}
+            {!mine && (
+              <span className="ml-1.5 rounded bg-gray-100 px-1 text-[9px] font-medium not-italic uppercase tracking-wide text-gray-500 dark:bg-[#1a1a1a] dark:text-zinc-500">
+                AI
+              </span>
+            )}
+          </span>
+        </button>
+        {mine && (
+          <button
+            type="button"
+            onClick={clear}
+            aria-label="Remove source"
+            title="Remove this source"
+            className="mt-0.5 flex-none text-gray-400 transition-colors hover:text-rose-500 dark:text-zinc-600"
+          >
+            <X className="h-2.5 w-2.5" />
+          </button>
+        )}
+      </div>
+    );
+  }
+
+  // Owes a source, and says nothing about it.
+  //
+  // There used to be a "Cite this" chip here, becoming "Highlight it in the PDF
+  // →" on focus. Two amber chips per cell, on a form with forty of them, is a
+  // wall of nagging that says the same thing every time — and it asked the
+  // reviewer to go hunting for a passage field by field. The citing affordance
+  // now lives on the PDF, where the passages are: the marks are clickable and
+  // the pill at the foot of the pane says what to do. The count of cells still
+  // owing one stays in the progress header, which is one line, not forty.
+  return null;
 }
 
 /**
@@ -198,9 +341,17 @@ function MultiSelectField({ field, value, onChange }: {
   );
 }
 
-export function FieldRenderer({ field, value, onChange, index, isAiPrefilled, id, compact, placeholder }: FieldRendererProps) {
+export function FieldRenderer({ field, value, onChange, isAiPrefilled, id, compact, placeholder, sourceKey }: FieldRendererProps) {
   const val = value ?? '';
   const isEmpty = !val.toString().trim();
+  const sourcing = useFieldSourcing(sourceKey);
+
+  // Focus, not click: arrowing or tabbing into a field makes it the attach
+  // target too, so keyboard-driven reviewers are not left out. Capture phase so
+  // it fires for the inner <input>/<select> without wiring each one.
+  const focusProps = sourcing.enabled
+    ? { onFocusCapture: sourcing.focus, onMouseDownCapture: sourcing.focus }
+    : {};
 
   const renderInput = () => {
     if (field.field_type === 'select' || field.field_type === 'enum' || field.field_type === 'list') {
@@ -246,29 +397,36 @@ export function FieldRenderer({ field, value, onChange, index, isAiPrefilled, id
   };
 
   if (compact) {
-    return <div id={id}>{renderInput()}</div>;
+    return (
+      <div id={id} {...focusProps} className={cn(sourcing.isActive && 'rounded-lg ring-1 ring-teal-300 dark:ring-teal-700')}>
+        {renderInput()}
+        {sourcing.enabled && (
+          <div className="mt-1 empty:hidden"><SourceChip sourceKey={sourceKey} compact={compact} /></div>
+        )}
+      </div>
+    );
   }
 
   return (
-    <div id={id} className={cn(isEmpty && "border-l-2 border-amber-300 dark:border-amber-600 pl-3", !isEmpty && "pl-[14px]")}>
-      <div className="flex items-start gap-2 mb-1.5">
-        <span className="text-[11px] font-bold text-gray-300 dark:text-zinc-700 w-5 text-right flex-shrink-0 mt-0.5 tabular-nums">{index}</span>
-        <div className="flex-1">
-          <p className="text-xs font-semibold text-gray-700 dark:text-zinc-300 capitalize">
-            {field.field_name.replace(/_/g, ' ')}
-            {isAiPrefilled && (
-              <span className="ml-1.5 text-[10px] font-medium text-blue-500 dark:text-blue-400">(AI)</span>
-            )}
-          </p>
-          {field.field_description && (
-            <p className="text-[11px] text-gray-400 dark:text-zinc-500 mt-0.5 leading-snug">{field.field_description}</p>
-          )}
-          {field.extraction_hints && (
-            <p className="text-[11px] text-gray-400/70 dark:text-zinc-600 mt-0.5 leading-snug italic">{field.extraction_hints}</p>
-          )}
-        </div>
-      </div>
+    <div
+      id={id}
+      {...focusProps}
+      className={cn(
+        'border-l-2 pl-3 transition-colors',
+        sourcing.isActive
+          ? 'border-teal-400 dark:border-teal-600'
+          : isEmpty
+            ? 'border-amber-300 dark:border-amber-600'
+            : 'border-transparent',
+      )}
+    >
+      <FieldLabel name={field.field_name} required={isRequiredField(field)} field={field}>
+        {isAiPrefilled && (
+          <span className="flex-none text-[10px] font-medium text-blue-500 dark:text-blue-400">(AI)</span>
+        )}
+      </FieldLabel>
       {renderInput()}
+      {sourcing.enabled && (sourcing.source || sourcing.ai) && <SourceChip sourceKey={sourceKey} />}
     </div>
   );
 }

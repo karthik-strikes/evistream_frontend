@@ -5,14 +5,14 @@ import { fieldIsEmpty, fieldIsNotApplicable } from '@/lib/absence';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { DashboardLayout } from '@/components/layout';
 import { useProject } from '@/contexts/ProjectContext';
-import { resultsService, extractionsService, documentsService, formsService, jobsService } from '@/services';
+import { resultsService, extractionsService, documentsService, formsService, jobsService, assignmentsService } from '@/services';
 import { ExtractionResult, Extraction, Document } from '@/types/api';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { useToast } from '@/hooks/use-toast';
 import { Spinner, EmptyState, Progress, Tooltip, Badge } from '@/components/ui';
 import {
   Download, AlertCircle, FileText, FolderOpen, Table as TableIcon,
-  Search, ChevronDown, ArrowUpDown, X, MapPin,
+  Search, ChevronDown, ArrowUpDown, X, MapPin, GitCompare,
 } from 'lucide-react';
 import { PdfSourceViewer } from '@/components/PdfSourceViewer';
 import { useSourceLinking } from '@/hooks/useSourceLinking';
@@ -28,6 +28,18 @@ import { FinalDatasetView } from './_components/FinalDatasetView';
 import LongFormatTable from './_components/LongFormatTable';
 import { transformToLongFormat, toCSV, toJSON } from '@/lib/longFormatTransform';
 import { buildLabelMap, documentLabel } from '@/lib/documentLabel';
+import { useProjectPeople, type Person } from '@/hooks/useProjectPeople';
+import { Avatar } from '@/components/ui/avatar';
+import { FormResultsCard, type FormCardData, type FormContribution } from './_components/FormResultsCard';
+import {
+  ActivityFilterBar, useActivityFilters, windowStart,
+} from './_components/ActivityFilterBar';
+import { describeActivity } from './_components/activityCopy';
+import { AvatarStack, TimeAgo } from './_components/ResultsPeople';
+import { buildSeatResolver } from '@/lib/reviewerSeats';
+
+/** Sentinel for "each paper's own previous run" — see `previousRunRows`. */
+const PREV_RUN = 'prev';
 
 type SortKey = 'doc_name_asc' | 'doc_name_desc' | 'date_newest' | 'date_oldest' | 'completeness_high' | 'completeness_low';
 
@@ -143,13 +155,6 @@ function ModelChip({
     </button>
   );
 }
-
-const formatFieldName = (f: string) =>
-  f.replace(/_/g, ' ').replace(/\./g, ' ')
-    .split(' ')
-    .filter(w => w.toLowerCase() !== 'value')
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
-    .join(' ');
 
 // ── StatPill ──────────────────────────────────────────────────────────────────
 
@@ -278,6 +283,20 @@ function ResultsContent() {
   const extractionIdParam = searchParams.get('extraction_id');
   const formIdParam = searchParams.get('form_id');
   const sourceTabParam = searchParams.get('tab');
+  /**
+   * The run to compare the AI values against.
+   *
+   * The AI analogue of the manual cell history: every past run is already
+   * stored as its own row (1,966 of 2,894 live paper+form pairs hold two or
+   * more), and nothing compared them — so re-running with a changed prompt gave
+   * no way to see which values moved. No new storage, and no new endpoint: the
+   * form view already fetches every run.
+   */
+  const compareRunId = searchParams.get('vs');
+  /** Show only one person's answers. Set by clicking a person or an activity
+   *  line on the form list — those name somebody, so opening "everyone's rows
+   *  for this form" was never what the click meant. */
+  const personParam = searchParams.get('person');
 
   // Form-level merged view: when form_id is in URL, show all results for that form
   const isFormView = !!formIdParam && !extractionIdParam;
@@ -289,8 +308,14 @@ function ResultsContent() {
   // count line and the table can never disagree about what is on screen.
   const { activeTags, toggleTag, clearTags, matchesTags } = useTagFilter();
   const [sourceTab, setSourceTab] = useState<'ai' | 'manual' | 'final'>((sourceTabParam as any) || 'ai');
-  const [expandedFormId, setExpandedFormId] = useState<string | null>(null);
   const [selectedModel, setSelectedModel] = useState<ModelFamily | null>(null);
+  // Which form cards have their activity open. Absent from the map means
+  // "follow the filter" — see `expandedFor` below.
+  const [expandedForms, setExpandedForms] = useState<Record<string, boolean>>({});
+  // Search / person / time / completion, for the form list.
+  const activity = useActivityFilters();
+  // Names and stable avatar colours for every actor on this project.
+  const { personOf } = useProjectPeople(selectedProject?.id);
 
   // Update URL when extraction or tab changes (enables browser back/forward)
   const selectExtraction = (id: string) => {
@@ -362,7 +387,11 @@ function ResultsContent() {
   const currentForm = isFormView
     ? (formIdParam ? forms[formIdParam] : null)
     : (selectedExtraction ? forms[selectedExtraction.form_id] : null);
-  const formFields = currentForm?.fields ?? [];
+  // Memoised because `?? []` is a fresh array on every render, and four hooks
+  // now depend on it — including the run-comparison index, which runs
+  // `transformToLongFormat` over a whole run. Without this they recomputed on
+  // every keystroke in the search box.
+  const formFields = useMemo(() => currentForm?.fields ?? [], [currentForm]);
 
   const { data: selectedJob } = useQuery({
     queryKey: ['job', selectedExtraction?.job_id],
@@ -533,6 +562,61 @@ function ResultsContent() {
     return m;
   }, [coverageData]);
 
+  /**
+   * Who holds a manual row on what, with no extracted values.
+   *
+   * This is how the form list knows its contributors, its "last activity" and
+   * whether anything is still a draft, for a whole project in one request.
+   * `GET /results` cannot answer it: it is paginated at 50 by default, newest
+   * first, so in a project with thousands of AI rows every manual row falls off
+   * the page. Same endpoint the manual-extraction queue uses, same query key,
+   * so this is normally a cache hit.
+   */
+  const { data: resultsStatus } = useQuery({
+    queryKey: ['results-status', selectedProject?.id],
+    queryFn: () => resultsService.getStatus({ projectId: selectedProject!.id }),
+    enabled: !!selectedProject,
+    staleTime: 30 * 1000,
+  });
+  const manualStatus = useMemo(() => resultsStatus?.manual ?? [], [resultsStatus]);
+
+  /**
+   * The edit log: who changed which field of which paper, when.
+   *
+   * Project-wide rather than per-form, because the form list draws a card for
+   * every form and each one needs its own recent activity. Blinded server-side —
+   * `old_value`/`new_value` are the extracted values themselves.
+   */
+  const { data: activityData } = useQuery({
+    queryKey: ['results-activity', selectedProject?.id],
+    queryFn: () => resultsService.getActivity({ projectId: selectedProject!.id, limit: 500 }),
+    enabled: !!selectedProject,
+    staleTime: 30 * 1000,
+  });
+  const activityEntries = useMemo(() => activityData?.entries ?? [], [activityData]);
+
+  /**
+   * The seat each person actually holds, per paper — `review_assignments`.
+   *
+   * This has to come from the assignment, not from `extraction_results.
+   * reviewer_role`, which is documented as "a denormalised label, never a key"
+   * and goes stale: on the live Analgesics Calibration project Esther is
+   * assigned reviewer_2 on both papers, yet 2 of her 7 saved rows carry NULL.
+   * Reading the column made Results label an assigned R2 as "Extra" while
+   * Allocations — which reads the assignment — correctly showed R2. Same source
+   * now, so the two screens cannot disagree.
+   *
+   * `reviewer_slots.effective_role()` is the backend's equivalent of this map.
+   */
+  const { data: assignments = [] } = useQuery({
+    queryKey: ['project-assignments', selectedProject?.id],
+    queryFn: () => assignmentsService.getProjectAssignments(selectedProject!.id).catch(() => []),
+    enabled: !!selectedProject,
+    staleTime: 60 * 1000,
+  });
+
+  const seatOf = useMemo(() => buildSeatResolver(assignments), [assignments]);
+
   const documentsMap = useMemo(() => {
     const map: Record<string, Document> = {};
     documentsList.forEach((doc) => { if (doc) map[doc.id] = doc; });
@@ -690,6 +774,10 @@ function ResultsContent() {
    */
   const filteredResults = useMemo(() => {
     let base = sortedResults;
+    // Whole rows, so the contiguity rule above still holds: one result IS one
+    // person's answers for one paper, and dropping some leaves every surviving
+    // paper's rows together.
+    if (personParam) base = base.filter(r => (r as any).extracted_by === personParam);
     if (flaggedOnly) base = base.filter(r => flaggedSet.has(r.document_id));
     if (activeTags.length > 0) base = base.filter(r => matchesTags(documentsMap[r.document_id]?.labels));
     if (!searchQuery.trim()) return base;
@@ -700,7 +788,7 @@ function ResultsContent() {
       if ((documentsMap[r.document_id]?.labels ?? []).some(l => l.toLowerCase().includes(q))) return true;
       return Object.values(r.extracted_data).some(v => extractScalarValue(v).toLowerCase().includes(q));
     });
-  }, [sortedResults, searchQuery, documentsMap, docLabels, flaggedOnly, flaggedSet, activeTags, matchesTags]);
+  }, [sortedResults, searchQuery, documentsMap, docLabels, flaggedOnly, flaggedSet, activeTags, matchesTags, personParam]);
 
   /**
    * Row count for the stats line. The same pure transform the table runs, on the
@@ -795,6 +883,419 @@ function ResultsContent() {
     return out;
   }, [formsWithResults]);
 
+  // ── Comparing AI runs ───────────────────────────────────────────────────────
+
+  /** This form's AI runs, newest first. `at` is the run's earliest row, which
+   *  is now stable: a retry used to reset `created_at` on the row it replaced
+   *  (fixed in `migrations/fix_ai_retry_preserves_created_at.sql`). */
+  const aiRuns = useMemo(() => {
+    if (!isFormView || sourceTab !== 'ai') return [];
+    const byRun = new Map<string, { id: string; at: string; model: string | null; docs: number }>();
+    for (const r of formResultsByType) {
+      const id = r.extraction_id;
+      if (!id) continue;
+      const seen = byRun.get(id);
+      if (!seen) {
+        byRun.set(id, { id, at: r.created_at, model: r.model_name ?? null, docs: 1 });
+      } else {
+        seen.docs += 1;
+        if (r.created_at < seen.at) seen.at = r.created_at;
+      }
+    }
+    return Array.from(byRun.values()).sort((a, b) => b.at.localeCompare(a.at));
+  }, [formResultsByType, isFormView, sourceTab]);
+
+  /**
+   * Each run, plus **how many papers it can actually be compared against**.
+   *
+   * `docs` (how many papers the run holds) is a fact about the RUN, and it is
+   * not what a reader needs — they need to know what the comparison will DO.
+   * The two differ most exactly where it matters: on Periodontitis' "Patient
+   * Population" the newest run holds 29 papers and can be compared against 0,
+   * because "All runs" shows each paper's newest row and that run supplied
+   * every one of them. Offering it marked zero cells with nothing to say why.
+   *
+   *   comparable = papers on screen that this run also has a row for,
+   *                MINUS the papers this run is the one supplying
+   *
+   * One number, and it covers the partial case too: a run that only ever
+   * touched 3 of 29 papers reports 3. This also subsumes the old
+   * `effectiveExtractionId` filter — a single run's own view scores 0 by
+   * construction — so that special case is gone.
+   */
+  const comparableRuns = useMemo(() => {
+    if (!isFormView || sourceTab !== 'ai') return [];
+    const shownRunByDoc = new Map<string, string | null>();
+    for (const r of results) shownRunByDoc.set(r.document_id, r.extraction_id ?? null);
+
+    const papersByRun = new Map<string, Set<string>>();
+    for (const r of formResultsByType) {
+      if (!r.extraction_id) continue;
+      let set = papersByRun.get(r.extraction_id);
+      if (!set) { set = new Set(); papersByRun.set(r.extraction_id, set); }
+      set.add(r.document_id);
+    }
+
+    return aiRuns.map(run => {
+      const papers = papersByRun.get(run.id) ?? new Set<string>();
+      let comparable = 0;
+      let supplies = 0;
+      for (const [doc, shownRun] of shownRunByDoc) {
+        if (shownRun === run.id) supplies += 1;
+        else if (papers.has(doc)) comparable += 1;
+      }
+      return { ...run, comparable, supplies };
+    });
+  }, [aiRuns, results, formResultsByType, isFormView, sourceTab]);
+
+  /** The runs worth offering. */
+  const usableRuns = useMemo(
+    () => comparableRuns.filter(r => r.comparable > 0),
+    [comparableRuns],
+  );
+  /** Runs left out because every paper they hold is already the shown answer. */
+  const alreadyShownRuns = useMemo(
+    () => comparableRuns.filter(r => r.comparable === 0 && r.supplies > 0).length,
+    [comparableRuns],
+  );
+
+  /** Papers currently on screen — the denominator in "covers N of M papers". */
+  const papersOnScreen = useMemo(
+    () => new Set(results.map(r => r.document_id)).size,
+    [results],
+  );
+
+  /**
+   * Each paper's PREVIOUS row — the baseline that actually answers "did the
+   * last run change anything".
+   *
+   * Naming a single run as the baseline sounds right and mostly is not: the
+   * form view shows each paper's latest row, which is a MIXTURE of runs, so
+   * comparing it against one run is a no-op for every paper that run produced
+   * and undefined for every paper it did not touch. Measured on the live demo
+   * form: picking its newest run marked zero cells even though all five shared
+   * papers differ, because those five papers were being displayed FROM that
+   * run. Per paper, "the row before this one" has no such ambiguity — and it is
+   * the AI analogue of `provenance.prior_value` on the manual side.
+   */
+  const previousRunRows = useMemo(() => {
+    const byDoc = new Map<string, typeof formResultsByType>();
+    for (const r of formResultsByType) {
+      const list = byDoc.get(r.document_id);
+      if (list) list.push(r); else byDoc.set(r.document_id, [r]);
+    }
+    const out: typeof formResultsByType = [];
+    for (const list of byDoc.values()) {
+      if (list.length < 2) continue;
+      const sorted = [...list].sort((a, b) => b.created_at.localeCompare(a.created_at));
+      out.push(sorted[1]);
+    }
+    return out;
+  }, [formResultsByType]);
+
+  /**
+   * One run's values, keyed `documentId|rowIndexWithinPaper|column`.
+   *
+   * Rows are paired by POSITION within a paper, which is the same rule
+   * `UnifiedFieldCard.computeRowDiff` uses on the consensus screen: "Pairing on
+   * the composite key instead would change which cells are flagged, and that is
+   * a data-semantics decision needing its own verification." So a run that
+   * returned a different number of table rows will pair the tail wrongly — the
+   * banner says so rather than pretending otherwise.
+   */
+  const baselineCells = useMemo(() => {
+    if (!compareRunId || !isFormView || sourceTab === 'final') return null;
+    const rows = compareRunId === PREV_RUN
+      ? previousRunRows
+      : formResultsByType.filter(r => r.extraction_id === compareRunId);
+    if (rows.length === 0) return null;
+    const out: Record<string, string> = {};
+    const nth: Record<string, number> = {};
+    for (const row of transformToLongFormat(rows, formFields, documentsMap).rows) {
+      const doc = row._documentId;
+      const i = (nth[doc] = (nth[doc] ?? -1) + 1);
+      for (const [col, val] of Object.entries(row)) {
+        if (col.startsWith('_')) continue;
+        // Only real display values. A `String(object)` here rendered
+        // "[object Object]" as a previous value on the live demo form — a few
+        // parent-table subfield columns can carry a non-scalar, and a value the
+        // transform could not flatten is not one a reader can compare.
+        if (typeof val !== 'string' && typeof val !== 'number') continue;
+        out[`${doc}|${i}|${col}`] = String(val);
+      }
+    }
+    return out;
+  }, [compareRunId, previousRunRows, formResultsByType, formFields, documentsMap, isFormView, sourceTab]);
+
+  /**
+   * What one cell has said across every run. Computed on click rather than
+   * pre-indexed: a form with 82 fields over 15 runs is tens of thousands of
+   * cells, and the panel only ever needs one of them.
+   */
+  const runHistoryFor = useCallback((documentId: string, rowIndex: number, column: string) => {
+    const out: { runId: string; at: string; model: string | null; value: string }[] = [];
+    for (const run of aiRuns) {
+      const rows = formResultsByType.filter(
+        r => r.extraction_id === run.id && r.document_id === documentId,
+      );
+      if (rows.length === 0) continue;
+      const lrows = transformToLongFormat(rows, formFields, documentsMap).rows;
+      const row = lrows[rowIndex];
+      if (!row) continue;
+      out.push({ runId: run.id, at: run.at, model: run.model, value: String(row[column] ?? '') });
+    }
+    return out;
+  }, [aiRuns, formResultsByType, formFields, documentsMap]);
+
+  const setCompareRun = useCallback((runId: string | null) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (runId) params.set('vs', runId); else params.delete('vs');
+    router.push(`/results?${params.toString()}`, { scroll: false });
+  }, [searchParams, router]);
+
+  // ── The people layer on the form list ───────────────────────────────────────
+  //
+  // Three sources, each answering something the others cannot:
+  //   · `manualStatus`  — who holds a row, and whether it is still a draft.
+  //     Covers rows saved before the edit log existed, so it is the only
+  //     complete contributor list.
+  //   · `activityEntries` — what actually changed, and when.
+  //   · `coverageByForm`  — document coverage, for the completeness bar.
+
+  const eventsByForm = useMemo(() => {
+    const m: Record<string, typeof activityEntries> = {};
+    for (const e of activityEntries) {
+      if (!e.form_id) continue;
+      (m[e.form_id] ??= []).push(e);
+    }
+    return m;
+  }, [activityEntries]);
+
+  const manualByForm = useMemo(() => {
+    const m: Record<string, typeof manualStatus> = {};
+    for (const r of manualStatus) (m[r.form_id] ??= []).push(r);
+    return m;
+  }, [manualStatus]);
+
+  /**
+   * Everyone who appears anywhere in this project's results — the filter chips.
+   *
+   * Deliberately NOT the member list: a project can carry fifty members and two
+   * extractors, and a filter offering forty-eight rows that match nothing is
+   * worse than no filter.
+   */
+  const activePeople = useMemo(() => {
+    const seen = new Map<string, Person>();
+    const add = (id: string | null, name?: string | null, email?: string | null) => {
+      if (!id || seen.has(id)) return;
+      const p = personOf(id, { name, email });
+      if (p) seen.set(id, p);
+    };
+    for (const r of manualStatus) add(r.extracted_by, r.reviewer_name, null);
+    for (const e of activityEntries) add(e.user_id, e.user_name, e.user_email);
+    return Array.from(seen.values()).sort((a, b) => a.name.localeCompare(b.name));
+  }, [manualStatus, activityEntries, personOf]);
+
+  const cutoff = useMemo(() => windowStart(activity.filters.days), [activity.filters.days]);
+
+  const buildCard = useCallback((
+    formId: string,
+    displayName: string,
+    runs: number,
+    latestRunAt: string,
+  ): FormCardData => {
+    const rows = manualByForm[formId] ?? [];
+    const events = eventsByForm[formId] ?? [];
+    const cov = coverageByForm[formId];
+    const totalDocs = cov?.total_project_documents ?? 0;
+
+    // One contribution per person, carrying the seat they used and how many
+    // recorded edits they made. A person who saved a row before the edit log
+    // existed still appears, with no count.
+    const byPerson = new Map<string, FormContribution>();
+    for (const r of rows) {
+      const person = personOf(r.extracted_by, { name: r.reviewer_name });
+      if (!person) continue;
+      byPerson.set(person.userId, {
+        person,
+        role: seatOf(person.userId, r.document_id, r.reviewer_role),
+        edits: byPerson.get(person.userId)?.edits ?? 0,
+      });
+    }
+    for (const e of events) {
+      const person = personOf(e.user_id, { name: e.user_name, email: e.user_email });
+      if (!person) continue;
+      const existing = byPerson.get(person.userId);
+      byPerson.set(person.userId, {
+        person,
+        // A person holds one seat per paper, so the assignment wins over the
+        // row's stale label — and over whichever row happened to be seen last,
+        // which is what made one card show "Extra" and another "R2" for the
+        // same reviewer on the same project.
+        role: existing?.role ?? seatOf(person.userId, e.document_id, e.reviewer_role),
+        edits: (existing?.edits ?? 0) + 1,
+      });
+    }
+    const contributions = Array.from(byPerson.values())
+      .sort((a, b) => b.edits - a.edits || a.person.name.localeCompare(b.person.name));
+
+    const lastManualAt = rows.reduce<string | null>(
+      (acc, r) => (r.updated_at && (!acc || r.updated_at > acc) ? r.updated_at : acc),
+      null,
+    );
+    const lastEventAt = events.reduce<string | null>(
+      (acc, e) => (!acc || e.created_at > acc ? e.created_at : acc),
+      null,
+    );
+    const lastActivityAt = [lastManualAt, lastEventAt, latestRunAt]
+      .filter(Boolean)
+      .sort()
+      .pop() ?? null;
+
+    return {
+      formId,
+      displayName,
+      papers: totalDocs || null,
+      runs,
+      lastActivityAt,
+      pct: totalDocs > 0 ? Math.round(((cov?.extracted_count ?? 0) / totalDocs) * 100) : null,
+      papersExtracted: totalDocs > 0 ? (cov?.extracted_count ?? 0) : null,
+      // Any draft still open means somebody is mid-paper. No rows at all means
+      // unknown, NOT finished — see the note on `completion`.
+      completion: rows.length === 0 ? null : rows.some(r => r.is_partial) ? 'progress' : 'complete',
+      contributors: contributions.map(c => c.person),
+      contributions,
+      // Stamp each event with the resolved seat, so the chip on an activity row
+      // says the same thing as the chip on the person above it.
+      events: events.map(e => ({
+        ...e,
+        reviewer_role: seatOf(e.user_id, e.document_id, e.reviewer_role),
+      })),
+    };
+  }, [manualByForm, eventsByForm, coverageByForm, personOf, seatOf]);
+
+  /**
+   * Does this card survive the filter bar?
+   *
+   * Returns the card with its events narrowed, or null. Narrowing matters: with
+   * a person or a time window selected, a card whose events all fall outside it
+   * has nothing to show and is dropped rather than rendered empty.
+   */
+  const applyActivityFilters = useCallback((card: FormCardData): FormCardData | null => {
+    const { q, personId, completion } = activity.filters;
+    // A form with no visible manual row matches neither state.
+    if (completion !== 'all' && card.completion !== completion) return null;
+
+    /**
+     * Holding a row and having a recorded edit are two different things here,
+     * and the person filter has to honour both.
+     *
+     * The canvas dropped a form as soon as no *event* survived the filter,
+     * because its mock gave every user events. In the real data the edit log
+     * only starts where the provenance work shipped: on the live Demo project
+     * one reviewer has 7 manual rows and 0 audit entries. Filtering to that
+     * person under the canvas rule returned "nothing matches" and erased all
+     * seven — the same class of bug as a reviewer's saved work reading as
+     * un-started, which is what `/results/status` exists to prevent.
+     */
+    const contributes = card.contributions.some(c => c.person.userId === personId);
+
+    let events = card.events;
+    if (cutoff !== null) events = events.filter(e => new Date(e.created_at).getTime() >= cutoff);
+    if (personId !== 'all') events = events.filter(e => e.user_id === personId);
+
+    const needle = q.trim().toLowerCase();
+    if (needle) {
+      const nameMatches = card.displayName.toLowerCase().includes(needle);
+      const personMatches = card.contributions.some(c =>
+        c.person.name.toLowerCase().includes(needle)
+        || (c.person.email ?? '').toLowerCase().includes(needle));
+      const matching = events.filter(e => {
+        const copy = describeActivity(e);
+        return [
+          e.user_name, e.user_email, e.study_label, e.field_name,
+          copy.summary, copy.diff?.from, copy.diff?.to,
+        ].some(v => (v ?? '').toLowerCase().includes(needle));
+      });
+      // A form survives on its name, on one of its people, or on an event.
+      if (!nameMatches && !personMatches && matching.length === 0) return null;
+      // Narrow the feed only when the match came from the feed — searching a
+      // form by name should not hide the rest of its history.
+      if (!nameMatches && !personMatches) events = matching;
+    }
+
+    if (personId !== 'all' && !contributes && events.length === 0) return null;
+
+    if (cutoff !== null && events.length === 0) {
+      // No edits in the window. The form still belongs here if it was itself
+      // touched inside it — a row saved before the edit log existed still has
+      // an `updated_at`.
+      const touchedAt = card.lastActivityAt ? new Date(card.lastActivityAt).getTime() : null;
+      if (touchedAt === null || touchedAt < cutoff) return null;
+    }
+
+    if (personId !== 'all') {
+      const contributions = card.contributions.filter(c => c.person.userId === personId);
+      return { ...card, events, contributions, contributors: contributions.map(c => c.person) };
+    }
+    return { ...card, events };
+  }, [activity.filters, cutoff]);
+
+  /** Absent from the map means "follow the filter": filtering for a person and
+   *  then having to click four cards to find their work defeats the filter. */
+  const expandedFor = useCallback(
+    (formId: string) => expandedForms[formId] ?? activity.active,
+    [expandedForms, activity.active],
+  );
+  const toggleForm = useCallback(
+    (formId: string) => setExpandedForms(prev => ({
+      ...prev,
+      [formId]: !(prev[formId] ?? activity.active),
+    })),
+    [activity.active],
+  );
+
+  /** Cards per picker group, filtered. Groups that empty out are not rendered. */
+  const cardGroups = useMemo(() => {
+    return pickerGroups
+      .map(group => ({
+        label: group.label,
+        cards: group.forms
+          .map(f => applyActivityFilters(
+            buildCard(f.formId, f.displayName, f.extractionCount, f.latestDate),
+          ))
+          .filter((c): c is FormCardData => c !== null),
+      }))
+      .filter(g => g.cards.length > 0);
+  }, [pickerGroups, buildCard, applyActivityFilters]);
+
+  const visibleCardCount = useMemo(
+    () => cardGroups.reduce((n, g) => n + g.cards.length, 0),
+    [cardGroups],
+  );
+
+  // ── The people layer on the detail view ─────────────────────────────────────
+
+  /** Who produced the rows currently on screen, for the toolbar's avatar stack. */
+  const viewContributors = useMemo(() => {
+    const seen = new Map<string, Person>();
+    for (const r of results) {
+      const person = personOf((r as any).extracted_by);
+      if (person && !seen.has(person.userId)) seen.set(person.userId, person);
+    }
+    return Array.from(seen.values());
+  }, [results, personOf]);
+
+  /** Newest edit on the form being viewed. */
+  const viewLastActivity = useMemo(() => {
+    if (!formIdParam) return null;
+    const events = eventsByForm[formIdParam] ?? [];
+    return events.reduce<string | null>(
+      (acc, e) => (!acc || e.created_at > acc ? e.created_at : acc),
+      null,
+    );
+  }, [eventsByForm, formIdParam]);
+
   // Show form picker when no form_id or extraction_id in URL
   const showFormPicker = !isFormView && !extractionIdParam;
 
@@ -849,63 +1350,61 @@ function ResultsContent() {
             description="Run an extraction first to see results here"
           />
         ) : (
-          <div className="flex flex-col gap-6">
-            <p className="text-xs text-gray-400 dark:text-zinc-400">Select a form to view its results</p>
-            {pickerGroups.map(group => (
-              <div key={group.label}>
-                {pickerGroups.length > 1 && (
-                  <div className="flex items-center gap-2 mb-3">
-                    <span className="h-1.5 w-1.5 rounded-full bg-gray-900 dark:bg-white flex-shrink-0" />
-                    <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-zinc-500">
-                      {group.label}
-                    </span>
-                    <span className="flex-1 h-px bg-gray-100 dark:bg-[#1f1f1f]" />
-                    <span className="text-xs text-gray-400 dark:text-zinc-500 flex-shrink-0">
-                      {group.forms.length} form{group.forms.length !== 1 ? 's' : ''}
-                    </span>
-                  </div>
-                )}
-                <div className="flex flex-col gap-2">
-                  {group.forms.map(f => {
-                    const cov = coverageByForm[f.formId];
-                    const totalDocs = cov?.total_project_documents ?? 0;
-                    const pct = totalDocs > 0 ? Math.round(((cov?.extracted_count ?? 0) / totalDocs) * 100) : null;
-                    return (
-                      <button
-                        key={f.formId}
-                        onClick={() => router.push(`/results?form_id=${f.formId}`)}
-                        className="group w-full text-left grid grid-cols-[1fr_auto] items-center gap-4 px-[22px] py-4 rounded-xl border border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111] hover:border-gray-300 dark:hover:border-[#2a2a2a] hover:shadow-card-hover hover:-translate-y-px transition-all duration-150 cursor-pointer"
-                      >
-                        <div className="min-w-0">
-                          <div className="text-sm font-semibold text-gray-900 dark:text-white truncate">{f.displayName}</div>
-                          <div className="flex items-center gap-3 mt-1.5 text-xs text-gray-400 dark:text-zinc-500 flex-wrap">
-                            {totalDocs > 0 && <span className="whitespace-nowrap">{totalDocs} papers</span>}
-                            <span className="whitespace-nowrap">{f.extractionCount === 1 ? '1 run' : `${f.extractionCount} runs`}</span>
-                            <span className="whitespace-nowrap">Last run {new Date(f.latestDate).toLocaleDateString()}</span>
-                          </div>
-                        </div>
-                        <div className="flex items-center gap-4 flex-shrink-0">
-                          {pct !== null && (
-                            <div className="flex flex-col items-end gap-1.5">
-                              <span className="text-[11px] font-semibold text-gray-500 dark:text-zinc-400 tabular-nums whitespace-nowrap">
-                                {pct}% complete
-                              </span>
-                              <div className="w-24 h-1 rounded-full bg-gray-100 dark:bg-[#1f1f1f] overflow-hidden">
-                                <div
-                                  className={cn('h-full rounded-full', pct >= 80 ? 'bg-green-500' : 'bg-gray-900 dark:bg-zinc-300')}
-                                  style={{ width: `${pct}%` }}
-                                />
-                              </div>
-                            </div>
+          <div className="flex flex-col gap-5">
+            {/* Search people, papers and fields; narrow by person, time and
+                completion. The Manual tab only: a model run has no contributor
+                and no edit log, so on the AI tab every one of these controls
+                would filter on data that does not exist. */}
+            {sourceTab === 'manual' && (
+              <ActivityFilterBar
+                filters={activity.filters}
+                set={activity.set}
+                people={activePeople}
+              />
+            )}
+
+            {visibleCardCount === 0 ? (
+              <DashedEmpty
+                title="Nothing matches those filters"
+                description="No form has activity from that person in that period. Clear a filter to widen the search."
+              />
+            ) : (
+              <div className="flex flex-col gap-6">
+                {cardGroups.map(group => (
+                  <div key={group.label}>
+                    {cardGroups.length > 1 && (
+                      <div className="flex items-center gap-2 mb-3">
+                        <span className="h-1.5 w-1.5 rounded-full bg-gray-900 dark:bg-white flex-shrink-0" />
+                        <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-zinc-500">
+                          {group.label}
+                        </span>
+                        <span className="flex-1 h-px bg-gray-100 dark:bg-[#1f1f1f]" />
+                        <span className="text-xs text-gray-400 dark:text-zinc-500 flex-shrink-0">
+                          {group.cards.length} form{group.cards.length !== 1 ? 's' : ''}
+                        </span>
+                      </div>
+                    )}
+                    <div className="flex flex-col gap-2.5">
+                      {group.cards.map(card => (
+                        <FormResultsCard
+                          key={card.formId}
+                          data={card}
+                          expanded={expandedFor(card.formId)}
+                          onToggle={() => toggleForm(card.formId)}
+                          onOpen={() => router.push(
+                            `/results?form_id=${card.formId}${sourceTab === 'ai' ? '' : `&tab=${sourceTab}`}`,
                           )}
-                          <ChevronDown className="w-3.5 h-3.5 -rotate-90 text-gray-300 dark:text-zinc-600" />
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
+                          onOpenPerson={(userId) => router.push(
+                            `/results?form_id=${card.formId}&tab=${sourceTab}&person=${userId}`,
+                          )}
+                          showPeople={sourceTab === 'manual'}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                ))}
               </div>
-            ))}
+            )}
           </div>
         )
       ) : loading && extractions.length === 0 && !isFormView ? (
@@ -975,6 +1474,37 @@ function ResultsContent() {
             </button>
           )}
 
+          {/* Whose answers you are looking at, and the way back to everyone's.
+              Without this the table silently hides the other reviewer's rows
+              and there is no clue why. */}
+          {personParam && (() => {
+            const who = personOf(personParam);
+            return (
+              <div className="flex items-center gap-2 self-start rounded-full border border-gray-200 bg-white py-1 pl-1 pr-2.5 dark:border-[#2a2a2a] dark:bg-[#111111]">
+                {who && <Avatar email={who.avatarKey} name={who.name} size="xs" />}
+                <span className="text-[12px] text-gray-600 dark:text-zinc-400">
+                  Showing only{' '}
+                  <span className="font-semibold text-gray-900 dark:text-white">
+                    {who?.name ?? 'one reviewer'}
+                  </span>
+                  &apos;s answers
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const params = new URLSearchParams(searchParams.toString());
+                    params.delete('person');
+                    router.push(`/results?${params.toString()}`, { scroll: false });
+                  }}
+                  title="Show everyone's answers"
+                  className="ml-0.5 rounded-full p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-zinc-500 dark:hover:bg-[#1f1f1f]"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            );
+          })()}
+
           {/* Toolbar */}
           <div className="flex items-center gap-3 flex-wrap">
             {/* Extraction picker / Form label */}
@@ -998,7 +1528,11 @@ function ResultsContent() {
                     <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3 h-3 text-gray-400 pointer-events-none" />
                   </div>
                   <span className="text-xs text-gray-400 dark:text-zinc-500 whitespace-nowrap">
-                    {results.length} {results.length === 1 ? 'document' : 'documents'} · {allFieldNames.length} fields
+                    {/* `filteredResults`, not `results`: with a person filter on, the
+                        unfiltered count claimed rows that are not on screen. Still
+                        counting result ROWS rather than documents — one paper can
+                        carry a row per reviewer — so it is named that way now. */}
+                    {filteredResults.length} {filteredResults.length === 1 ? 'row' : 'rows'} · {allFieldNames.length} fields
                   </span>
                   {/* One model, one tag. The table badges rows individually only when
                       they actually differ; when several models ran, the chip row below
@@ -1102,6 +1636,20 @@ function ResultsContent() {
 
             <div className="flex-1" />
 
+            {/* Who produced what is on screen. The design puts this beside the
+                export, which is the right place: it is the provenance of the
+                thing you are about to download. */}
+            {!loading && viewContributors.length > 0 && (
+              <div className="flex items-center gap-2.5">
+                <AvatarStack people={viewContributors} size="sm" />
+                {viewLastActivity && (
+                  <span className="whitespace-nowrap text-[11px] text-gray-400 dark:text-zinc-500">
+                    last edit <TimeAgo at={viewLastActivity} />
+                  </span>
+                )}
+              </div>
+            )}
+
             {/* Export buttons */}
             {!loading && results.length > 0 && (
               <div className="flex gap-2">
@@ -1148,6 +1696,106 @@ function ResultsContent() {
             </div>
           )}
 
+          {/* Compare with another run — the AI tab's version of "what changed".
+              Only when there IS another run: 1,966 of 2,894 live paper+form
+              pairs hold two or more, but the rest have nothing to compare. */}
+          {isFormView && sourceTab === 'ai'
+            && (usableRuns.length > 0 || previousRunRows.length > 0) && (
+            <div className="flex flex-wrap items-center gap-2.5">
+              <div className="relative flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 dark:border-[#1f1f1f] dark:bg-[#111111]">
+                <GitCompare className="h-3.5 w-3.5 flex-shrink-0 text-gray-400 dark:text-zinc-500" />
+                <select
+                  value={compareRunId ?? ''}
+                  onChange={e => setCompareRun(e.target.value || null)}
+                  aria-label="Compare with an earlier run"
+                  className="cursor-pointer appearance-none border-none bg-transparent pr-4 text-sm text-gray-700 outline-none dark:text-zinc-300 dark:[color-scheme:dark]"
+                >
+                  <option value="">Compare with…</option>
+                  {previousRunRows.length > 0 && (
+                    <option value={PREV_RUN}>
+                      Each paper&apos;s previous run ({previousRunRows.length}{' '}
+                      {previousRunRows.length === 1 ? 'paper' : 'papers'})
+                    </option>
+                  )}
+                  {/* Only runs you can actually pick.
+                      These were greyed out and left in place, so the reader
+                      could see where the newest run went — sound for one or two
+                      exclusions, and wrong at ten: Dental Implants' 27 papers
+                      come from 10 of its 11 runs, which rendered ten lines of
+                      "already shown" to offer ONE real choice. The count beside
+                      the control answers "where did they go" in one line
+                      instead. */}
+                  {usableRuns.map(r => (
+                    <option key={r.id} value={r.id}>
+                      {new Date(r.at).toLocaleDateString()}{' '}
+                      {new Date(r.at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                      {r.model ? ` · ${formatModelName(r.model)}` : ''}
+                      {` · covers ${r.comparable} of ${papersOnScreen} papers`}
+                    </option>
+                  ))}
+                </select>
+                <ChevronDown className="pointer-events-none absolute right-2 h-3 w-3 text-gray-400" />
+              </div>
+              {/* Where the other runs went, and — the more useful half — how
+                  little of this form has a second answer at all. On Dental
+                  Implants only 2 of 27 papers do, which is worth saying before
+                  someone goes looking for changes that cannot exist. */}
+              {!compareRunId && alreadyShownRuns > 0 && (
+                <span className="text-[11px] text-gray-400 dark:text-zinc-500">
+                  {alreadyShownRuns} earlier {alreadyShownRuns === 1 ? 'run is' : 'runs are'}{' '}
+                  already the {alreadyShownRuns === 1 ? 'answer' : 'answers'} on screen
+                  {previousRunRows.length > 0
+                    ? `. ${previousRunRows.length} of ${papersOnScreen} papers have an earlier answer to compare.`
+                    : '.'}
+                </span>
+              )}
+              {/* A `?vs=` link can still name the run that is supplying the
+                  screen — an old bookmark, or a URL shared before this list
+                  learned to grey it out. Say so rather than showing a table
+                  with nothing marked and no explanation. */}
+              {compareRunId && compareRunId !== PREV_RUN
+                && comparableRuns.some(r => r.id === compareRunId && r.comparable === 0) && (
+                <>
+                  <span className="text-[11px] text-amber-600 dark:text-amber-500">
+                    Every paper from that run is already the answer on screen, so there is
+                    nothing to compare. Pick an earlier run, or “each paper’s previous run”.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCompareRun(PREV_RUN)}
+                    className="text-[11px] font-semibold text-gray-500 hover:text-gray-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                  >
+                    Use previous run
+                  </button>
+                </>
+              )}
+              {compareRunId && baselineCells
+                && !comparableRuns.some(r => r.id === compareRunId && r.comparable === 0) && (
+                <>
+                  <span className="text-[11px] text-gray-400 dark:text-zinc-500">
+                    {compareRunId === PREV_RUN
+                      ? 'Cells that moved since each paper’s previous run are marked with a bar and show what they said before.'
+                      : 'Marked cells moved since that run. A paper you are already viewing FROM that run shows no change, and a paper it never touched shows none either.'}
+                    {' '}Table rows pair by position, so a run with a different row count only
+                    matches up to where they agree.
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCompareRun(null)}
+                    className="text-[11px] font-semibold text-gray-500 hover:text-gray-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+                  >
+                    Stop comparing
+                  </button>
+                </>
+              )}
+              {compareRunId && !baselineCells && (
+                <span className="text-[11px] text-amber-600 dark:text-amber-500">
+                  That run has no rows for this form.
+                </span>
+              )}
+            </div>
+          )}
+
           {/* Results area */}
           {loading ? (
             <div className="flex justify-center items-center py-12"><Spinner size="lg" /></div>
@@ -1182,10 +1830,21 @@ function ResultsContent() {
                     results={filteredResults}
                     documentsMap={documentsMap}
                     formFields={formFields}
-                    formId={selectedExtraction?.form_id}
+                    formId={selectedExtraction?.form_id ?? formIdParam ?? undefined}
                     flaggedDocIds={flaggedSet}
                     activeTags={activeTags}
                     onToggleTag={toggleTag}
+                    projectId={selectedProject?.id}
+                    personOf={
+                      // Manual tab only. An AI row has no author — 0 of 60,091
+                      // live AI cells carry a provenance block — so on that tab
+                      // the "Show Authors" toggle was a button that did nothing.
+                      // Withholding `personOf` is what hides it.
+                      sourceTab === 'manual' ? personOf : undefined
+                    }
+                    seatOf={seatOf}
+                    baselineCells={baselineCells}
+                    runHistoryFor={runHistoryFor}
                   />
                 </div>
 

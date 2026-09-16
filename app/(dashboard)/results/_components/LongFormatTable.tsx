@@ -1,6 +1,6 @@
 'use client';
 
-import { EMPTY_DISPLAY_TOKENS, FAILED_LABEL } from '@/lib/absence';
+import { EMPTY_DISPLAY_TOKENS, FAILED_LABEL, compareKey } from '@/lib/absence';
 
 import { useMemo, useState, useCallback, useEffect, useRef } from 'react';
 import { cn, modelTagTheme, modelFamilyLabel, modelFamily } from '@/lib/utils';
@@ -8,10 +8,18 @@ import { Badge } from '@/components/ui';
 import { DocumentTags } from '@/components/documents/DocumentTags';
 import type { FormField } from '@/types/api';
 import { transformToLongFormat } from '@/lib/longFormatTransform';
-import { Tooltip } from '@/components/ui/tooltip';
-import { Quote, ScanText, Info } from 'lucide-react';
+import { FieldInfoTooltip } from '@/components/forms/FieldInfoTooltip';
+import { Quote, ScanText, Users } from 'lucide-react';
 import { SourceEvidenceDrawer } from '@/components/source-evidence/SourceEvidenceDrawer';
 import { buildLabelMap, documentLabel } from '@/lib/documentLabel';
+import { boxesFromLocation, hasShowableEvidence } from '@/lib/sourceBoxes';
+import { Avatar } from '@/components/ui/avatar';
+import { ROLE_COLORS } from '@/lib/reviewerColors';
+import { cellProvenance, latestTouch, touchedByHuman } from '@/lib/provenance';
+import type { Person } from '@/hooks/useProjectPeople';
+import { CellHistoryPanel, type CellHistoryTarget } from './CellHistoryPanel';
+import { isReviewRole } from './ResultsPeople';
+import type { SeatResolver } from '@/lib/reviewerSeats';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -21,6 +29,13 @@ function formatColumnName(name: string): string {
   return name
     .replace(/_/g, ' ')
     .replace(/\b\w/g, c => c.toUpperCase());
+}
+
+/** Evidence a reviewer can be shown: a quote, a drawn box, or a figure. Gating
+ *  on `source_text` alone hid a citation made by dragging a box — the reviewer's
+ *  own evidence disappeared on the screen that is supposed to display it. */
+function hasEvidence(data: any): boolean {
+  return hasShowableEvidence(data);
 }
 
 function getSourceText(data: any): string | null {
@@ -38,6 +53,21 @@ function getSyntheticCaption(data: any): boolean {
 function getCaptionImage(data: any): string | null {
   if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
   return data.source_location?.caption_image ?? null;
+}
+function getFromFigure(data: any): boolean {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return false;
+  return data.source_location?.from_figure === true;
+}
+function getFigureImage(data: any): string | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  return data.source_location?.figure_image ?? null;
+}
+/** Null, not false, when absent: "we don't know" and "checked, and it is not
+ *  verified" drive different banner wording. */
+function getFigureVerified(data: any): boolean | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null;
+  const v = data.source_location?.figure_verified;
+  return typeof v === 'boolean' ? v : null;
 }
 
 function getPageRef(data: any): number | null {
@@ -60,6 +90,8 @@ interface LongFormatTableProps {
     created_at?: string;
     model_name?: string | null;
     extraction_type?: string | null;
+    reviewer_role?: string | null;
+    extracted_by?: string | null;
   }>;
   documentsMap: Record<
     string,
@@ -83,6 +115,24 @@ interface LongFormatTableProps {
   activeTags?: string[];
   /** Toggle a tag on the page's filter. Omit to render tags as plain, unclickable chips. */
   onToggleTag?: (tag: string) => void;
+  /** Needed by the cell-history panel: `GET /audit/entity/...` is project-scoped. */
+  projectId?: string;
+  /** Resolves the seat a person actually holds from `review_assignments`, not
+   *  from the row's stale `reviewer_role`. Omit and the row's label is used. */
+  seatOf?: SeatResolver;
+  /** Resolves a user id to a name and a stable avatar colour. Omit to hide
+   *  authorship entirely — the toggle does not appear. */
+  personOf?: (
+    userId: string | null | undefined,
+    fallback?: { name?: string | null; email?: string | null },
+  ) => Person | null;
+  /** Another run's values, keyed `documentId|rowIndexWithinPaper|column`. When
+   *  present, cells whose value differs are marked and show what they said
+   *  before. Rows pair by position — see the note where this is built. */
+  baselineCells?: Record<string, string> | null;
+  /** What one cell has said across every run, for the history panel. */
+  runHistoryFor?: (documentId: string, rowIndex: number, column: string) =>
+    { runId: string; at: string; model: string | null; value: string }[];
 }
 
 interface ChipRef {
@@ -92,6 +142,7 @@ interface ChipRef {
 
 export default function LongFormatTable({
   results, documentsMap, formFields, formId, flaggedDocIds, activeTags = [], onToggleTag,
+  projectId, personOf, seatOf, baselineCells, runHistoryFor,
 }: LongFormatTableProps) {
   const { columns, rows } = useMemo(
     () => transformToLongFormat(results, formFields, documentsMap),
@@ -104,6 +155,12 @@ export default function LongFormatTable({
 
   const [showEvidence, setShowEvidence] = useState(false);
   const [active, setActive] = useState<ChipRef | null>(null);
+  /** Authorship is opt-in, like sources: on a 58-row table an avatar in every
+   *  human-touched cell is a lot of ink for a question you are not always
+   *  asking. Off by default so the table looks exactly as it did. */
+  const [showAuthors, setShowAuthors] = useState(false);
+  const [historyTarget, setHistoryTarget] = useState<CellHistoryTarget | null>(null);
+  const canAttribute = !!personOf;
 
 
   // Column reorder (first/"Paper" column is locked in place)
@@ -194,7 +251,7 @@ export default function LongFormatTable({
       displayColumns.forEach((col, ci) => {
         if (ci === 0) return; // Paper column
         const raw = row._rawCells?.[col] ?? resultDataMap[row._resultId]?.[col];
-        if (getSourceText(raw)) list.push({ ri, col });
+        if (hasEvidence(raw)) list.push({ ri, col });
       });
     });
     return list;
@@ -207,7 +264,7 @@ export default function LongFormatTable({
     if (!row) return null;
     const raw = row._rawCells?.[active.col] ?? resultDataMap[row._resultId]?.[active.col];
     const sourceText = getSourceText(raw);
-    if (!sourceText) return null;
+    if (!hasEvidence(raw)) return null;
     const doc = documentsMap[row._documentId];
     // Display value the cell shows — used in the "Derived value" callout
     // when the source quote can't be located verbatim in the PDF.
@@ -217,9 +274,13 @@ export default function LongFormatTable({
     return {
       sourceText,
       storedValue,
+      boxes: boxesFromLocation(raw?.source_location),
       page: getPageRef(raw),
       syntheticCaption: getSyntheticCaption(raw),
       captionImage: getCaptionImage(raw),
+      fromFigure: getFromFigure(raw),
+      figureImage: getFigureImage(raw),
+      figureVerified: getFigureVerified(raw),
       documentId: row._documentId,
       documentFilename: docLabels[row._documentId] ?? (doc ? documentLabel(doc) : row._paperFilename),
       fieldLabel: formatColumnName(active.col),
@@ -262,6 +323,18 @@ export default function LongFormatTable({
     }
   }
 
+  // Each row's position within its own paper. This is what a run-to-run diff
+  // pairs on, so it must be counted the same way the baseline index was built:
+  // per document, in emission order.
+  const rowIndexInPaper: number[] = [];
+  {
+    const nth: Record<string, number> = {};
+    for (const row of rows) {
+      const doc = row._documentId;
+      rowIndexInPaper.push((nth[doc] = (nth[doc] ?? -1) + 1));
+    }
+  }
+
   // Three states, not two: a reported value, an absence the paper is
   // responsible for (NR/NA), and our own failure to read it.
   const isFailed = (val: string) => val === FAILED_LABEL;
@@ -280,6 +353,9 @@ export default function LongFormatTable({
           {showEvidence && (
             <span className="flex items-center gap-1.5"><Quote className="w-2.5 h-2.5 text-green-500" />Has source — click to view</span>
           )}
+          {showAuthors && (
+            <span className="flex items-center gap-1.5"><Users className="w-2.5 h-2.5 text-gray-400" />Touched by a person — click for its history</span>
+          )}
         </div>
         {/* Show Sources toggle */}
         <button
@@ -294,6 +370,23 @@ export default function LongFormatTable({
           <ScanText className="w-3.5 h-3.5" />
           {showEvidence ? 'Hide Sources' : 'Show Sources'}
         </button>
+        {/* Show authors toggle. Neutral, not coloured: badge.tsx's rule is that
+            colour encodes required human action, and authorship is provenance. */}
+        {canAttribute && (
+          <button
+            onClick={() => { setShowAuthors(v => !v); setHistoryTarget(null); }}
+            title="Mark every cell a person entered, edited or confirmed"
+            className={cn(
+              'flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg border transition-all',
+              showAuthors
+                ? 'bg-gray-900 dark:bg-zinc-100 border-gray-900 dark:border-zinc-100 text-white dark:text-gray-900'
+                : 'bg-white dark:bg-[#111111] border-gray-200 dark:border-[#1f1f1f] text-gray-500 dark:text-zinc-400 hover:border-gray-300 dark:hover:border-[#2a2a2a]'
+            )}
+          >
+            <Users className="w-3.5 h-3.5" />
+            {showAuthors ? 'Hide Authors' : 'Show Authors'}
+          </button>
+        )}
       </div>
 
       <div className="overflow-x-auto">
@@ -304,36 +397,6 @@ export default function LongFormatTable({
                 const field = fieldMap[col];
                 const isPaperCol = ci === 0;
                 const isDragOver = dragOverCol === col && !isPaperCol;
-                const tooltipContent = field ? (
-                  <div className="space-y-1.5">
-                    <span className="inline-block px-1.5 py-0.5 rounded text-[10px] font-semibold bg-gray-100 dark:bg-[#2a2a2a] text-gray-600 dark:text-zinc-400 border border-gray-200 dark:border-[#2a2a2a] uppercase tracking-wider">
-                      {field.field_type}
-                    </span>
-                    {field.field_description && (
-                      <p className="text-xs leading-snug">{field.field_description}</p>
-                    )}
-                    {field.options && field.options.length > 0 && (
-                      <div>
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500 mb-0.5">Options</p>
-                        <ul className="text-xs space-y-0.5">
-                          {field.options.slice(0, 6).map(o => (
-                            <li key={o} className="text-gray-600 dark:text-zinc-400">• {o}</li>
-                          ))}
-                          {field.options.length > 6 && (
-                            <li className="text-gray-400 dark:text-zinc-600">+{field.options.length - 6} more</li>
-                          )}
-                        </ul>
-                      </div>
-                    )}
-                    {field.extraction_hints && (
-                      <div>
-                        <p className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-500 mb-0.5">Hint</p>
-                        <p className="text-xs text-gray-600 dark:text-zinc-400 leading-snug">{field.extraction_hints}</p>
-                      </div>
-                    )}
-                  </div>
-                ) : null;
-
                 return (
                   <th
                     key={col}
@@ -368,11 +431,9 @@ export default function LongFormatTable({
                   >
                     <span className="inline-flex items-center gap-1">
                       {formatColumnName(col)}
-                      {tooltipContent && (
-                        <Tooltip content={tooltipContent} side="bottom" className="rounded-xl shadow-xl border border-gray-200 dark:border-[#2a2a2a] bg-white dark:bg-[#1a1a1a] text-gray-700 dark:text-zinc-300 text-[11px] p-3.5 w-72 whitespace-normal text-left font-normal leading-relaxed">
-                          <Info className="w-3 h-3 text-blue-400 dark:text-blue-500 flex-shrink-0 cursor-default" />
-                        </Tooltip>
-                      )}
+                      {/* `always`: a column header has nothing but its name, so
+                          the type pill alone is worth the icon. */}
+                      <FieldInfoTooltip field={field} side="bottom" always />
                     </span>
                   </th>
                 );
@@ -399,7 +460,36 @@ export default function LongFormatTable({
                       ? (row._rawCells?.[col] ?? resultDataMap[row._resultId]?.[col])
                       : null;
                     const sourceText = showEvidence ? getSourceText(rawData) : null;
+                    // A drawn box or a figure is evidence with no quote in it.
+                    const cellHasEvidence = showEvidence && hasEvidence(rawData);
                     const isActive = !!active && active.ri === ri && active.col === col;
+
+                    // Who last put their hands on this cell. Read from the
+                    // envelope the backend stamps on every human save — the
+                    // richest provenance in the system, and until now the
+                    // Results page displayed none of it.
+                    const cellProv = !isFirstCol && showAuthors ? cellProvenance(rawData) : null;
+                    const touch = cellProv && touchedByHuman(cellProv) ? latestTouch(cellProv) : null;
+                    const author = touch?.userId ? personOf?.(touch.userId) ?? null : null;
+                    const isHistoryOpen =
+                      historyTarget?.resultId === row._resultId && historyTarget?.fieldName === col;
+
+                    // What the compared run said in this cell. `undefined` means
+                    // that run had no such cell (a paper it skipped, or fewer
+                    // table rows) — which is not the same as a changed value, so
+                    // it is not marked as one.
+                    const before = isFirstCol || !baselineCells
+                      ? undefined
+                      : baselineCells[`${row._documentId}|${rowIndexInPaper[ri]}|${col}`];
+                    // Compared through the app's canonical "same answer" key, not
+                    // byte-for-byte: `compareKey` trims, lowercases and normalises
+                    // numbers and booleans, so a re-run that returns "Need for…"
+                    // where it used to say "need for…" is not reported as a change.
+                    // Raw equality marked 16 cells on the live demo form, several
+                    // of them capitalisation only. Same function the consensus
+                    // screen uses to decide whether two reviewers agree.
+                    const changedSinceRun =
+                      before !== undefined && compareKey(before) !== compareKey(val);
 
                     return (
                       <td
@@ -411,9 +501,61 @@ export default function LongFormatTable({
                           !isFirstCol && (failed
                             ? 'bg-amber-50 dark:bg-[#1a150d]'
                             : missing ? 'bg-rose-50 dark:bg-[#1a0d0d]' : 'bg-green-50 dark:bg-[#0d1a10]'),
+                          // Monochrome on purpose: the three status colours are
+                          // spoken for (reported / NR / failed), and "this moved
+                          // between runs" is a different axis, not a fourth status.
+                          changedSinceRun && 'border-l-2 border-l-gray-900 dark:border-l-zinc-300',
                           isNewPaper && 'border-t-2 border-t-gray-300 dark:border-t-zinc-600'
                         )}
                       >
+                        {isFirstCol && row._extractionType === 'manual' && (() => {
+                          // Which human produced this row. Without it, a paper
+                          // extracted by more than two people shows several
+                          // identical-looking rows — and an additional
+                          // extraction is indistinguishable from an appointed
+                          // reviewer's.
+                          //
+                          // Colours come from `lib/reviewerColors` now. They used
+                          // to be hand-written here, which meant this chip and the
+                          // seven other screens that colour a role read from two
+                          // sources — and R2's move off green (green means
+                          // "settled" everywhere else) had to be made twice.
+                          // The assignment wins over the row's label: on the
+                          // live calibration project 2 of one reviewer's 7 rows
+                          // carry a stale NULL, which rendered an assigned R2 as
+                          // "+" here while Allocations said R2.
+                          const role = seatOf
+                            ? seatOf(row._extractedBy, row._documentId, row._reviewerRole)
+                            : (row._reviewerRole as string | null);
+                          const def = isReviewRole(role) ? ROLE_COLORS[role] : null;
+                          const rowAuthor = personOf?.(row._extractedBy) ?? null;
+                          return (
+                            <span className="mr-1.5 inline-flex items-center gap-1 align-middle">
+                              {showAuthors && rowAuthor && (
+                                <Avatar
+                                  email={rowAuthor.avatarKey}
+                                  name={rowAuthor.name}
+                                  size="xs"
+                                  className="h-[18px] w-[18px] text-[8px]"
+                                />
+                              )}
+                              <span
+                                className={cn(
+                                  'inline-block rounded px-1 py-px text-[9px] font-semibold uppercase tracking-wide',
+                                  def
+                                    ? def.pill
+                                    : 'bg-gray-100 text-gray-500 dark:bg-zinc-700/40 dark:text-zinc-400',
+                                )}
+                                title={[
+                                  def ? def.label : 'Additional extraction — not part of the R1/R2 comparison',
+                                  rowAuthor?.name,
+                                ].filter(Boolean).join(' · ')}
+                              >
+                                {def ? def.short : '+'}
+                              </span>
+                            </span>
+                          );
+                        })()}
                         {isFirstCol ? (
                           /* Identity, not data: the ref number and the badges live
                              here instead of in columns of their own. The badge row is
@@ -462,35 +604,108 @@ export default function LongFormatTable({
                               </div>
                             )}
                           </div>
-                        ) : failed ? (
-                          <span
-                            className="font-medium text-amber-600 dark:text-amber-500"
-                            title="Extraction failed for this cell — not a statement about the paper"
-                          >{val}</span>
-                        ) : missing ? (
-                          // `val` is already the label (NR or NA) — never hardcode
-                          // one, or an inapplicable cell reads as a reporting gap.
-                          <span className="font-medium text-gray-400 dark:text-zinc-600">{val || 'NR'}</span>
-                        ) : sourceText ? (
+                        ) : (
+                          /* One wrapper for every value state, so the source chip
+                             and the author avatar can sit beside any of them. A
+                             reviewer edits NR cells too, and the old shape could
+                             only decorate a reported value. */
+                          <div className="flex flex-col gap-1">
                           <div className="flex items-start gap-1.5">
-                            <span className="text-gray-700 dark:text-zinc-300">{val}</span>
+                            {failed ? (
+                              <span
+                                className="font-medium text-amber-600 dark:text-amber-500"
+                                title="Extraction failed for this cell — not a statement about the paper"
+                              >{val}</span>
+                            ) : missing ? (
+                              // `val` is already the label (NR or NA) — never hardcode
+                              // one, or an inapplicable cell reads as a reporting gap.
+                              <span className="font-medium text-gray-400 dark:text-zinc-600">{val || 'NR'}</span>
+                            ) : (
+                              <span className="text-gray-700 dark:text-zinc-300">{val}</span>
+                            )}
+                            {!failed && !missing && cellHasEvidence && (
+                              <button
+                                type="button"
+                                onClick={() => setActive({ ri, col })}
+                                title="View source passage"
+                                aria-pressed={isActive}
+                                className={cn(
+                                  'flex-none inline-flex items-center justify-center p-0.5 rounded transition-all',
+                                  isActive
+                                    ? 'bg-green-500 text-white shadow-[0_0_0_3px_rgba(16,128,106,0.18)] dark:bg-green-400 dark:text-[#0a0a0a]'
+                                    : 'text-green-500 hover:bg-green-50 hover:-translate-y-px dark:text-green-400 dark:hover:bg-green-900/30',
+                                )}
+                              >
+                                <Quote className="w-3 h-3" />
+                              </button>
+                            )}
+                            {author && (
+                              <button
+                                type="button"
+                                onClick={() => setHistoryTarget({
+                                  resultId: row._resultId,
+                                  documentId: row._documentId,
+                                  paperLabel: docLabels[row._documentId]
+                                    ?? documentLabel(documentsMap[row._documentId]),
+                                  fieldName: col,
+                                  fieldLabel: formatColumnName(col),
+                                  raw: rawData,
+                                  displayValue: val,
+                                })}
+                                aria-pressed={isHistoryOpen}
+                                title={`${author.name} — ${cellProv?.origin === 'human_confirmed'
+                                  ? 'confirmed this value'
+                                  : cellProv?.origin === 'human_edited'
+                                    ? 'changed this value'
+                                    : 'entered this value'}. Click for its history.`}
+                                className={cn(
+                                  'flex-none rounded-full transition-all hover:-translate-y-px',
+                                  isHistoryOpen && 'ring-2 ring-gray-900 dark:ring-zinc-100',
+                                )}
+                              >
+                                <Avatar
+                                  email={author.avatarKey}
+                                  name={author.name}
+                                  size="xs"
+                                  className="h-[18px] w-[18px] text-[8px]"
+                                />
+                              </button>
+                            )}
+                          </div>
+                          {/* The previous value goes UNDERNEATH, wrapped and
+                              clamped. Inline it was a single-line flex item with
+                              nothing to shrink it, so a long prior answer smeared
+                              across four neighbouring columns — the same class of
+                              overflow as an unbounded `truncate` in a table cell. */}
+                          {changedSinceRun && (
                             <button
                               type="button"
-                              onClick={() => setActive({ ri, col })}
-                              title="View source passage"
-                              aria-pressed={isActive}
+                              onClick={() => setHistoryTarget({
+                                resultId: row._resultId,
+                                documentId: row._documentId,
+                                paperLabel: docLabels[row._documentId]
+                                  ?? documentLabel(documentsMap[row._documentId]),
+                                fieldName: col,
+                                fieldLabel: formatColumnName(col),
+                                raw: rawData,
+                                displayValue: val,
+                                runHistory: runHistoryFor?.(
+                                  row._documentId, rowIndexInPaper[ri], col,
+                                ),
+                              })}
+                              aria-pressed={isHistoryOpen}
+                              title="Changed since the compared run. Click for this cell across every run."
                               className={cn(
-                                'flex-none inline-flex items-center justify-center p-0.5 rounded transition-all',
-                                isActive
-                                  ? 'bg-green-500 text-white shadow-[0_0_0_3px_rgba(16,128,106,0.18)] dark:bg-green-400 dark:text-[#0a0a0a]'
-                                  : 'text-green-500 hover:bg-green-50 hover:-translate-y-px dark:text-green-400 dark:hover:bg-green-900/30',
+                                'block w-full max-w-full break-words rounded px-1 py-0.5 text-left text-[10px] leading-snug line-clamp-2 transition-colors',
+                                'bg-gray-900/5 text-gray-500 line-through hover:bg-gray-900/10',
+                                'dark:bg-white/10 dark:text-zinc-400 dark:hover:bg-white/20',
+                                isHistoryOpen && 'ring-1 ring-gray-900 dark:ring-zinc-100',
                               )}
                             >
-                              <Quote className="w-3 h-3" />
+                              {before === '' ? '—' : before}
                             </button>
+                          )}
                           </div>
-                        ) : (
-                          <span className="text-gray-700 dark:text-zinc-300">{val}</span>
                         )}
                       </td>
                     );
@@ -510,6 +725,7 @@ export default function LongFormatTable({
         documentId={activeData?.documentId ?? null}
         documentFilename={activeData?.documentFilename ?? null}
         sourceText={activeData?.sourceText ?? null}
+        boxes={activeData?.boxes ?? null}
         storedValue={activeData?.storedValue ?? null}
         fieldLabel={activeData?.fieldLabel}
         page={activeData?.page ?? null}
@@ -519,10 +735,23 @@ export default function LongFormatTable({
         doi={activeData?.doi ?? null}
         syntheticCaption={activeData?.syntheticCaption ?? false}
         captionImage={activeData?.captionImage ?? null}
+        fromFigure={activeData?.fromFigure ?? false}
+        figureImage={activeData?.figureImage ?? null}
+        figureVerified={activeData?.figureVerified ?? null}
         onPrev={goPrev}
         onNext={goNext}
         hasPrev={hasPrev}
         hasNext={hasNext}
+      />
+
+      {/* Not gated on `canAttribute`: on the AI tab there is no author to name,
+          but a cell still has a run history, and that is reached from here. */}
+      <CellHistoryPanel
+        target={historyTarget}
+        projectId={projectId}
+        personOf={personOf}
+        seatOf={seatOf}
+        onClose={() => setHistoryTarget(null)}
       />
     </>
   );

@@ -6,7 +6,7 @@ import { Card, CardContent } from '@/components/ui';
 import { cn, formatModelName, modelTagTheme } from '@/lib/utils';
 import { usageService, type UsageByProjectRun } from '@/services/usage.service';
 import {
-  DollarSign, Clock, Play, FileStack, Wrench, Layers,
+  DollarSign, Clock, Play, FileStack, Wrench, Layers, BarChart3,
   ChevronDown, ChevronRight, CheckCircle2, XCircle, Loader2, Ban,
 } from 'lucide-react';
 
@@ -107,7 +107,7 @@ export function ProjectCostSummary({ projectId }: { projectId: string }) {
         ) : (
           <>
             {/* headline stat strip */}
-            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-6">
+            <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-7">
               <Stat
                 icon={<DollarSign size={13} />}
                 label="Total"
@@ -124,6 +124,12 @@ export function ProjectCostSummary({ projectId }: { projectId: string }) {
                 label="Form building"
                 value={fmtUSD(row.codegen_cost_usd)}
                 sub="one-time"
+              />
+              <Stat
+                icon={<BarChart3 size={13} />}
+                label="Figures"
+                value={fmtUSD(row.figures_cost_usd ?? 0)}
+                sub="per document"
               />
               <Stat
                 icon={<Clock size={13} />}

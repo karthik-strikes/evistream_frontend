@@ -5,6 +5,7 @@ import type {
   PilotFieldFeedback,
   ReviewNote,
   FieldEditUpdate, FieldEditsResponse, FieldPromptsResponse, TableExtractionMode,
+  SuggestGroupsResponse,
 } from '@/types/api';
 
 export const formsService = {
@@ -104,6 +105,26 @@ export const formsService = {
    * metadata write and its OCC guard. Either argument may be empty/omitted,
    * but not both — the API rejects a no-op request.
    */
+  /**
+   * Ask the model what each column of one table field is a property of.
+   *
+   * Read-only: it proposes, and `updateFieldEdits` above is still the only
+   * writer. The reviewer keeps or changes every answer before anything is
+   * saved, so a wrong proposal costs a click rather than reshaping the form.
+   */
+  async suggestColumnGroups(formId: string, fieldName: string): Promise<SuggestGroupsResponse> {
+    return apiClient.post<SuggestGroupsResponse>(
+      `/api/v1/forms/${formId}/fields/${encodeURIComponent(fieldName)}/suggest-groups`,
+      {},
+      // The client default is 30s; a 16-column table measured 62s, because the
+      // model reasons before answering and that reasoning is what makes the
+      // answer good. nginx already allows 300s on /api/, so 30s was the only
+      // thing cutting the call off — and it did so with the work already paid
+      // for and no cache entry written, making the retry just as slow.
+      { timeout: 180000 },
+    );
+  },
+
   async updateFieldEdits(
     formId: string,
     fieldUpdates: FieldEditUpdate[],
