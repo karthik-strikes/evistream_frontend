@@ -21,18 +21,23 @@
  * 2.1–2.3 are about the trial, so they live in one place and every result of
  * that trial reads them. The card says so and offers the way back.
  *
- * **A question that routes out keeps no answer.** It is drawn struck through
- * with the rule that skipped it, and exports as `Not applicable` — never as a
- * blank that reads like an oversight.
+ * **A question that is not being asked is in one of two states, not one.**
+ * Either the answers above it mean RoB 2 will never ask it — struck through,
+ * with the rule that skipped it, exported as `Not applicable` — or a question
+ * before it is still unanswered, in which case nothing has ruled it out and it
+ * is simply *waiting*. Drawing the second as the first tells a reviewer a
+ * question has been dismissed when it is about to reappear.
  */
 
 import { useState } from 'react';
 import { Check, ChevronRight, Sparkles } from 'lucide-react';
 
 import {
-  ANSWER_LABEL, ANSWER_ORDER, isAsked,
+  ANSWER_LABEL, ANSWER_ORDER,
   type AnswerCode, type Answers, type SignallingQuestion,
 } from '../_lib/rob2';
+import { questionState } from '../_lib/robQueue';
+import { ANSWER, ANSWER_ON } from '../_lib/robSkin';
 import type { QuestionEvidence } from '../_lib/robSignalling';
 
 export interface AiSuggestion {
@@ -48,6 +53,13 @@ interface Props {
   merged: Answers;
   evidence?: QuestionEvidence;
   rationale: string;
+  /** Where the reviewer looked, and what it said. */
+  source?: { reference: string; passage: string };
+  onSource?: (next: { reference: string; passage: string }) => void;
+  /** Set when this answer arrived by copying from another result. */
+  origin?: { copiedFrom?: string; editedSince?: boolean };
+  /** What to call the result it was copied from. */
+  originLabel?: string;
   suggestion?: AiSuggestion | null;
   /** True when the model was asked this question and found nothing. */
   notFound?: boolean;
@@ -57,6 +69,15 @@ interface Props {
   siblingCount?: number;
   readOnly: boolean;
   showAi: boolean;
+  /**
+   * Take the answer back out.
+   *
+   * There was no way to unanswer: every option sets a value, so a reviewer who
+   * clicked the wrong one could only pick a different wrong one. RoB 2 routes
+   * on these answers, so an unintended "Probably yes" silently decides which
+   * questions come next — "I have not answered this" has to be reachable.
+   */
+  onClear?: () => void;
   onAnswer: (code: AnswerCode, origin: 'own' | 'ai') => void;
   onRationale: (text: string) => void;
   onEditTrial?: () => void;
@@ -68,16 +89,23 @@ interface Props {
 const ANALYSIS_SENSITIVE = new Set(['2.6', '2.7', '3.1', '3.2']);
 
 export function QuestionCard({
-  question, merged, evidence, rationale, suggestion, notFound,
-  fromTrial, siblingCount, readOnly, showAi,
-  onAnswer, onRationale, onEditTrial, analysisPopulation,
+  question, merged, evidence, rationale, source, onSource, origin, originLabel,
+  suggestion, notFound, fromTrial, siblingCount, readOnly, showAi,
+  onAnswer, onRationale, onEditTrial, analysisPopulation, onClear,
 }: Props) {
   const [showWhy, setShowWhy] = useState(false);
-  const asked = isAsked(question, merged);
+  const [showEvidence, setShowEvidence] = useState(false);
+  const state = questionState(question, merged);
   const current = merged[question.id];
   const locked = readOnly || !!fromTrial;
 
-  if (!asked) {
+  // A waiting question renders nothing of its own — the domain says it once,
+  // below its questions. One card each for 3.2, 3.3 and 3.4 is three lines of
+  // the same sentence, and they push the question that CAN be answered up out
+  // of sight.
+  if (state === 'waiting') return null;
+
+  if (state === 'skipped') {
     return (
       <article className="border border-dashed border-gray-200 dark:border-[#242424] rounded-xl px-4 py-3 bg-gray-50/60 dark:bg-[#0d0d0d]">
         <div className="flex items-start gap-2.5">
@@ -103,22 +131,22 @@ export function QuestionCard({
   return (
     <article
       className={[
-        'border rounded-xl px-4 py-3.5',
+        'rounded-[10px] border p-5 min-w-0',
         fromTrial
-          ? 'border-gray-200 dark:border-[#242424] bg-gray-50/60 dark:bg-[#0d0d0d]'
-          : 'border-border dark:border-[#1f1f1f] bg-white dark:bg-[#111111]',
+          ? 'border-gray-200 dark:border-[#242424] bg-gray-50 dark:bg-[#0d0d0d]'
+          : 'border-gray-200 dark:border-[#1f1f1f] bg-white dark:bg-[#111111]',
       ].join(' ')}
     >
       <div className="flex items-start gap-2.5">
-        <span className="font-mono text-[11px] text-gray-400 dark:text-zinc-600 mt-1 w-8 flex-shrink-0">
+        <span className="text-[11px] font-bold tracking-[0.05em] text-gray-500 dark:text-zinc-500 mt-1 w-8 flex-shrink-0">
           {question.id}
         </span>
-        <span className="text-[13.5px] font-medium leading-snug dark:text-white">
+        <span className="text-[14px] font-semibold leading-relaxed text-gray-900 dark:text-white">
           {question.text}
         </span>
       </div>
 
-      <div className="flex flex-wrap gap-1.5 mt-3 ml-[42px]" role="radiogroup"
+      <div className="flex flex-wrap gap-[7px] mt-3.5 ml-[42px]" role="radiogroup"
            aria-label={`Answer to question ${question.id}`}>
         {options.map(code => {
           const on = current === code;
@@ -131,10 +159,8 @@ export function QuestionCard({
               disabled={locked}
               onClick={() => onAnswer(code, 'own')}
               className={[
-                'text-[12px] font-semibold rounded-lg px-2.5 py-1.5 border transition-colors',
-                on
-                  ? 'border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-gray-900'
-                  : 'border-gray-200 text-gray-600 hover:bg-gray-50 dark:border-[#2a2a2a] dark:text-zinc-400 dark:hover:bg-[#1a1a1a]',
+                on ? ANSWER_ON : ANSWER,
+                'transition-colors',
                 locked && 'opacity-50 cursor-not-allowed',
               ].filter(Boolean).join(' ')}
             >
@@ -167,9 +193,20 @@ export function QuestionCard({
         </div>
       )}
 
+      {current && !readOnly && !fromTrial && onClear && (
+        <div className="mt-2 ml-[42px]">
+          <button
+            type="button"
+            onClick={onClear}
+            className="text-[11.5px] font-semibold text-gray-500 dark:text-zinc-500 hover:text-gray-800 dark:hover:text-zinc-300 hover:underline"
+          >
+            Clear answer
+          </button>
+        </div>
+      )}
+
       {current === 'NI' && !fromTrial && (
-        <div className="mt-2.5 ml-[42px] flex items-start gap-2 text-[11.5px] text-amber-800 dark:text-amber-300 bg-amber-50 dark:bg-amber-500/5 border border-amber-200 dark:border-amber-900/50 rounded-lg px-2.5 py-2">
-          <span aria-hidden className="font-bold">!</span>
+        <div className="mt-2.5 ml-[42px] flex items-start gap-2 text-[11.5px] text-gray-700 dark:text-zinc-300 bg-gray-50 dark:bg-gray-500/5 border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2.5 py-2">
           <span>
             &ldquo;No information&rdquo; is a finding about the trial report, not about the search.
             Recorded with the sources that had been searched when you answered.
@@ -178,7 +215,7 @@ export function QuestionCard({
       )}
 
       {showAi && !fromTrial && suggestion && (
-        <div className="mt-3 ml-[42px] border border-gray-200 dark:border-[#242424] rounded-xl bg-gray-50/70 dark:bg-[#0d0d0d] px-3.5 py-3">
+        <div className="mt-3 ml-[42px] border border-gray-200 dark:border-[#242424] rounded-xl bg-gray-50 dark:bg-[#0d0d0d] px-3.5 py-3">
           <div className="flex items-center gap-2 flex-wrap">
             <Sparkles className="h-3 w-3 text-gray-500 dark:text-zinc-500" />
             <span className="text-[11px] font-semibold uppercase tracking-wider text-gray-500 dark:text-zinc-500">
@@ -191,7 +228,7 @@ export function QuestionCard({
 
           {suggestion.quote && (
             <>
-              <div className="text-[12.5px] italic text-gray-700 dark:text-zinc-300 leading-relaxed mt-2 border-l-2 border-gray-300 dark:border-[#2a2a2a] pl-2.5">
+              <div className="text-[12.5px] italic text-gray-700 dark:text-zinc-300 leading-relaxed mt-2 border-l-2 border-gray-200 dark:border-[#2a2a2a] pl-2.5">
                 &ldquo;{suggestion.quote}&rdquo;
               </div>
               {suggestion.locator && (
@@ -250,6 +287,17 @@ export function QuestionCard({
         </div>
       )}
 
+      {/* Where this answer came from, when it did not come from here. An answer
+          that arrived by copy is a weaker claim than one somebody made looking
+          at this result, and consensus has to be able to tell them apart. */}
+      {origin?.copiedFrom && (
+        <div className="mt-2 ml-[42px] text-[11.5px] text-gray-500 dark:text-zinc-500">
+          {origin.editedSince
+            ? <>Copied from <strong>{originLabel ?? 'another result'}</strong>, and edited since.</>
+            : <>Copied from <strong>{originLabel ?? 'another result'}</strong>.</>}
+        </div>
+      )}
+
       <div className="mt-3 ml-[42px]">
         {evidence?.quote && (
           <div className="flex items-start gap-2 border border-gray-200 dark:border-[#242424] rounded-lg px-2.5 py-2 mb-2">
@@ -265,14 +313,53 @@ export function QuestionCard({
             </div>
           </div>
         )}
-        <textarea
-          value={rationale}
-          disabled={locked}
-          onChange={e => onRationale(e.target.value)}
-          rows={2}
-          placeholder="Your reasoning — optional, and it travels to consensus"
-          className="w-full text-[12.5px] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2.5 py-2 bg-white dark:bg-[#0d0d0d] dark:text-zinc-200 focus:outline-none focus:border-gray-400 dark:focus:border-[#3a3a3a] disabled:opacity-50 resize-y"
-        />
+        <button
+          type="button"
+          onClick={() => setShowEvidence(v => !v)}
+          aria-expanded={showEvidence}
+          className="text-[11.5px] font-semibold text-gray-500 dark:text-zinc-500 hover:underline"
+        >
+          Evidence &amp; reasoning
+          {(source?.reference || source?.passage || rationale) && (
+            <span className="ml-1 text-gray-400 dark:text-zinc-600">· recorded</span>
+          )}
+        </button>
+
+        {showEvidence && (
+          <div className="flex flex-col gap-2 mt-2">
+            {/* Reasoning is prose. These two are the parts that can be checked:
+                where the reviewer looked, and what it said. */}
+            <input
+              type="text"
+              value={source?.reference ?? ''}
+              disabled={locked || !onSource}
+              onChange={e => onSource?.({
+                reference: e.target.value, passage: source?.passage ?? '' })}
+              placeholder="Where you looked — p.6 · Table 2, the protocol, the registry entry"
+              aria-label={`Source reference for question ${question.id}`}
+              className="w-full text-[12.5px] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2.5 py-1.5 bg-white dark:bg-[#0d0d0d] dark:text-zinc-200 focus:outline-none disabled:opacity-50"
+            />
+            <textarea
+              value={source?.passage ?? ''}
+              disabled={locked || !onSource}
+              rows={2}
+              onChange={e => onSource?.({
+                reference: source?.reference ?? '', passage: e.target.value })}
+              placeholder="What it said, in the source's own words"
+              aria-label={`Supporting passage for question ${question.id}`}
+              className="w-full text-[12.5px] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2.5 py-2 bg-white dark:bg-[#0d0d0d] dark:text-zinc-200 focus:outline-none disabled:opacity-50 resize-y"
+            />
+            <textarea
+              value={rationale}
+              disabled={locked}
+              onChange={e => onRationale(e.target.value)}
+              rows={2}
+              placeholder="Your reasoning — optional, and it travels to consensus"
+              aria-label={`Reasoning for question ${question.id}`}
+              className="w-full text-[12.5px] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2.5 py-2 bg-white dark:bg-[#0d0d0d] dark:text-zinc-200 focus:outline-none focus:border-gray-400 dark:focus:border-[#2a2a2a] disabled:opacity-50 resize-y"
+            />
+          </div>
+        )}
       </div>
     </article>
   );

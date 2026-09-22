@@ -28,7 +28,8 @@
  * check scripts can import it under bare Node.
  */
 
-import type { AnswerCode, Answers } from './rob2';
+import { ROB2_QUESTIONS, type AnswerCode, type Answers } from './rob2';
+import { questionState } from './robRouting';
 
 /** The six questions answered once per study. */
 export const TRIAL_QUESTIONS: readonly string[] = ['1.1', '1.2', '1.3', '2.1', '2.2', '2.3'];
@@ -72,6 +73,24 @@ export function contrastLabel(contrast?: Contrast | null): string {
 }
 
 /**
+ * Which set of trial answers this result reads — study AND comparison.
+ *
+ * 2.1-2.3 ask who knew the assigned intervention, and in a trial running three
+ * drugs against placebo one arm can be double-blind and another open-label. One
+ * set per trial would make a reviewer give a single answer to two different
+ * truths. Every result of the same comparison still shares one set; that is the
+ * point of answering them once.
+ *
+ * A result whose comparison is not settled has no scope yet and falls back to
+ * the study, which is where these answers lived before they were scoped.
+ */
+export function trialKey(
+  result: Pick<ResultIdentity, 'document_id' | 'contrast'>,
+): string {
+  return `${result.document_id}:${result.contrast?.id ?? ''}`;
+}
+
+/**
  * The one-line name of a result, for a queue row or a header.
  *
  * The measurement is in the name, not dropped as a detail. A responder
@@ -80,6 +99,31 @@ export function contrastLabel(contrast?: Contrast | null): string {
  * the measurement two queue rows read identically, which is precisely the
  * confusion this page exists to remove.
  */
+/**
+ * How a recorded absence should read on screen.
+ *
+ * A trial that says "not applicable" and a trial that simply never reported it
+ * are different facts, and both are different from a value nobody extracted.
+ * The corpus records all three as terse tokens; showing the token is showing
+ * our storage format, and showing nothing at all quietly merges the three.
+ *
+ * An empty string IS the third case — nothing was extracted — and stays blank,
+ * because writing "not reported" over it would assert something about the paper
+ * that nobody checked.
+ */
+export function absenceLabel(value: string | null | undefined): string {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const upper = text.toUpperCase();
+  if (upper === 'NA' || upper === 'N.A.' || upper === 'NOT APPLICABLE') {
+    return 'Not applicable (NA)';
+  }
+  if (upper === 'NR' || upper === 'N/R' || upper === 'NOT REPORTED') {
+    return 'Not reported (NR)';
+  }
+  return text;
+}
+
 export function shortLabel(result: ResultIdentity): string {
   const parts = [result.outcome_domain];
   if (result.measurement) parts.push(result.measurement);
@@ -91,6 +135,29 @@ export function shortLabel(result: ResultIdentity): string {
     parts.push(result.population);
   }
   return parts.join(' · ');
+}
+
+/**
+ * A result's name in a queue row, where the study header already carries the
+ * comparison.
+ *
+ * Saying "vs Placebo" on all six rows under a header that says it once buries
+ * the thing that actually differs between them — the outcome, the timepoint and
+ * how it was measured. `shortLabel` keeps the comparison because it is used
+ * where there is no header to carry it.
+ */
+export function rowLabel(result: ResultIdentity): {
+  title: string; detail: string;
+} {
+  const title = [result.outcome_domain, absenceLabel(result.timepoint)]
+    .filter(Boolean).join(' · ');
+  const detail = [
+    result.measurement,
+    // A subgroup is a real difference between two rows; "Overall" is what we
+    // wrote when no source form recorded a population.
+    result.population && !/^overall$/i.test(result.population) ? result.population : '',
+  ].filter(Boolean).join(' · ');
+  return { title: title || 'Result', detail };
 }
 
 export interface IdentitySlot {
@@ -158,12 +225,29 @@ export function splitAnswers(answers: Answers): { trial: Answers; result: Answer
   return { trial, result };
 }
 
-/** Whether the six trial-level questions are all answered for a study. */
-export function trialComplete(trial: Answers): boolean {
-  return TRIAL_QUESTIONS.every((id) => !!trial[id]);
+/**
+ * Which trial questions RoB 2 is still waiting on — routing included.
+ *
+ * Not "which of the six have no answer". 2.3 is asked only when 2.1 or 2.2 says
+ * somebody was aware of the assigned intervention; answer both "No" and the
+ * instrument never asks it, `writeTrial` drops any answer to it, and a flat
+ * count then reports it missing forever. That left D1 and D2 gated behind a
+ * question that could not be answered, with "Answer them now" offering to take
+ * the reviewer somewhere that had nothing to ask.
+ *
+ * A question whose routing turns on one nobody has answered yet is NOT listed:
+ * it is `waiting`, and what is actually outstanding is the question before it.
+ */
+export function trialOutstanding(trial: Answers): string[] {
+  return TRIAL_QUESTIONS.filter((id) => {
+    if (trial[id]) return false;
+    const question = ROB2_QUESTIONS.find((q) => q.id === id);
+    // Unknown id: fall back to the flat reading rather than silently passing.
+    return question ? questionState(question, trial) === 'asked' : true;
+  });
 }
 
-/** Which of the six are still open, for the gate message. */
-export function trialOutstanding(trial: Answers): string[] {
-  return TRIAL_QUESTIONS.filter((id) => !trial[id]);
+/** Whether every trial question this trial is ASKED has an answer. */
+export function trialComplete(trial: Answers): boolean {
+  return trialOutstanding(trial).length === 0;
 }

@@ -136,9 +136,43 @@ export interface RobFormMapping {
   columns: string[];
   /** Real values per column — the mapping is confirmed against these, not names. */
   samples: Record<string, string[]>;
+  /**
+   * One whole extracted row, so the identity preview is a real example.
+   *
+   * Values per column cannot answer "what identity would this produce": the
+   * first value of two columns need not come from the same extraction.
+   */
+  sample_row?: Record<string, string>;
+  /**
+   * Counts over EVERY row, unlike `samples`, which stops at 12 values from the
+   * first 200. Only these can answer "is this column constant?" — judging that
+   * from the sample is how a dead-looking `outcome_other` on a 28-row
+   * calibration project turned out to carry 17 real outcome names on the
+   * 618-row one.
+   */
+  column_stats?: Record<string, {
+    rows: number; filled: number; usable: number; placeholder: number; distinct: number;
+  }>;
+  /** Whether each mapped fallback actually covers the rows whose primary is a placeholder. */
+  fallbacks?: Array<{
+    primary: string; fallback: string; affected: number; covered: number;
+    examples: string[]; uncovered_examples: string[];
+  }>;
+  /** The measurement this form will fall back to, decided by `rob_mapping`. */
+  measurement_standin?: string;
   mapping: Record<string, string>;
+  /**
+   * The name of the registered table shape this mapping came from, or "" when
+   * the table is one nobody has mapped. Empty is not an error: it means the
+   * screen must ask rather than propose.
+   */
+  known_shape?: string;
+  /** Mapped columns the form no longer has. Reported, never substituted. */
+  missing_columns?: Array<{ role: string; column: string }>;
   /** False while the proposal has never been confirmed by a person. */
   stored: boolean;
+  /** Confirmed for THIS form. Editing one form never vouches for another. */
+  confirmed: boolean;
   warnings: RobMappingWarning[];
   needs_review: boolean;
   extractions: number;
@@ -169,6 +203,8 @@ export interface RobBuildResponse {
     document_id: string;
     identity: Record<string, string>;
     from: string[];
+    /** The same two forms by id — resolving a duplicate acts on one of them. */
+    from_ids: Array<string | null>;
   }>;
   /** Forms deliberately not used as sources — shown so the omission is visible. */
   excluded: RobExcludedForm[];
@@ -230,6 +266,17 @@ export const robService = {
     return apiClient.patch(`/api/v1/rob/contrasts/${contrastId}`, patch);
   },
 
+  /**
+   * Remove a comparison nobody's results point at.
+   *
+   * The server attempts the delete and lets the foreign key answer, so a
+   * comparison that gained a result a moment ago is refused with **409**
+   * rather than removed on the strength of a count taken beforehand.
+   */
+  async deleteContrast(contrastId: string): Promise<void> {
+    await apiClient.delete(`/api/v1/rob/contrasts/${contrastId}`);
+  },
+
   /** Every assessable result, with its contrast resolved. */
   async listResults(projectId: string, includeHeld = true): Promise<{
     results: RobResult[]; contrasts: RobContrast[];
@@ -273,12 +320,12 @@ export const robService = {
    * which estimate each belongs to. Judgements come out recomputed from the
    * exported answers, with a column saying whether a reviewer overrode them.
    */
-  async exportCsv(projectId: string): Promise<Blob> {
+  async exportCsv(projectId: string, format: 'csv' | 'json' = 'csv'): Promise<Blob> {
     const token = apiClient.getToken();
     const headers: Record<string, string> = {};
     if (token) headers['Authorization'] = `Bearer ${token}`;
     const response = await fetch(
-      `/api/v1/rob/export?project_id=${encodeURIComponent(projectId)}&format=csv`,
+      `/api/v1/rob/export?project_id=${encodeURIComponent(projectId)}&format=${format}`,
       { headers },
     );
     if (!response.ok) throw new Error(`Export failed with status ${response.status}`);

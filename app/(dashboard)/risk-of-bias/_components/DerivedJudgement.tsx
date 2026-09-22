@@ -52,11 +52,15 @@ export function DerivedJudgement({
   const [open, setOpen] = useState(false);
   const [draftWhy, setDraftWhy] = useState(overrideWhy);
   const isOverall = domain === 5;
-  const code = isOverall ? 'Overall judgement' : `${ROB2_SIGNALLING[domain].code} judgement`;
+  // "Suggested", not "derived": the algorithm proposes and the reviewer decides.
+  // RoB 2 expects reviewer judgement, and a label presented as the tool's own
+  // output invites people to accept it without reading the answers under it.
+  const code = isOverall
+    ? 'Overall judgement' : `${ROB2_SIGNALLING[domain].code} · suggested judgement`;
 
   const tone: Record<Severity, string> = {
     low: 'text-emerald-600 dark:text-emerald-400',
-    some: 'text-amber-600 dark:text-amber-400',
+    some: 'text-amber-700 dark:text-amber-400',
     high: 'text-red-600 dark:text-red-400',
     none: 'text-gray-400 dark:text-zinc-600',
   };
@@ -75,11 +79,12 @@ export function DerivedJudgement({
         confidence in this result is a reviewer judgement the rules do not make.</>
     );
   } else {
-    waiting = <>Neither the AI nor this screen picks the label.</>;
+    waiting = <>Answer the applicable questions to see a proposed judgement. Neither the AI
+      nor this screen picks the label.</>;
   }
 
   return (
-    <div className="border border-border rounded-xl bg-white dark:bg-[#111111] dark:border-[#1f1f1f]">
+    <div className="border border-gray-200 rounded-xl bg-white dark:bg-[#111111] dark:border-[#1f1f1f]">
       <div className="px-3.5 py-3.5 border-b border-gray-100 dark:border-[#1a1a1a]">
         <div className="text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-600">
           {code}
@@ -92,7 +97,7 @@ export function DerivedJudgement({
         <div className="text-[10px] font-mono text-gray-400 dark:text-zinc-600 mt-0.5">
           {override
             ? `your judgement — the rules proposed ${derived ? SEVERITY_SHORT[derived] : 'nothing yet'}`
-            : 'derived from the signalling answers'}
+            : 'proposed from the signalling answers'}
         </div>
         <p className="text-[12px] text-gray-500 dark:text-zinc-500 mt-2 leading-relaxed">{waiting}</p>
 

@@ -24,8 +24,12 @@ interface Props {
   onSelect: (index: number) => void;
   severities: Severity[];
   confirmed: boolean[];
-  /** Per domain: how many applicable questions have answers, and how many there are. */
-  counts: Array<{ answered: number; applicable: number }>;
+  /**
+   * Per domain: answered, applicable, and whether more may yet appear. The `+`
+   * is what stops "3/3" reading as finished when one answer would add four
+   * questions.
+   */
+  counts: Array<{ answered: number; applicable: number; mayGrow?: boolean }>;
   overall: Severity;
 }
 
@@ -38,7 +42,7 @@ export function SeverityPill({ severity }: { severity: Severity }) {
   };
   return (
     <span className={`inline-flex items-center gap-1 text-[10.5px] font-semibold rounded-full border px-1.5 py-px whitespace-nowrap ${tone[severity]}`}>
-      <span aria-hidden>{SEVERITY_GLYPH[severity]}</span>
+      {SEVERITY_GLYPH[severity] && <span aria-hidden>{SEVERITY_GLYPH[severity]}</span>}
       {SEVERITY_SHORT[severity]}
     </span>
   );
@@ -46,7 +50,7 @@ export function SeverityPill({ severity }: { severity: Severity }) {
 
 export function DomainRail({ active, onSelect, severities, confirmed, counts, overall }: Props) {
   return (
-    <nav className="flex flex-col" aria-label="Domains">
+    <nav className="flex flex-col gap-1 p-2" aria-label="Domains">
       {ROB2_SIGNALLING.map((domain, i) => (
         <button
           key={domain.code}
@@ -54,30 +58,29 @@ export function DomainRail({ active, onSelect, severities, confirmed, counts, ov
           aria-current={active === i}
           onClick={() => onSelect(i)}
           className={[
-            'flex items-start gap-2.5 w-full text-left px-3.5 py-2.5 border-b border-gray-100 dark:border-[#1a1a1a] transition-colors',
+            'flex items-start gap-2.5 w-full text-left rounded-lg px-2.5 py-3 border transition-colors',
             active === i
-              ? 'bg-gray-50 dark:bg-[#161616]'
-              : 'hover:bg-gray-50/60 dark:hover:bg-[#141414]',
+              ? 'bg-gray-100 border-gray-300 text-gray-900 dark:bg-[#161616] dark:border-[#2a2a2a] dark:text-white'
+              : 'border-transparent text-gray-700 hover:bg-gray-50 dark:text-zinc-300 dark:hover:bg-[#141414]',
           ].join(' ')}
         >
           <span className={[
-            'flex items-center justify-center w-5 h-5 mt-px rounded-full text-[10px] font-bold flex-shrink-0',
-            confirmed[i]
-              ? 'bg-gray-900 text-white dark:bg-white dark:text-gray-900'
-              : 'border border-gray-200 text-gray-500 dark:border-[#2a2a2a] dark:text-zinc-500',
+            'flex items-center justify-center w-[25px] h-[25px] rounded-[7px] text-[11px] font-bold flex-shrink-0 border',
+            active === i || confirmed[i]
+              ? 'bg-gray-900 border-gray-900 text-white dark:bg-white dark:border-white dark:text-gray-900'
+              : 'bg-white border-gray-200 text-gray-500 dark:bg-transparent dark:border-[#2a2a2a] dark:text-zinc-500',
           ].join(' ')}>
             {confirmed[i] ? '✓' : i + 1}
           </span>
           <span className="min-w-0 flex-1">
-            <span className="block text-[12.5px] font-semibold leading-snug dark:text-white">
+            <span className="block text-[12px] font-semibold leading-snug">
               {domain.name}
             </span>
             <span className="flex items-center gap-2 flex-wrap mt-1">
               <SeverityPill severity={severities[i] ?? 'none'} />
               <span className="text-[11px] text-gray-500 dark:text-zinc-500">
-                {confirmed[i]
-                  ? 'confirmed'
-                  : `${counts[i]?.answered ?? 0} / ${counts[i]?.applicable ?? 0}`}
+                {counts[i]?.answered ?? 0}/{counts[i]?.applicable ?? 0}
+                {counts[i]?.mayGrow && '+'}
               </span>
             </span>
           </span>
@@ -88,18 +91,26 @@ export function DomainRail({ active, onSelect, severities, confirmed, counts, ov
         aria-current={active === 5}
         onClick={() => onSelect(5)}
         className={[
-          'flex items-start gap-2.5 w-full text-left px-3.5 py-2.5 transition-colors',
-          active === 5 ? 'bg-gray-50 dark:bg-[#161616]' : 'hover:bg-gray-50/60 dark:hover:bg-[#141414]',
+          'flex items-start gap-2.5 w-full text-left rounded-lg px-2.5 py-3 border transition-colors',
+          active === 5
+            ? 'bg-gray-100 border-gray-300 text-gray-900 dark:bg-[#161616] dark:border-[#2a2a2a] dark:text-white'
+            : 'border-transparent text-gray-700 hover:bg-gray-50 dark:text-zinc-300 dark:hover:bg-[#141414]',
         ].join(' ')}
       >
-        <span className="flex items-center justify-center w-5 h-5 mt-px rounded-full text-[10px] font-bold border border-gray-200 text-gray-500 dark:border-[#2a2a2a] dark:text-zinc-500 flex-shrink-0">
+        <span className={[
+          'flex items-center justify-center w-[25px] h-[25px] rounded-[7px] text-[11px] font-bold flex-shrink-0 border',
+          active === 5
+            ? 'bg-gray-900 border-gray-900 text-white dark:bg-white dark:border-white dark:text-gray-900'
+            : 'bg-white border-gray-200 text-gray-500 dark:bg-transparent dark:border-[#2a2a2a] dark:text-zinc-500',
+        ].join(' ')}>
           Σ
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[12.5px] font-semibold leading-snug dark:text-white">Overall</span>
+          <span className="block text-[12px] font-semibold leading-snug">
+            Review &amp; complete
+          </span>
           <span className="flex items-center gap-2 flex-wrap mt-1">
             <SeverityPill severity={overall} />
-            <span className="text-[11px] text-gray-500 dark:text-zinc-500">final page</span>
           </span>
         </span>
       </button>

@@ -41,13 +41,15 @@ import {
 } from '../../app/(dashboard)/risk-of-bias/_lib/robSignalling.ts';
 import {
   contrastLabel, isTrialQuestion, mergedAnswers, shortLabel, splitAnswers,
-  trialComplete, trialOutstanding, TRIAL_QUESTIONS,
+  trialComplete, trialKey, trialOutstanding, TRIAL_QUESTIONS,
 } from '../../app/(dashboard)/risk-of-bias/_lib/robIdentity.ts';
 import {
-  assessmentRows, emptyAssessment, readResult, readTrial, rowForResult,
-  writeResult, writeTrial,
+  assessmentRows, emptyAssessment, EMPTY_TRIAL, readResult, readTrial,
+  reopenForChangedTrial, rowForResult, writeResult, writeTrial,
 } from '../../app/(dashboard)/risk-of-bias/_lib/robStore.ts';
-import { overallOf, progressOf, severitiesOf } from '../../app/(dashboard)/risk-of-bias/_lib/robQueue.ts';
+import {
+  buildQueue, overallOf, PROGRESS_LABEL, progressOf, questionState, severitiesOf,
+} from '../../app/(dashboard)/risk-of-bias/_lib/robQueue.ts';
 import { presetFormFields, ROB2 } from '../../app/(dashboard)/risk-of-bias/_lib/robTools.ts';
 import { bindForm } from '../../app/(dashboard)/risk-of-bias/_lib/robAdapter.ts';
 
@@ -122,7 +124,12 @@ function check(name: string, condition: boolean, detail = ''): void {
   check('2.3 is asked when awareness is unknown',
     isAsked(q('2.3'), { '2.1': 'NI', '2.2': 'N' }));
   check('2.4 waits for deviations to exist', !isAsked(q('2.4'), { '2.3': 'N' }));
-  check('2.4 is asked once deviations arose', isAsked(q('2.4'), { '2.3': 'Y' }));
+  // 2.3's own parents have to be answered too: a routing state where 2.3 has an
+  // answer but 2.1/2.2 do not is one the tool can never actually be in.
+  check('2.4 is asked once deviations arose',
+    isAsked(q('2.4'), { '2.1': 'Y', '2.2': 'N', '2.3': 'Y' }));
+  check('and a question behind an unanswered parent is WAITING, not skipped',
+    !isAsked(q('2.4'), { '2.3': 'Y' }));
   check('2.7 is skipped after a clean ITT analysis', !isAsked(q('2.7'), { '2.6': 'Y' }));
   check('2.7 is asked when the analysis was not appropriate',
     isAsked(q('2.7'), { '2.6': 'N' }));
@@ -144,12 +151,22 @@ function check(name: string, condition: boolean, detail = ''): void {
   // Changing an upstream answer must close the branch again, which is exactly
   // what storing "NA" as an answer would prevent.
   check('reversing 2.1/2.2 closes 2.3 again',
-    isAsked(q('2.3'), { '2.1': 'Y' }) && !isAsked(q('2.3'), { '2.1': 'N', '2.2': 'N' }));
+    isAsked(q('2.3'), { '2.1': 'Y', '2.2': 'N' })
+    && !isAsked(q('2.3'), { '2.1': 'N', '2.2': 'N' }));
+
+  // A stale answer to a question the tool no longer asks must not route its
+  // child back in. 3.1 = Yes means 3.2 is never asked, so a leftover "3.2 = No"
+  // cannot reopen 3.3 — this exact case left the domain permanently unjudgeable.
+  check('a skipped question cannot route its child back in',
+    !isAsked(q('3.3'), { '3.1': 'Y', '3.2': 'N' }));
 
   check('unansweredIn lists only what routing asks',
     unansweredIn(2, { '3.1': 'Y' }).length === 0);
-  check('unansweredIn reports an open branch',
-    unansweredIn(2, { '3.1': 'N' }).join() === '3.2');
+  // Only what the reviewer can act on now: 3.3 and 3.4 are waiting behind 3.2,
+  // and listing them is three items nobody can do anything about.
+  check('unansweredIn reports only what can be answered now',
+    unansweredIn(2, { '3.1': 'N' }).join() === '3.2',
+    unansweredIn(2, { '3.1': 'N' }).join());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -169,12 +186,25 @@ function check(name: string, condition: boolean, detail = ''): void {
   check('D1 low', judgeDomain(0, { '1.1': 'Y', '1.2': 'Y', '1.3': 'N' }) === 'low');
   check('D1 low tolerates hedges',
     judgeDomain(0, { '1.1': 'PY', '1.2': 'PY', '1.3': 'PN' }) === 'low');
-  check('D1 high when baseline differences suggest a randomization problem',
-    judgeDomain(0, { '1.1': 'Y', '1.2': 'Y', '1.3': 'Y' }) === 'high');
+  // Table 4: "1.1 Y/PY · 1.2 Y/PY · 1.3 Y/PY -> Some concerns", with the remark
+  // that substantial imbalance despite sound methods should be INVESTIGATED and
+  // could land either way. It is a prompt for a reviewer, not a verdict — this
+  // check asserted 'high' for months and the code agreed, because both were
+  // written from the same misreading of the domain rather than from the table.
+  check('D1 some concerns when baseline differs but allocation was concealed',
+    judgeDomain(0, { '1.1': 'Y', '1.2': 'Y', '1.3': 'Y' }) === 'some',
+    String(judgeDomain(0, { '1.1': 'Y', '1.2': 'Y', '1.3': 'Y' })));
+  // Table 4: "Any response · 1.2 NI · 1.3 Y/PY -> High".
+  check('D1 high when baseline differs AND concealment is unknown',
+    judgeDomain(0, { '1.1': 'Y', '1.2': 'NI', '1.3': 'Y' }) === 'high');
   check('D1 high when allocation was not concealed',
     judgeDomain(0, { '1.1': 'Y', '1.2': 'N', '1.3': 'N' }) === 'high');
-  check('D1 some concerns when randomness is unknown',
-    judgeDomain(0, { '1.1': 'NI', '1.2': 'Y', '1.3': 'N' }) === 'some');
+  // Table 4's Low row is "1.1 Y/PY/NI", so not knowing how the sequence was
+  // generated does not by itself stop a concealed, balanced trial being low.
+  check('D1 low even when sequence generation is unreported',
+    judgeDomain(0, { '1.1': 'NI', '1.2': 'Y', '1.3': 'N' }) === 'low');
+  check('D1 some concerns when the sequence was not random',
+    judgeDomain(0, { '1.1': 'N', '1.2': 'Y', '1.3': 'N' }) === 'some');
 
   // D2 — the worse of "what happened in the trial" and "was the analysis ITT".
   const d2 = (a: Answers) => judgeDomain(1, a);
@@ -182,8 +212,11 @@ function check(name: string, condition: boolean, detail = ''): void {
     d2({ '2.1': 'N', '2.2': 'N', '2.6': 'Y' }) === 'low');
   check('D2 high when a non-ITT analysis could have substantially affected the result',
     d2({ '2.1': 'N', '2.2': 'N', '2.6': 'N', '2.7': 'Y' }) === 'high');
-  check('D2 low when the analysis failure could not have mattered',
-    d2({ '2.1': 'N', '2.2': 'N', '2.6': 'N', '2.7': 'N' }) === 'low');
+  // Table 6 part 2: "2.6 N/PN/NI · 2.7 N/PN -> Some concerns". A non-ITT
+  // analysis is never clean, even where switching could not have mattered.
+  check('D2 some concerns when the analysis was not by assignment',
+    d2({ '2.1': 'N', '2.2': 'N', '2.6': 'N', '2.7': 'N' }) === 'some',
+    String(d2({ '2.1': 'N', '2.2': 'N', '2.6': 'N', '2.7': 'N' })));
   check('D2 takes the worse of its two parts',
     d2({ '2.1': 'Y', '2.2': 'Y', '2.3': 'N', '2.6': 'N', '2.7': 'Y' }) === 'high');
   check('D2 low when awareness led to no deviations',
@@ -426,11 +459,23 @@ function check(name: string, condition: boolean, detail = ''): void {
     { ...trial, answers: { ...trial.answers, '2.1': 'N' } as Answers });
   check('a trial question the routing drops keeps no answer',
     readTrial(routedOut, store).answers['2.3'] === undefined);
-  check('and the six are then five outstanding, not six',
-    trialOutstanding(readTrial(routedOut, store).answers).join(',') === '2.3');
-  check('trialComplete only reports true when all six are in',
-    trialComplete(readTrial(record, store).answers) === true
-    && trialComplete(readTrial(routedOut, store).answers) === false);
+  // The gate follows the routing. Answering 2.1 and 2.2 "No" is what MAKES RoB 2
+  // skip 2.3, so a reviewer who has done that is finished with the trial zone —
+  // reporting 2.3 as outstanding gated D1 and D2 behind an answer the instrument
+  // will never ask for, and `writeTrial` had already dropped it.
+  check('a question the routing drops is not outstanding',
+    trialOutstanding(readTrial(routedOut, store).answers).length === 0);
+  check('so the trial zone reads complete',
+    trialComplete(readTrial(routedOut, store).answers) === true);
+  check('and answering all six still reads complete',
+    trialComplete(readTrial(record, store).answers) === true);
+  // What outstanding SHOULD list: a question that is asked and unanswered, and
+  // never one that is merely waiting on an earlier one.
+  check('an unanswered trial zone lists the five that are asked, not all six',
+    trialOutstanding({} as Answers).join(',') === '1.1,1.2,1.3,2.1,2.2');
+  check('2.3 becomes outstanding once 2.1 says somebody was aware',
+    trialOutstanding({ '1.1': 'Y', '1.2': 'Y', '1.3': 'Y', '2.1': 'Y', '2.2': 'N' } as Answers)
+      .join(',') === '2.3');
   check('splitAnswers puts each answer where it is stored',
     splitAnswers({ '1.1': 'Y', '3.1': 'N' } as Answers).trial['1.1'] === 'Y'
     && splitAnswers({ '1.1': 'Y', '3.1': 'N' } as Answers).result['3.1'] === 'N');
@@ -478,6 +523,51 @@ function check(name: string, condition: boolean, detail = ''): void {
     back.confirmed[0] === true && back.confirmed[2] === false);
   check('so does the version it was made against', back.resultVersion === 3);
 
+  // The grounding behind an accepted suggestion has to survive the save, or a
+  // reviewer who pressed "Use suggestion" on a verified quote reloads to find
+  // their answer reported as *inferred* with nothing behind it. The quote is in
+  // hand when the answer is taken; losing it on the way to storage is silent.
+  const quoted = emptyAssessment();
+  quoted.answers = { '3.1': 'Y' } as Answers;
+  quoted.evidence = {
+    '3.1': {
+      state: 'quoted',
+      quote: 'Outcome data were available for 72 of the 100 randomised participants.',
+      locator: 'Page 4 · Results',
+      rationale: 'Losses are reported and balanced.',
+    },
+  };
+  const withQuote = writeResult(record, store, domains, ROB2, {
+    resultId: 'res-3', label: 'Rescue medication · 24 hours', resultVersion: 1,
+    assessment: quoted, merged: mergedAnswers(trial.answers, quoted.answers),
+    severities: severitiesOf(quoted, mergedAnswers(trial.answers, quoted.answers)),
+  });
+  const quotedBack = readResult(rowForResult(withQuote, 'res-3')!, store, domains, ROB2);
+  check('an accepted quote survives the save',
+    quotedBack.evidence['3.1']?.quote
+      === 'Outcome data were available for 72 of the 100 randomised participants.',
+    JSON.stringify(quotedBack.evidence['3.1']));
+  check('and the answer still reads as grounded, not inferred',
+    quotedBack.evidence['3.1']?.state === 'quoted',
+    String(quotedBack.evidence['3.1']?.state));
+  check('the locator survives with it',
+    quotedBack.evidence['3.1']?.locator === 'Page 4 · Results',
+    String(quotedBack.evidence['3.1']?.locator));
+
+  // The other half of the rule, which already held: a reviewer who answers by
+  // hand must not inherit the model's quote as if it backed their answer.
+  const byHand = emptyAssessment();
+  byHand.answers = { '3.1': 'N' } as Answers;
+  byHand.evidence = { '3.1': { state: 'not_found', quote: '', locator: '', rationale: '' } };
+  const handBack = readResult(
+    rowForResult(writeResult(withQuote, store, domains, ROB2, {
+      resultId: 'res-3', label: 'Rescue medication · 24 hours', resultVersion: 1,
+      assessment: byHand, merged: mergedAnswers(trial.answers, byHand.answers),
+      severities: severitiesOf(byHand, mergedAnswers(trial.answers, byHand.answers)),
+    }), 'res-3')!, store, domains, ROB2);
+  check('a hand-changed answer still drops the quote it no longer matches',
+    !handBack.evidence['3.1']?.quote, JSON.stringify(handBack.evidence['3.1']));
+
   // The derived judgement is cached in the domain column so the grid, exports,
   // consensus and Synthesis keep reading what they always read.
   const view = mergedAnswers(trial.answers, first.answers);
@@ -524,6 +614,225 @@ function check(name: string, condition: boolean, detail = ''): void {
   const p = progressOf(partial);
   check('progress is measured against applicable questions, not all 22',
     p.applicable < 22 && p.answered === 3, `${p.answered}/${p.applicable}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 11. A question is in one of THREE states, not two
+//
+// "Not applicable" and "not yet asked" look the same on screen and mean
+// opposite things: the first says the tool has ruled this out, the second says
+// a question before it is unanswered so nothing has ruled it out yet. Drawing
+// the second as the first tells a reviewer a question is dismissed when it is
+// about to reappear.
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const q = (id: string) => ROB2_QUESTIONS.find(x => x.id === id)!;
+
+  check('a question the tool always asks is asked',
+    questionState(q('1.1'), {}) === 'asked');
+
+  // 3.2 is asked only when 3.1 says data were NOT available for nearly all.
+  check('with 3.1 unanswered, 3.2 is WAITING — not ruled out',
+    questionState(q('3.2'), {}) === 'waiting',
+    questionState(q('3.2'), {}));
+  check('3.1 = Yes rules 3.2 out for good',
+    questionState(q('3.2'), { '3.1': 'Y' }) === 'skipped');
+  check('3.1 = No brings 3.2 in',
+    questionState(q('3.2'), { '3.1': 'N' }) === 'asked');
+
+  // The queue's "5/12 applicable answered · more may apply" comes from here.
+  const blank = progressOf({});
+  check('progress counts only what is asked right now',
+    blank.applicable === 12, String(blank.applicable));
+  check('and says so when an answer could add more',
+    blank.mayGrow === true);
+
+  const everything: Answers = {};
+  for (const question of ROB2_QUESTIONS) everything[question.id] = 'Y';
+  const full = progressOf(everything);
+  check('with every question answered nothing is left waiting',
+    full.mayGrow === false);
+  check('and the applicable count has grown past the blank one',
+    full.applicable > blank.applicable, `${blank.applicable} → ${full.applicable}`);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. Trial answers are scoped to the COMPARISON, not the study
+//
+// 2.1-2.3 ask who knew the assigned intervention. In a trial running three drugs
+// against placebo, one arm can be double-blind and another open-label — one set
+// per trial forces a single answer onto two different truths.
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const base = { document_id: 'doc-1' };
+  check('two comparisons of one study are different scopes',
+    trialKey({ ...base, contrast: { id: 'c1', intervention: 'A', comparator: 'P' } })
+    !== trialKey({ ...base, contrast: { id: 'c2', intervention: 'B', comparator: 'P' } }));
+  check('two results of the SAME comparison share one scope',
+    trialKey({ ...base, contrast: { id: 'c1', intervention: 'A', comparator: 'P' } })
+    === trialKey({ ...base, contrast: { id: 'c1', intervention: 'A', comparator: 'P' } }));
+  // A result whose comparison is unsettled has nowhere scoped to put them, and
+  // falls back to the study — which is where they lived before scoping existed.
+  check('an unsettled comparison falls back to the study',
+    trialKey({ ...base, contrast: null }) === 'doc-1:');
+  check('and two studies never share a scope',
+    trialKey({ ...base, contrast: null }) !== trialKey({ document_id: 'doc-2', contrast: null }));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. Evidence, copy provenance, and reopening on changed shared answers
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const preset = presetFormFields(ROB2) as any[];
+  const table = preset.find(f => f.field_type === 'array');
+  const store = bindSignalling(table.subform_fields);
+  const bound = bindForm({ id: 'f', form_name: 'Risk of Bias 2 (RoB 2)', fields: preset } as any)!;
+  const domains = bound.domains.filter(d => !d.extra);
+  const trial = {
+    answers: { '1.1': 'Y', '1.2': 'Y', '1.3': 'N', '2.1': 'Y', '2.2': 'N', '2.3': 'N' } as Answers,
+    rationale: {}, evidence: {}, complete: true,
+  };
+
+  // Scoped to a comparison: the same record holds a different set per contrast.
+  let record = writeTrial(undefined, store, trial, 'c1');
+  record = writeTrial(record, store,
+    { ...trial, answers: { ...trial.answers, '2.1': 'N' } as Answers }, 'c2');
+  check('two comparisons keep separate trial answers in one record',
+    readTrial(record, store, 'c1').answers['2.1'] === 'Y'
+    && readTrial(record, store, 'c2').answers['2.1'] === 'N');
+  check('and a record written before scoping still reads',
+    readTrial(writeTrial(undefined, store, trial, ''), store, '').answers['1.1'] === 'Y');
+
+  // Evidence and copy provenance survive a round trip.
+  const a = emptyAssessment();
+  a.answers = { '3.1': 'Y' } as Answers;
+  a.sources = { '3.1': { reference: 'p.6 · Table 2', passage: '108 of 120 analysed' } };
+  a.origins = { '3.1': { copiedFrom: 'res-2', editedSince: true } };
+  a.confirmed = [true, true, true, false, false];
+  a.complete = true;
+  const merged = mergedAnswers(trial.answers, a.answers);
+  record = writeResult(record, store, domains, ROB2, {
+    resultId: 'res-1', label: 'Pain relief', resultVersion: 1,
+    assessment: a, merged, severities: severitiesOf(a, merged),
+  });
+  const back = readResult(rowForResult(record, 'res-1')!, store, domains, ROB2);
+  check('a source reference and passage survive the round trip',
+    back.sources['3.1']?.reference === 'p.6 · Table 2'
+    && back.sources['3.1']?.passage === '108 of 120 analysed');
+  // Copied, and edited since, are three states with two flags — a reviewer
+  // reading consensus has to be able to tell them apart.
+  check('copy provenance survives, including that it was edited after copying',
+    back.origins['3.1']?.copiedFrom === 'res-2' && back.origins['3.1']?.editedSince === true);
+
+  // Changing the shared answers reopens what was judged on them.
+  const { data: after, reopened } = reopenForChangedTrial(record, new Set(['res-1']));
+  check('a completed review resting on changed shared answers reopens',
+    reopened.join() === 'res-1');
+  const reread = readResult(rowForResult(after, 'res-1')!, store, domains, ROB2);
+  check('and it is no longer marked complete', reread.complete === false);
+  check('but nothing it holds was deleted', reread.answers['3.1'] === 'Y');
+  check('a review that was never complete is left alone',
+    reopenForChangedTrial(after, new Set(['res-1'])).reopened.length === 0);
+
+  // WHY it reopened has always been written into the record; nothing read it,
+  // so the reviewer saw a finished assessment quietly become unfinished.
+  check('and the reopened review can say why it reopened',
+    !!reread.reopenedBecause, JSON.stringify(reread.reopenedBecause));
+  check('the reason names the shared answers',
+    /trial answers/i.test(reread.reopenedBecause), reread.reopenedBecause);
+
+  // It has to survive the next save, or it vanishes the moment the reviewer
+  // touches an answer — before they have read it.
+  const touched = writeResult(after, store, domains, ROB2, {
+    resultId: 'res-1', label: 'Pain relief · 6 hours', resultVersion: 3,
+    assessment: reread, merged: reread.answers, severities: severitiesOf(reread, reread.answers),
+  });
+  check('the reason survives a save', !!readResult(
+    rowForResult(touched, 'res-1')!, store, domains, ROB2).reopenedBecause);
+
+  // And clears when acknowledged, rather than nagging forever.
+  const acknowledged = writeResult(after, store, domains, ROB2, {
+    resultId: 'res-1', label: 'Pain relief · 6 hours', resultVersion: 3,
+    assessment: { ...reread, reopenedBecause: '' },
+    merged: reread.answers, severities: severitiesOf(reread, reread.answers),
+  });
+  check('and clears once the reviewer acknowledges it', !readResult(
+    rowForResult(acknowledged, 'res-1')!, store, domains, ROB2).reopenedBecause);
+  check('and so is a result nobody asked about',
+    reopenForChangedTrial(record, new Set(['res-9'])).reopened.length === 0);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. The queue tells a reviewer WHICH kind of "not done" each row is
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const result = (id: string) => ({
+    id, document_id: 'doc-1', contrast: { id: 'c1', intervention: 'A', comparator: 'B' },
+    population: 'Overall', outcome_domain: 'Pain relief', measurement: 'VAS',
+    timepoint: '6 hours', analysis_population: '', analysis: '', estimate: '',
+    version: 1, state: 'active',
+  }) as any;
+
+  const done = { ...EMPTY_TRIAL, complete: true };
+  const build = (assessments: Array<[string, any]>, opts: any = {}) => buildQueue({
+    results: (opts.results ?? ['r1']).map(result),
+    trialByComparison: new Map([['doc-1:c1', opts.trial ?? done]]),
+    assessmentByResult: new Map(assessments),
+    labels: { 'doc-1': 'Raslan 2021' },
+    seats: opts.seats ?? new Map([['doc-1', 'reviewer_1']]),
+  } as any);
+
+  const untouched = build([])[0].results[0];
+  check('a result nobody has answered reads as Not started, not In progress',
+    untouched.progress === 'not_started', untouched.progress);
+
+  const started = emptyAssessment();
+  started.answers = { '3.1': 'Y' } as any;
+  const partway = build([['r1', started]])[0].results[0];
+  check('and one with an answer in it reads as In progress',
+    partway.progress === 'in_progress', partway.progress);
+
+  check('the two are worded differently, or the split buys nothing',
+    PROGRESS_LABEL.not_started !== PROGRESS_LABEL.in_progress);
+
+  // The regression this block exists for: splitting `not_started` out of
+  // `in_progress` made "Next for me" skip every result nobody had touched —
+  // which is most of them on a fresh project, i.e. exactly when it is used.
+  const nextForMe = (rows: any[]) =>
+    rows.find(r => r.progress === 'in_progress')
+    ?? rows.find(r => r.progress === 'not_started')
+    ?? rows.find(r => r.progress === 'trial_needed')
+    ?? null;
+  check('"Next for me" still lands on an untouched result',
+    nextForMe(build([]).flatMap(g => g.results))?.result.id === 'r1');
+
+  // Blocked and unassigned still win: both are somebody making a decision.
+  const held = buildQueue({
+    results: [{ ...result('r1'), state: 'held' }],
+    trialByComparison: new Map([['doc-1:c1', done]]),
+    assessmentByResult: new Map(),
+    labels: { 'doc-1': 'Raslan 2021' },
+    seats: new Map([['doc-1', 'reviewer_1']]),
+  } as any)[0].results[0];
+  check('a held result is Blocked, not Not started', held.progress === 'blocked');
+  check('and it says what is holding it', !!held.blocker);
+
+  // A seat is `UNIQUE(project_id, document_id, reviewer_role)` — a fact about
+  // the whole study, for every form — and it gates nothing here. Ranked as a
+  // progress state it masked every real one, so a reviewer holding no seat
+  // read "Unassigned" on every row of every study instead of what was left.
+  const seatlessGroup = build([], { seats: new Map() })[0];
+  check('no seat does not mask what is actually left to do',
+    seatlessGroup.results[0].progress === 'not_started',
+    seatlessGroup.results[0].progress);
+  check('and it says nothing per-row about assignment',
+    !/assign/i.test(seatlessGroup.results[0].blocker));
+  check('the seat is carried on the STUDY, to be said once',
+    seatlessGroup.seat === null);
+
+  const trialOpen = build([], { trial: EMPTY_TRIAL })[0].results[0];
+  check('unanswered trial questions still come before the result\'s own',
+    trialOpen.progress === 'trial_needed');
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

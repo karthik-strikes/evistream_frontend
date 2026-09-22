@@ -36,7 +36,7 @@ interface Props {
 }
 
 const SELECT =
-  'h-8 max-w-full text-[12px] border border-amber-300 dark:border-amber-900/60 rounded-lg px-2 '
+  'h-8 max-w-full text-[12px] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2 '
   + 'bg-white dark:bg-[#0d0d0d] text-gray-900 dark:text-zinc-200 focus:outline-none';
 
 export function HoldResolver({ contrasts, busy, onResolve }: Props) {
@@ -58,7 +58,7 @@ export function HoldResolver({ contrasts, busy, onResolve }: Props) {
     return (
       <div className="mt-1.5 pl-6 text-[11.5px]">
         This study has no comparison on record yet. Re-derive the project on{' '}
-        <strong>Setup &amp; results</strong> to propose one from the outcome forms.
+        <strong>Setup</strong> to propose one from the outcome forms.
       </div>
     );
   }

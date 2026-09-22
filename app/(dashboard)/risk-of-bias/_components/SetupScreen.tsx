@@ -18,6 +18,7 @@
 import { useState } from 'react';
 import { ChevronDown, Loader2 } from 'lucide-react';
 
+import { Badge } from '@/components/ui/badge';
 import type {
   RobBuildResponse, RobContrast, RobExcludedForm, RobFormMapping, RobResultCandidate,
 } from '@/services/rob.service';
@@ -26,9 +27,8 @@ import { contrastLabel } from '../_lib/robIdentity';
 interface Props {
   build: RobBuildResponse | null;
   loading: boolean;
-  committing: boolean;
   canManage: boolean;
-  onRebuild: () => void;
+  committing: boolean;
   onCommit: () => void;
   onOpenMapping: (formId: string) => void;
   onToggleSource: (formId: string, use: boolean | null) => void;
@@ -36,9 +36,12 @@ interface Props {
   contrastEdits: Record<string, ContrastEdit[]>;
   onEditContrast: (documentId: string, edits: ContrastEdit[] | null) => void;
   /** document id → study label, so a comparison names a paper not a uuid. */
-  studyLabels: Record<string, string>;
+  /** Comparisons are a fact about a study, so they are edited from its queue row. */
   /** Form ids whose source flag is being written right now. */
   pendingSources: Set<string>;
+  /** How many results the registry already holds — "new" is meaningless alone. */
+  existingCount: number;
+  onOpenQueue: () => void;
 }
 
 function Fold({ title, summary, tone, children, defaultOpen }: {
@@ -54,8 +57,8 @@ function Fold({ title, summary, tone, children, defaultOpen }: {
     <div className={[
       'border rounded-xl bg-white dark:bg-[#111111] overflow-hidden',
       tone === 'warn'
-        ? 'border-amber-300 dark:border-amber-900/60'
-        : 'border-border dark:border-[#1f1f1f]',
+        ? 'border-gray-200 dark:border-[#2a2a2a]'
+        : 'border-gray-200 dark:border-[#1f1f1f]',
     ].join(' ')}>
       <button
         type="button"
@@ -69,7 +72,7 @@ function Fold({ title, summary, tone, children, defaultOpen }: {
         <span className={[
           'text-[11.5px] font-medium',
           tone === 'warn'
-            ? 'text-amber-700 dark:text-amber-400'
+            ? 'text-gray-600 dark:text-zinc-400'
             : 'text-gray-500 dark:text-zinc-500',
         ].join(' ')}>
           {summary}
@@ -84,22 +87,27 @@ function Fold({ title, summary, tone, children, defaultOpen }: {
  * One outcome form, as the prototype draws it.
  *
  * Issues are **counted into a pill, not printed**. An earlier version listed
- * every mapping warning here as a full sentence — five paragraphs of amber prose
+ * every mapping warning here as a full sentence — five paragraphs of warning prose
  * per form, on a screen whose job is to let somebody see at a glance what still
  * needs them. The warnings are not deleted; they live on the mapping screen,
  * next to the column each one is about, where they can actually be acted on.
  */
-function SourceRow({ form, excluded, pending, onToggle, onOpenMapping }: {
+/**
+ * Whether a form's rows are a source of results. Step one, and only that.
+ *
+ * The mapping half used to live on this same row, which made one control do two
+ * jobs: deciding a form counts, and checking what its columns mean. They happen
+ * at different times — you pick the sources once and then work through the
+ * mappings — so they are two steps.
+ */
+function SourceRow({ form, excluded, pending, onToggle }: {
   form?: RobFormMapping;
   excluded?: RobExcludedForm;
   pending: boolean;
   onToggle: (use: boolean | null) => void;
-  onOpenMapping?: () => void;
 }) {
   const used = !!form;
   const name = form?.form_name ?? excluded?.form_name ?? '';
-  const issues = (form?.warnings ?? []).filter(
-    w => w.severity === 'blocking' || w.severity === 'needs_review').length;
 
   return (
     <label className={[
@@ -141,41 +149,74 @@ function SourceRow({ form, excluded, pending, onToggle, onOpenMapping }: {
         )}
       </span>
 
-      {used && (
-        <span className="flex flex-col items-end gap-1.5 flex-none">
-          <span className={[
-            'inline-flex items-center gap-1 text-[10.5px] font-semibold rounded-full border px-1.5 py-px whitespace-nowrap',
-            issues
-              ? 'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900/50 dark:bg-amber-500/5 dark:text-amber-400'
-              : 'border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900/50 dark:bg-emerald-500/5 dark:text-emerald-400',
-          ].join(' ')}>
-            <span aria-hidden>{issues ? '!' : '✓'}</span>
-            {issues
-              ? `${issues} ${issues === 1 ? 'issue needs' : 'issues need'} review`
-              : 'Mapped automatically'}
-          </span>
-          {onOpenMapping && (
-            <button
-              type="button"
-              onClick={e => { e.preventDefault(); e.stopPropagation(); onOpenMapping(); }}
-              className="text-[11.5px] font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-2.5 py-1 text-gray-600 dark:text-zinc-400 hover:bg-white dark:hover:bg-[#1a1a1a]"
-            >
-              {issues ? 'Review mapping →' : 'Inspect columns'}
-            </button>
-          )}
-        </span>
-      )}
-
       {!used && !excluded?.explicit && (
         <button
           type="button"
           onClick={e => { e.preventDefault(); e.stopPropagation(); onToggle(null); }}
-          className="flex-none text-[11.5px] font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-2.5 py-1 text-gray-500 dark:text-zinc-500 hover:bg-white dark:hover:bg-[#1a1a1a]"
+          className="flex-none text-[11.5px] font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-2.5 py-1 text-gray-500 dark:text-zinc-500 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
         >
           Automatic
         </button>
       )}
     </label>
+  );
+}
+
+/**
+ * Step two: what this form's columns mean, and whether anybody has checked.
+ *
+ * One box per SELECTED form, because the mapping is per form — two outcome
+ * tables in one project name their columns differently, and confirming one
+ * says nothing about the other.
+ */
+function MappingRow({ form, onOpenMapping }: {
+  form: RobFormMapping;
+  onOpenMapping: () => void;
+}) {
+  const blocking = (form.warnings ?? []).filter(w => w.severity === 'blocking').length;
+  const issues = (form.warnings ?? []).filter(
+    w => w.severity === 'blocking' || w.severity === 'needs_review').length;
+  const confirmed = !!form.confirmed && blocking === 0;
+
+  return (
+    <div className="flex items-start gap-3 flex-wrap rounded-xl border border-gray-200 dark:border-[#242424] px-3 py-2.5 mt-2">
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[13px] font-semibold dark:text-white">{form.form_name}</span>
+          {/* The shared badge, and its rule: colour encodes required human
+              action (`components/ui/badge.tsx`). A broken mapping must be
+              fixed — `critical`. One that needs a person to look and decide —
+              `attention`. A confirmed one is "done", which that rule keeps
+              deliberately quiet, so it is `neutral` rather than green: on a
+              finished project every row would otherwise be a wall of ticks. */}
+          <Badge variant={blocking ? 'critical' : confirmed ? 'neutral' : 'attention'}>
+            {/* `blocking` is a COUNT. `{blocking && …}` renders a literal 0
+                when it is zero — the badge read "01 issue to check" on the
+                live site. Coerce before the guard. */}
+            {blocking > 0 && <span aria-hidden>×</span>}
+            {confirmed && <span aria-hidden>✓</span>}
+            {blocking
+              ? `${blocking} must be fixed`
+              : confirmed ? 'Mapping confirmed'
+                : issues ? `${issues} ${issues === 1 ? 'issue' : 'issues'} to check`
+                  : 'Needs confirming'}
+          </Badge>
+        </div>
+        <div className="text-[11.5px] text-gray-500 dark:text-zinc-500 mt-0.5">
+          {form.extractions} extraction{form.extractions === 1 ? '' : 's'} · table {form.table}
+          {' · '}{form.columns.length} column{form.columns.length === 1 ? '' : 's'}
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={onOpenMapping}
+        className="flex-none text-[11.5px] font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-2.5 py-1 text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
+      >
+        {/* Both states open the mapping screen, so both carry the arrow. It
+            marks where the button goes, not how far along the form is. */}
+        {confirmed ? 'Review mapping →' : 'Confirm mapping →'}
+      </button>
+    </div>
   );
 }
 
@@ -185,142 +226,10 @@ export interface ContrastEdit {
   comparator: string;
 }
 
-/**
- * One study's comparisons — however many it has.
- *
- * **A trial is not one comparison.** A four-arm trial with a placebo arm has
- * three, and each is a separate estimate with its own answers to 2.4 and 5.2 —
- * so an outcome measured once produces three results to assess, not one. An
- * earlier version allowed a single comparison per study and quietly hid two
- * thirds of the work: the same collapse the page this replaces made, arrived at
- * from the other direction.
- *
- * What the machine can settle by itself it has already settled. What is left is
- * naming the arms, and where exactly one of them reads as a control the
- * comparator comes filled in, so only the intervention is chosen. The order is
- * the direction of effect: swapping it turns RR 1.84 favouring the drug into
- * RR 0.54 favouring placebo.
- */
-function StudyContrasts({ contrast, edits, label, onSet, onRemove }: {
-  contrast: RobContrast;
-  edits: ContrastEdit[];
-  label: string;
-  onSet: (next: ContrastEdit[]) => void;
-  onRemove: () => void;
-}) {
-  const arms = contrast.arms ?? [];
-  const suggested = contrast.suggested_comparator ?? '';
-  const declared: ContrastEdit[] = edits.length
-    ? edits
-    : contrast.intervention
-      ? [{ intervention: contrast.intervention, comparator: contrast.comparator }]
-      : [];
-
-  const [intervention, setIntervention] = useState('');
-  const [comparator, setComparator] = useState(suggested);
-
-  const taken = new Set(declared.map(d => `${d.intervention}|${d.comparator}`));
-  const canAdd = !!intervention && !!comparator
-    && !taken.has(`${intervention}|${comparator}`);
-
-  const add = () => {
-    onSet([...declared, { intervention, comparator }]);
-    setIntervention('');
-    setComparator(suggested);
-  };
-
-  return (
-    <div className="border-t border-gray-100 dark:border-[#1a1a1a] py-3 first:border-t-0">
-      <div className="flex items-baseline gap-2 flex-wrap">
-        <span className="text-[12.5px] font-semibold dark:text-white">{label}</span>
-        <span className="text-[11px] text-gray-500 dark:text-zinc-500">
-          {arms.length > 0 && `${arms.length} arms · `}
-          {declared.length
-            ? `${declared.length} comparison${declared.length === 1 ? '' : 's'}`
-            : 'no comparison yet'}
-        </span>
-        {declared.length === 0 && (
-          <span className="text-[11px] font-semibold rounded-full border border-amber-200 bg-amber-50 px-2 py-px text-amber-800 dark:border-amber-900/50 dark:bg-amber-500/5 dark:text-amber-400">
-            needs a decision
-          </span>
-        )}
-      </div>
-
-      {declared.map((d, i) => (
-        <div key={`${d.intervention}|${d.comparator}`}
-             className="flex items-center gap-2 flex-wrap mt-1.5">
-          <span className="text-[12.5px] dark:text-zinc-200">
-            {d.intervention} <span className="text-gray-400 dark:text-zinc-600">vs</span> {d.comparator}
-          </span>
-          <button
-            type="button"
-            title="Swap which arm is the intervention"
-            onClick={() => onSet(declared.map((x, j) => j === i
-              ? { intervention: x.comparator, comparator: x.intervention } : x))}
-            className="text-[11px] font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-2 py-0.5 text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
-          >
-            ⇄ Swap
-          </button>
-          <button
-            type="button"
-            onClick={() => {
-              const next = declared.filter((_, j) => j !== i);
-              if (next.length) onSet(next); else onRemove();
-            }}
-            className="text-[11px] font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-2 py-0.5 text-gray-500 dark:text-zinc-500 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
-          >
-            Remove
-          </button>
-        </div>
-      ))}
-
-      {arms.length > 1 && (
-        <div className="flex items-end gap-2 flex-wrap mt-2">
-          <div>
-            <label className="block text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-600 mb-0.5">
-              Intervention
-            </label>
-            <select
-              value={intervention}
-              onChange={e => setIntervention(e.target.value)}
-              className="h-8 max-w-[240px] text-[12px] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2 bg-white dark:bg-[#0d0d0d] dark:text-zinc-200 focus:outline-none"
-            >
-              <option value="">Choose an arm</option>
-              {arms.map(a => <option key={a} value={a}>{a}</option>)}
-            </select>
-          </div>
-          <span className="text-[11.5px] text-gray-500 dark:text-zinc-500 pb-1.5">vs</span>
-          <div>
-            <label className="block text-[10px] font-semibold uppercase tracking-wider text-gray-400 dark:text-zinc-600 mb-0.5">
-              Comparator
-            </label>
-            <select
-              value={comparator}
-              onChange={e => setComparator(e.target.value)}
-              className="h-8 max-w-[240px] text-[12px] border border-gray-200 dark:border-[#2a2a2a] rounded-lg px-2 bg-white dark:bg-[#0d0d0d] dark:text-zinc-200 focus:outline-none"
-            >
-              <option value="">Choose an arm</option>
-              {arms.filter(a => a !== intervention).map(a => <option key={a} value={a}>{a}</option>)}
-            </select>
-          </div>
-          <button
-            type="button"
-            disabled={!canAdd}
-            onClick={add}
-            className="h-8 text-[12px] font-semibold rounded-lg px-3 border border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-gray-900 disabled:opacity-40"
-          >
-            {declared.length ? 'Add another comparison' : 'Add this comparison'}
-          </button>
-        </div>
-      )}
-    </div>
-  );
-}
-
 export function SetupScreen({
-  build, loading, committing, canManage, onRebuild, onCommit,
+  build, loading, canManage, committing, onCommit,
   onOpenMapping, onToggleSource, pendingSources, contrastEdits, onEditContrast,
-  studyLabels,
+  existingCount, onOpenQueue,
 }: Props) {
   const results: RobResultCandidate[] = build?.results ?? [];
   const contrasts = build?.contrasts ?? [];
@@ -328,44 +237,52 @@ export function SetupScreen({
   const unresolved = contrasts.filter(c => c.state === 'unresolved');
   const proposed = contrasts.filter(c => c.state === 'proposed');
   const duplicates = build?.duplicates ?? [];
+  // Every SELECTED form has to be confirmed before results can be created — but
+  // an unselected form blocks nothing, because it contributes nothing.
   const needsMapping = (build?.forms ?? []).filter(
-    f => (f.warnings ?? []).some(w => w.severity === 'blocking' || w.severity === 'needs_review'));
+    f => !f.confirmed
+      || (f.warnings ?? []).some(w => w.severity === 'blocking'));
   const studies = new Set(results.map(r => r.document_id)).size;
 
   // What a fold's one-line summary says. When something in it needs a decision
   // the summary NAMES that thing; otherwise it states a fact. A generic count
   // beside every heading tells a manager nothing about where to look.
-  const sourceSummary = needsMapping.length
-    ? `${needsMapping[0].form_name.replace(/^.*—\s*/, '')}: columns to confirm`
-    : `${build?.forms.length ?? 0} outcome form${build?.forms.length === 1 ? '' : 's'} · `
-      + `${(build?.forms ?? []).reduce((n, f) => n + f.extractions, 0)} extractions`;
+  const sourceSummary = `${build?.forms.length ?? 0} outcome form`
+    + `${build?.forms.length === 1 ? '' : 's'} · `
+    + `${(build?.forms ?? []).reduce((n, f) => n + f.extractions, 0)} extractions`;
+  const mappingSummary = needsMapping.length
+    ? `${needsMapping.length} form${needsMapping.length === 1 ? '' : 's'} to confirm`
+    : `${build?.forms.length ?? 0} confirmed`;
   // A study is settled when it has at least one comparison — derived or declared.
   const unsettled = contrasts.filter(
     c => !c.intervention && !(contrastEdits[c.document_id] ?? []).length);
-  const contrastSummary = unsettled.length
-    ? `${unsettled.length} stud${unsettled.length === 1 ? 'y' : 'ies'} with no comparison yet`
-    : `${contrasts.length + Object.values(contrastEdits).reduce(
-        (n, e) => n + Math.max(0, e.length - 1), 0)} comparisons across ${contrasts.length} studies`;
   const duplicateSummary = duplicates.length
     ? `${duplicates.length} pair${duplicates.length === 1 ? '' : 's'} held out of the queue until you decide`
     : 'none outstanding';
 
-  const needs = [needsMapping.length > 0, unsettled.length > 0,
-                 duplicates.length > 0].filter(Boolean).length;
+  // Counted only for things that still have a SECTION below to open. Studies
+  // with no comparison are settled in the queue now, not here.
+  const needs = [needsMapping.length > 0, duplicates.length > 0].filter(Boolean).length;
 
   return (
     <div className="flex flex-col gap-3">
-      <div className="border border-border rounded-xl bg-white dark:bg-[#111111] dark:border-[#1f1f1f] px-4 py-4">
+      <div className="border border-gray-200 rounded-xl bg-white dark:bg-[#111111] dark:border-[#1f1f1f] px-4 py-4">
         <div className="flex items-start gap-4 flex-wrap">
           <div className="min-w-0 flex-1">
             <h1 className="text-[17px] font-bold tracking-tight dark:text-white">
-              Risk of bias — project setup
+              Project setup
             </h1>
             <p className="text-[12.5px] text-gray-600 dark:text-zinc-400 mt-1 leading-relaxed max-w-[76ch]">
               <strong className="font-semibold dark:text-white">
                 {results.length} result{results.length === 1 ? '' : 's'} across {studies} stud
                 {studies === 1 ? 'y' : 'ies'} {results.length ? 'ready to create' : 'derived'}.
               </strong>{' '}
+              {/* Without this, "12 results ready to create" reads as the size of
+                  the project rather than as what this press would add. */}
+              <span className="text-gray-500 dark:text-zinc-500">
+                {existingCount} already in the queue.
+              </span>{' '}
+
               {needs
                 ? <>{needs} section{needs === 1 ? '' : 's'} still {needs === 1 ? 'has' : 'have'} something
                   to settle — marked below. The rest was decided automatically; open a section only to
@@ -373,30 +290,56 @@ export function SetupScreen({
                 : <>Everything was decided automatically. Open a section only to check or change it.</>}
             </p>
           </div>
-          <div className="flex items-center gap-2 flex-none">
-            <button
-              type="button"
-              onClick={onRebuild}
-              disabled={loading}
-              className="text-[12.5px] font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-3 py-1.5 text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] disabled:opacity-40"
-            >
-              {loading ? 'Deriving…' : 'Re-derive'}
-            </button>
-            <button
-              type="button"
-              onClick={onCommit}
-              disabled={!canManage || committing || results.length === 0}
-              className="text-[12.5px] font-semibold rounded-lg px-3 py-1.5 border border-gray-900 bg-gray-900 text-white dark:border-white dark:bg-white dark:text-gray-900 disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {committing ? 'Creating…' : `Create these ${results.length} results`}
-            </button>
-          </div>
         </div>
       </div>
 
+      {/* Why Create is disabled, and what is missing from the count beside it.
+          Both used to be invisible: the mapping requirement lived only in the
+          disabled button's `title`, which never appears on a touch device and
+          is not read out, and the held rows were computed here and rendered
+          nowhere at all. */}
+      {needsMapping.length > 0 && (
+        <div className="flex items-start gap-2.5 border border-gray-200 dark:border-[#2a2a2a] bg-gray-50 dark:bg-gray-500/5 rounded-xl px-3 py-2.5 text-[12.5px] text-gray-700 dark:text-zinc-300">
+          <span className="min-w-0 flex-1">
+            <strong className="font-semibold">Mapping needed:</strong>{' '}
+            {needsMapping.map(f => f.form_name).join(', ')}. Every selected form has to be
+            confirmed before results can be created.
+          </span>
+          <button
+            type="button"
+            onClick={() => onOpenMapping(needsMapping[0].form_id)}
+            className="flex-none text-[11.5px] font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-2.5 py-1 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
+          >
+            Check {needsMapping.length === 1 ? 'it' : 'the first'} →
+          </button>
+        </div>
+      )}
+
+      {held.length > 0 && (
+        <div className="flex items-start gap-2.5 border border-gray-200 dark:border-[#242424] bg-gray-50 dark:bg-[#0d0d0d] rounded-xl px-3 py-2.5 text-[12.5px] text-gray-600 dark:text-zinc-400">
+          <span className="min-w-0 flex-1">
+            <strong className="font-semibold dark:text-zinc-200">
+              {held.length} further candidate row{held.length === 1 ? '' : 's'} held.
+            </strong>{' '}
+            {unresolved.length
+              ? <>They are waiting on a study comparison; the queue lists them under
+                &ldquo;Comparison needed&rdquo;.</>
+              : <>They are waiting on a decision and are listed in the queue.</>}{' '}
+            Creating now adds the rest and leaves these where they are.
+          </span>
+          <button
+            type="button"
+            onClick={onOpenQueue}
+            className="flex-none text-[11.5px] font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-2.5 py-1 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
+          >
+            See them →
+          </button>
+        </div>
+      )}
+
       <Fold
         title="Instrument"
-        summary="RoB 2 · parallel group · 22 Aug 2019 · effect of assignment"
+        summary="RoB 2 · parallel group · 22 Aug 2019"
       >
         <p className="text-[12.5px] text-gray-600 dark:text-zinc-400 leading-relaxed mt-2">
           22 signalling questions across 5 domains. Recorded on every assessment. One assessment per
@@ -410,14 +353,15 @@ export function SetupScreen({
       </Fold>
 
       <Fold
-        title="Where results come from"
+        title="Choose extraction sources"
         summary={sourceSummary}
-        tone={needsMapping.length ? 'warn' : undefined}
         defaultOpen
       >
         <p className="text-[12.5px] text-gray-500 dark:text-zinc-500 leading-relaxed mt-2">
           Every outcome form that names results is used, not the first one that matches a pattern.
-          Untick a form whose rows are a second copy of another&rsquo;s.
+          Untick a form whose rows are a second copy of another&rsquo;s. Unticking blocks nothing —
+          an unselected form simply contributes no candidates, and assessments already made are
+          kept either way.
         </p>
         {(build?.forms ?? []).map(form => (
           <SourceRow
@@ -425,7 +369,6 @@ export function SetupScreen({
             form={form}
             pending={pendingSources.has(form.form_id)}
             onToggle={use => onToggleSource(form.form_id, use)}
-            onOpenMapping={() => onOpenMapping(form.form_id)}
           />
         ))}
         {(build?.excluded ?? []).map(excluded => (
@@ -439,28 +382,25 @@ export function SetupScreen({
       </Fold>
 
       <Fold
-        title="Comparisons"
-        summary={contrastSummary}
-        tone={unsettled.length ? 'warn' : undefined}
+        title="Check each form's mapping"
+        summary={mappingSummary}
+        tone={needsMapping.length ? 'warn' : undefined}
+        defaultOpen={needsMapping.length > 0}
       >
-        <p className="text-[12.5px] text-gray-500 dark:text-zinc-500 leading-relaxed mt-2 mb-1">
-          An outcome table stores one row per <em>arm</em>, and an arm name cannot say what it was
-          compared against. Two-arm trials with an identifiable control resolve on their own; anything
-          else waits for you, because guessing the comparator inverts every estimate that points here.
+        <p className="text-[12.5px] text-gray-500 dark:text-zinc-500 leading-relaxed mt-2">
+          Confirm the columns and their sample values separately for every selected form. Two
+          outcome tables in one project name their columns differently, so confirming one says
+          nothing about the other.
         </p>
-        {contrasts.length === 0 && (
-          <div className="text-[12.5px] text-gray-500 dark:text-zinc-500 py-2">
-            No comparisons derived yet.
-          </div>
-        )}
-        {contrasts.map((contrast, i) => (
-          <StudyContrasts
-            key={contrast.id || contrast.document_id || i}
-            contrast={contrast}
-            edits={contrastEdits[contrast.document_id] ?? []}
-            label={studyLabels[contrast.document_id] ?? contrast.document_id.slice(0, 8)}
-            onSet={next => onEditContrast(contrast.document_id, next)}
-            onRemove={() => onEditContrast(contrast.document_id, null)}
+        {(build?.forms ?? []).length === 0 ? (
+          <p className="text-[12.5px] text-gray-500 dark:text-zinc-500 mt-2">
+            Select at least one extraction form above to review its mapping.
+          </p>
+        ) : (build?.forms ?? []).map(form => (
+          <MappingRow
+            key={form.form_id}
+            form={form}
+            onOpenMapping={() => onOpenMapping(form.form_id)}
           />
         ))}
       </Fold>
@@ -474,6 +414,9 @@ export function SetupScreen({
           <p className="text-[12.5px] text-gray-500 dark:text-zinc-500 leading-relaxed mt-2 mb-1">
             Two forms produced results with the same identity. Both are held rather than merged: the
             same outcome measured two ways is two results, and only a person can say which this is.
+            There is nothing here to merge &mdash; one identity can only ever be one row &mdash; so
+            the decision is about the <strong>forms</strong>: stop using one as a source, or map a
+            column that tells the two apart.
           </p>
           {duplicates.map((dup, i) => (
             <div key={i} className="border-t border-gray-100 dark:border-[#1a1a1a] py-2.5 first:border-t-0">
@@ -483,14 +426,104 @@ export function SetupScreen({
               <div className="text-[11.5px] text-gray-500 dark:text-zinc-500 mt-0.5">
                 Derived from {dup.from.join(' and ')}
               </div>
+              {canManage && (
+                <div className="mt-2 flex flex-col gap-1.5">
+                  {dup.from.map((name, side) => {
+                    const formId = dup.from_ids?.[side];
+                    if (!formId) return null;
+                    return (
+                      <div key={formId} className="flex items-center gap-2 flex-wrap text-[11.5px]">
+                        <span className="text-gray-500 dark:text-zinc-500 min-w-0 truncate max-w-[16rem]">
+                          {name}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={pendingSources.has(formId)}
+                          onClick={() => onToggleSource(formId, false)}
+                          className="flex-none font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-2 py-0.5 hover:bg-gray-50 dark:hover:bg-[#1a1a1a] disabled:opacity-50"
+                        >
+                          Not a source
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onOpenMapping(formId)}
+                          className="flex-none font-semibold rounded-lg border border-gray-200 dark:border-[#2a2a2a] px-2 py-0.5 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
+                        >
+                          Map its columns
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
             </div>
           ))}
         </Fold>
       )}
 
+      {/* Nothing to create is a RESULT, not an absence. The fold simply
+          disappeared, so a manager who pressed Re-derive and saw the page not
+          change had no way to tell whether it had run. */}
+      {results.length === 0 && !loading && (
+        <div className="border border-gray-200 rounded-xl bg-white dark:bg-[#111111] dark:border-[#1f1f1f] px-4 py-6 text-center">
+          <div className="text-[14px] font-semibold dark:text-zinc-200">Nothing new to create</div>
+          <p className="text-[12.5px] text-gray-500 dark:text-zinc-500 mt-1 max-w-[62ch] mx-auto leading-relaxed">
+            {held.length
+              ? <>Every candidate row is held. Define the missing study comparisons and they become
+                results you can create.</>
+              : unsettled.length
+                ? <>No result can be derived until at least one study says which arms were
+                  compared.</>
+                : existingCount
+                  ? <>The selected forms and study comparisons produce nothing that is not already
+                    in the queue.</>
+                  : <>The selected forms produce no candidate results. Tick another source above,
+                    or check a form&rsquo;s column mapping.</>}
+          </p>
+        </div>
+      )}
+
+      {/* "Study readiness" and "Preview before adding" were REMOVED (22 Sep
+          2026). Both enumerated one row per study or per result on a screen
+          whose every other section is about the project: which forms are
+          sources, and what their columns mean. Paper-by-paper detail belongs in
+          the queue, which already groups by study — and the preview in
+          particular was a list nothing could be done from.
+
+          Neither signal is lost. Held rows still get the banner at the top of
+          this screen, which names the count and says the queue lists them under
+          "Comparison needed" — and a study with no comparison always has held
+          rows, because that is what holds them. The count of what Create would
+          add is on the button itself. */}
+      {/* The one action this screen owns, and the only project-wide one there
+          is. It was removed on 22 Sep 2026 and put back the same day: creating
+          results per study, from the comparisons screen, is only reachable for
+          a study the QUEUE lists — and the queue lists a study only if it
+          already has results, or has no comparison at all. A study with a
+          comparison and nothing created yet — an ordinary new paper in a
+          configured project — appeared nowhere, so its results could never be
+          created. Setup is also the only screen that loads the candidate build
+          (the queue deliberately does not; it reads every outcome extraction in
+          the project), so it is the only screen that can know the count.
+
+          What did NOT come back: the per-result preview list, the per-study
+          readiness list, and the "Open queue →" link beside this button. The
+          first two were paper-by-paper detail on a project-level screen; the
+          queue is already in the header. */}
+      <div className="border border-gray-200 dark:border-[#1f1f1f] rounded-xl bg-white dark:bg-[#111111] px-4 py-3.5">
+        {canManage && (
+          <button
+            type="button"
+            onClick={onCommit}
+            disabled={committing || results.length === 0 || needsMapping.length > 0}
+            className="w-full min-h-[40px] text-[13px] font-semibold rounded-lg px-3 py-2 border border-gray-900 bg-gray-900 text-white hover:bg-gray-800 dark:border-white dark:bg-white dark:text-gray-900 disabled:opacity-[.55] disabled:cursor-not-allowed"
+          >
+            {committing ? 'Adding…' : `Add ${results.length} result${results.length === 1 ? '' : 's'} to queue`}
+          </button>
+        )}
+      </div>
       {build?.note && (
-        <div className="flex items-start gap-2.5 border border-amber-200 dark:border-amber-900/50 bg-amber-50 dark:bg-amber-500/5 rounded-xl px-3 py-2.5 text-[12.5px] text-amber-900 dark:text-amber-300">
-          <span aria-hidden className="font-bold">!</span>
+        <div className="flex items-start gap-2.5 border border-gray-200 dark:border-[#2a2a2a] bg-gray-50 dark:bg-gray-500/5 rounded-xl px-3 py-2.5 text-[12.5px] text-gray-700 dark:text-zinc-300">
           <span>{build.note}</span>
         </div>
       )}

@@ -77,12 +77,66 @@ export const RESULT_LABEL_COLUMN = 'outcome_assessed';
  */
 export const META_COLUMN = 'rob_workflow';
 
+/**
+ * A source reference and supporting passage per answer, as JSON.
+ *
+ * The rationale column already holds prose. This holds the two things prose
+ * cannot be searched or checked for: WHERE the reviewer looked, and WHAT it
+ * said. An assessment whose evidence is only a paragraph of reasoning cannot be
+ * audited without re-reading the paper.
+ */
+export const EVIDENCE_COLUMN = 'rob_evidence';
+
+/**
+ * Where an answer came from, when it was not typed here.
+ *
+ * Copying answers between results of one trial is legitimate and common — D1
+ * rarely differs — but an answer that arrived by copy is a weaker claim than
+ * one somebody made looking at this result, and consensus needs to know which
+ * it is reading. The record survives later edits: it says the answer was copied
+ * AND that it has since been changed, because "edited after copying" is a
+ * different thing again from either.
+ */
+export const PROVENANCE_COLUMN = 'rob_provenance';
+
+export interface AnswerEvidence {
+  /** Where the reviewer looked — "p.6 · Table 2", a registry id, a protocol. */
+  reference: string;
+  /** What it said, in the source's own words. */
+  passage: string;
+}
+
+export interface AnswerOrigin {
+  /** The result this answer was copied from, if it was. */
+  copiedFrom?: string;
+  copiedAt?: string;
+  /** True once somebody changed it after the copy. */
+  editedSince?: boolean;
+}
+
 /** Root keys. The instrument is recorded on every record it produced. */
 export const ROOT_INSTRUMENT = 'rob_instrument';
 export const ROOT_INSTRUMENT_VERSION = 'rob_instrument_version';
 export const ROOT_TRIAL_DESIGN = 'rob_trial_design';
 export const ROOT_EFFECT = 'rob_effect_of_interest';
 export const ROOT_TRIAL_DONE = 'rob_trial_questions_complete';
+
+/**
+ * Trial answers, keyed by the comparison they are about.
+ *
+ * **Scoped to study AND comparison, not to the study alone.** 2.1-2.3 ask who
+ * knew the assigned intervention; in a trial running three drugs against
+ * placebo, one arm can be double-blind and another open-label, so one set of
+ * answers per trial would force a reviewer to give one answer for two different
+ * truths. Every result of the SAME comparison still shares one set — which is
+ * the whole point — but a different comparison of the same trial gets its own.
+ *
+ * Records written before this existed keep their answers in the root columns,
+ * and `readTrial` still reads them when the map has no entry. Nothing is
+ * migrated in place: an old record is read where it lies and rewritten into the
+ * map the first time somebody saves.
+ */
+export const ROOT_TRIAL_BY_COMPARISON = 'rob_trial';
 
 export const INSTRUMENT_VERSION = '2019-08-22';
 
@@ -111,9 +165,16 @@ export const EMPTY_TRIAL: TrialRecord = {
  */
 export function readTrial(
   data: Record<string, any> | undefined, binding: SignallingBinding,
+  contrastId = '',
 ): TrialRecord {
   if (!data) return EMPTY_TRIAL;
-  const root = data as Row;
+  const scoped = (data as Row)[ROOT_TRIAL_BY_COMPARISON];
+  const forComparison = contrastId && scoped && typeof scoped === 'object'
+    ? (scoped as Row)[contrastId] : null;
+  // The root columns are where this lived before answers were scoped to a
+  // comparison. A record that predates the map is read where it lies.
+  const root = (forComparison && typeof forComparison === 'object'
+    ? forComparison : data) as Row;
   const all = readAnswers(root, binding);
   const evidence = readEvidence(root, binding);
   const answers: Answers = {};
@@ -142,18 +203,38 @@ export function writeTrial(
   existing: Record<string, any> | undefined,
   binding: SignallingBinding,
   trial: TrialRecord,
+  contrastId = '',
   design = 'parallel',
 ): Record<string, any> {
   const trialBinding = restrictTo(binding, TRIAL_QUESTIONS);
-  let root: Row = { ...(existing ?? {}) };
-  root = writeAnswers(root, trialBinding, trial.answers, trial.rationale);
-  root = clearRoutedOut(root, trialBinding, askedSet(trial.answers, TRIAL_QUESTIONS));
-  root[ROOT_INSTRUMENT] = 'rob2';
-  root[ROOT_INSTRUMENT_VERSION] = INSTRUMENT_VERSION;
-  root[ROOT_TRIAL_DESIGN] = design;
-  root[ROOT_EFFECT] = 'assignment';
-  root[ROOT_TRIAL_DONE] = trial.complete;
-  return root;
+  const record: Row = { ...(existing ?? {}) };
+
+  let zone: Row = {};
+  const scoped = record[ROOT_TRIAL_BY_COMPARISON];
+  const previous = contrastId && scoped && typeof scoped === 'object'
+    ? (scoped as Row)[contrastId] : null;
+  if (previous && typeof previous === 'object') zone = { ...(previous as Row) };
+
+  zone = writeAnswers(zone, trialBinding, trial.answers, trial.rationale, trial.evidence);
+  zone = clearRoutedOut(zone, trialBinding, askedSet(trial.answers, TRIAL_QUESTIONS));
+  zone[ROOT_TRIAL_DONE] = trial.complete;
+
+  if (contrastId) {
+    record[ROOT_TRIAL_BY_COMPARISON] = {
+      ...(scoped && typeof scoped === 'object' ? scoped as Row : {}),
+      [contrastId]: zone,
+    };
+  } else {
+    // A result whose comparison is not settled yet has nowhere scoped to put
+    // these. The root is that place, and it is what the old records use.
+    Object.assign(record, zone);
+  }
+
+  record[ROOT_INSTRUMENT] = 'rob2';
+  record[ROOT_INSTRUMENT_VERSION] = INSTRUMENT_VERSION;
+  record[ROOT_TRIAL_DESIGN] = design;
+  record[ROOT_EFFECT] = 'assignment';
+  return record;
 }
 
 // ── One result's assessment ──────────────────────────────────────────────────
@@ -177,6 +258,19 @@ export interface ResultAssessment {
   complete: boolean;
   /** The identity version it was made against, for staleness. */
   resultVersion: number | null;
+  /** Per question: where the reviewer looked and what it said. */
+  sources: Record<string, AnswerEvidence>;
+  /** Per question: whether the answer was copied, and whether it has moved since. */
+  origins: Record<string, AnswerOrigin>;
+  /**
+   * Why this review reopened without its reviewer doing anything.
+   *
+   * `reopenForChangedTrial` has always written this into the record and
+   * nothing ever read it, so a reviewer whose completed review reopened saw
+   * only that it was no longer complete — not why, and not which domains to
+   * look at. Cleared when they acknowledge it.
+   */
+  reopenedBecause: string;
 }
 
 export function emptyAssessment(): ResultAssessment {
@@ -187,6 +281,7 @@ export function emptyAssessment(): ResultAssessment {
     confirmed: [false, false, false, false, false],
     direction: {}, overallDirection: '',
     complete: false, resultVersion: null,
+    sources: {}, origins: {}, reopenedBecause: '',
   };
 }
 
@@ -241,6 +336,9 @@ export function readResult(
   }
 
   out.resultVersion = numberOrNull(cellValue(row, RESULT_VERSION_COLUMN));
+  out.reopenedBecause = String(readMeta(row).reopened_because ?? '');
+  out.sources = readJson(row, EVIDENCE_COLUMN) as Record<string, AnswerEvidence>;
+  out.origins = readJson(row, PROVENANCE_COLUMN) as Record<string, AnswerOrigin>;
 
   const meta = readMeta(row);
   out.confirmed = Array.isArray(meta.confirmed) && meta.confirmed.length === 5
@@ -307,7 +405,7 @@ export function writeResult(
 
   const applyTo = (row: Row): Row => {
     let next: Row = writeAnswers(row, resultBinding, input.assessment.answers,
-      input.assessment.rationale);
+      input.assessment.rationale, input.assessment.evidence);
     next = clearRoutedOut(next, resultBinding, askedSet(input.merged));
     next[RESULT_ID_COLUMN] = input.resultId;
     next[RESULT_LABEL_COLUMN] = input.label;
@@ -334,6 +432,8 @@ export function writeResult(
       }
     });
 
+    next[EVIDENCE_COLUMN] = JSON.stringify(input.assessment.sources ?? {});
+    next[PROVENANCE_COLUMN] = JSON.stringify(input.assessment.origins ?? {});
     next[META_COLUMN] = JSON.stringify({
       confirmed: input.assessment.confirmed,
       complete: input.assessment.complete,
@@ -345,6 +445,10 @@ export function writeResult(
       overall_direction: input.assessment.overallDirection,
       instrument: 'rob2',
       instrument_version: INSTRUMENT_VERSION,
+      // Survives a save, so the notice does not vanish the moment the reviewer
+      // touches an answer — before they have read it. Cleared only by
+      // acknowledging, which writes an empty string and drops the key.
+      reopened_because: input.assessment.reopenedBecause || undefined,
     });
     return next;
   };
@@ -366,6 +470,64 @@ export function writeResult(
       ? { ...original, value: nextRows }
       : nextRows;
   return record;
+}
+
+/**
+ * Reopen the completed reviews that stood on trial answers which have changed.
+ *
+ * The six are shared by every result of a comparison. Change one after somebody
+ * declared a review complete and that review now rests on an answer nobody gave
+ * — its D1 and D2 judgements were derived from the old set. Leaving it marked
+ * complete is the quiet version of losing the reviewer's work: the label stays,
+ * the reasoning underneath it has moved.
+ *
+ * So the reviews reopen, and any override on D1 or D2 is dropped with them —
+ * an override is a reasoned disagreement with a *specific* derivation, and that
+ * derivation no longer exists. Overrides on D3-D5 are untouched: those domains
+ * do not read the shared answers.
+ *
+ * Returns which results were reopened so the screen can say so. Nothing is
+ * deleted; the answers stay exactly as the reviewer left them.
+ */
+export function reopenForChangedTrial(
+  existing: Record<string, any> | undefined,
+  resultIds: Set<string>,
+  tableField = ASSESSMENT_TABLE,
+): { data: Record<string, any>; reopened: string[] } {
+  const table = tableField || ASSESSMENT_TABLE;
+  const rows = assessmentRows(existing, table);
+  const reopened: string[] = [];
+
+  const next = rows.map(row => {
+    const id = cellValue(row, RESULT_ID_COLUMN);
+    if (!resultIds.has(id)) return row;
+    const meta = readMeta(row);
+    if (!truthy(meta.complete)) return row;
+
+    const overrides = { ...(meta.overrides ?? {}) };
+    const overrideWhy = { ...(meta.override_why ?? {}) };
+    delete overrides['0']; delete overrides['1'];
+    delete overrideWhy['0']; delete overrideWhy['1'];
+
+    reopened.push(id);
+    return {
+      ...row,
+      [META_COLUMN]: JSON.stringify({
+        ...meta, complete: false, overrides, override_why: overrideWhy,
+        reopened_because: 'the shared trial answers for this comparison changed',
+      }),
+    };
+  });
+
+  if (reopened.length === 0) return { data: { ...(existing ?? {}) }, reopened };
+
+  const record = { ...(existing ?? {}) };
+  const original = existing?.[table];
+  record[table] =
+    original && typeof original === 'object' && !Array.isArray(original) && 'value' in original
+      ? { ...original, value: next }
+      : next;
+  return { data: record, reopened };
 }
 
 // ── Small helpers ────────────────────────────────────────────────────────────
@@ -391,6 +553,18 @@ function askedSet(answers: Answers, ids?: readonly string[]): Set<string> {
     if (isAsked(question, answers)) out.add(question.id);
   }
   return out;
+}
+
+/** A JSON column, read defensively: unreadable bookkeeping is not a reason to refuse. */
+function readJson(row: Row, column: string): Record<string, any> {
+  const raw = cellValue(row, column);
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function readMeta(row: Row): Record<string, any> {

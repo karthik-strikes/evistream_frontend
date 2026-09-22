@@ -8,7 +8,9 @@ import { cn } from '@/lib/utils';
  * The rule, and the only rule:
  *   colour encodes required human action. Nothing else earns colour.
  *
- *   - a person must decide (accept / attach / choose)  → attention
+ *   - a person must decide (accept / attach / choose)  → attention (indigo,
+ *     not amber: chosen deliberately on 22 Sep 2026. The hue moved, the rule
+ *     did not — every "must decide" badge still shares one colour.)
  *   - a person must retry or remove                    → critical
  *   - the system is working on it                      → active
  *   - anything else: provenance, identity, user
@@ -40,7 +42,7 @@ const badgeVariants = cva(
         neutral:
           'border-gray-200 bg-transparent text-gray-600 dark:border-[#2a2a2a] dark:text-zinc-400',
         attention:
-          'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300',
+          'border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-900/60 dark:bg-indigo-500/10 dark:text-indigo-300',
         critical:
           'border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-500/10 dark:text-red-300',
         active:
@@ -64,7 +66,7 @@ const badgeVariants = cva(
         processing:
           'border-blue-200 bg-blue-50 text-blue-700 dark:border-blue-900/60 dark:bg-blue-500/10 dark:text-blue-300',
         warning:
-          'border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-900/60 dark:bg-amber-500/10 dark:text-amber-300',
+          'border-indigo-200 bg-indigo-50 text-indigo-700 dark:border-indigo-900/60 dark:bg-indigo-500/10 dark:text-indigo-300',
         error:
           'border-red-200 bg-red-50 text-red-700 dark:border-red-900/60 dark:bg-red-500/10 dark:text-red-300',
         failed:

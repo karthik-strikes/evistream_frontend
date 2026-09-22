@@ -223,6 +223,7 @@ export function writeAnswers(
   binding: SignallingBinding,
   answers: Answers,
   rationales: Record<string, string> = {},
+  evidence: Record<string, { quote?: string; locator?: string }> = {},
 ): Row {
   const next: Row = { ...row };
 
@@ -236,16 +237,30 @@ export function writeAnswers(
     const unchanged = parseAnswer(envelope.value) === answer;
     const stored = ANSWER_STORED[answer];
 
-    next[bound.column] =
-      existing && typeof existing === 'object' && !Array.isArray(existing) && 'value' in existing
-        ? {
-          ...existing,
-          value: stored,
-          // Keep the quote only while it still backs this answer.
-          source_text: unchanged ? existing.source_text ?? '' : '',
-          source_location: unchanged ? existing.source_location ?? null : null,
-        }
-        : stored;
+    // Grounding that arrives WITH the answer wins. The caller clears the entry
+    // to empty the moment a reviewer answers by hand, so an entry here always
+    // backs the answer being written and never the one before it. With no
+    // entry the old rule stands: keep the quote only while its answer is
+    // unchanged. Without this, accepting a verified quote stored the answer and
+    // threw the quote away, and the reload reported it as merely inferred.
+    const given = evidence[bound.question.id];
+    const quote = given
+      ? String(given.quote ?? '')
+      : (unchanged ? String(envelope.source_text ?? '') : '');
+    const locator = given
+      ? (given.locator || null)
+      : (unchanged ? envelope.source_location ?? null : null);
+
+    if (existing && typeof existing === 'object' && !Array.isArray(existing) && 'value' in existing) {
+      next[bound.column] = {
+        ...existing, value: stored, source_text: quote, source_location: locator,
+      };
+    } else if (quote || locator) {
+      // A bare cell becomes an envelope only when there is grounding to hold.
+      next[bound.column] = { value: stored, source_text: quote, source_location: locator };
+    } else {
+      next[bound.column] = stored;
+    }
 
     const rationale = rationales[bound.question.id];
     if (bound.rationaleColumn && rationale !== undefined) {

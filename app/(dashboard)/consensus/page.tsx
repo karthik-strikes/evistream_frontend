@@ -36,6 +36,7 @@ import {
   type SourceKey,
 } from './_lib/resolve';
 import { ROLE_COLORS, sourceColors, STATE_COLORS } from '@/lib/reviewerColors';
+import { bindSignalling } from '@/app/(dashboard)/risk-of-bias/_lib/robSignalling';
 
 // react-pdf pulls in pdfjs-dist, which needs browser-only APIs (DOMMatrix,
 // DOMRect). Lazy-load on the client, exactly as SourceEvidenceDrawer does.
@@ -465,7 +466,23 @@ function ConsensusContent() {
     setLoadingForms(true);
     try {
       const data = await formsService.getAll(selectedProject.id);
-      const active = data.filter((f: any) => f.status === 'active');
+      // Active forms, plus the risk-of-bias instrument.
+      //
+      // A RoB 2 form is created by /risk-of-bias as a DRAFT on purpose: it is a
+      // data-entry schema nobody extracts with, and making it active would
+      // dispatch a code-generation run for a schema that will never be used —
+      // and leave it active with no `schema_def`, a state add-field,
+      // remove-field and the schema registry all assume cannot happen. So the
+      // form stays a draft and this list widens instead. Its assessments are
+      // ordinary manual extractions and adjudicate like any other; without
+      // this they were simply unreachable, and the RoB page's own promise of
+      // dual review went nowhere.
+      //
+      // `bindSignalling().usable` is the same switch the RoB page uses, so a
+      // form admitted here is exactly one that screen can read. An ordinary
+      // draft — one mid-generation — has no signalling columns and stays out.
+      const active = data.filter((f: any) => f.status === 'active'
+        || (f.status === 'draft' && bindSignalling(f.fields ?? []).usable));
       setForms(active);
       if (active.length > 0) {
         const urlFormId = searchParams.get('form');

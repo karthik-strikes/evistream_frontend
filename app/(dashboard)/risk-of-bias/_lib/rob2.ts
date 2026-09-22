@@ -304,15 +304,87 @@ function notYes(a: AnswerCode | undefined): boolean {
  * A routed-out question is asked again the moment its predecessor changes, so
  * this is evaluated live rather than read from storage.
  */
-export function isAsked(q: SignallingQuestion, answers: Answers): boolean {
-  return q.askedWhen ? q.askedWhen(answers) : true;
+/**
+ * The whole routing map at once: asked / waiting / skipped, per question.
+ *
+ * Computed together rather than per question, because a child's route depends
+ * on whether its PARENT was asked, not just on the parent's stored answer. A
+ * per-question predicate cannot see that, and the consequence is real: with
+ * 3.1 = Yes the tool never asks 3.2, but a stale "3.2 = No" left in the record
+ * made 3.3 route back in and the domain read as unjudgeable. Routed-out answers
+ * are cleared on write, so this mostly bit records written by something else —
+ * which is exactly the case a shared engine has to survive.
+ *
+ * `waiting` is the third state: a question BEFORE this one is unanswered, so
+ * nothing has ruled this one out yet. It is not "not applicable", and drawing
+ * it as such tells a reviewer a question is dismissed when it is about to
+ * reappear.
+ *
+ * Conditions are transcribed from the RoB 2 guidance of 22 August 2019, tables
+ * 6, 10 and 12.
+ */
+export type RouteState = 'asked' | 'waiting' | 'skipped';
+
+export function routeAll(answers: Answers): Record<string, RouteState> {
+  const v = (id: string) => answers[id];
+  const state: Record<string, RouteState> = {};
+  for (const question of ROB2_QUESTIONS) state[question.id] = 'asked';
+
+  const conditional = (id: string, parents: string[], reached: () => boolean) => {
+    const pending = parents.some(
+      p => state[p] === 'waiting' || (state[p] === 'asked' && !v(p)));
+    state[id] = pending ? 'waiting' : reached() ? 'asked' : 'skipped';
+  };
+
+  // D2 — Table 6. 2.3 only where somebody was aware; 2.4 only on a deviation;
+  // 2.5 only where that deviation could have affected the outcome.
+  conditional('2.3', ['2.1', '2.2'], () => notNo(v('2.1')) || notNo(v('2.2')));
+  conditional('2.4', ['2.3'], () => state['2.3'] === 'asked' && isYes(v('2.3')));
+  conditional('2.5', ['2.4'], () => state['2.4'] === 'asked' && notNo(v('2.4')));
+  conditional('2.7', ['2.6'], () => notYes(v('2.6')));
+
+  // D3 — Table 10.
+  conditional('3.2', ['3.1'], () => notYes(v('3.1')));
+  conditional('3.3', ['3.2'], () => state['3.2'] === 'asked' && isNo(v('3.2')));
+  conditional('3.4', ['3.3'], () => state['3.3'] === 'asked' && notNo(v('3.3')));
+
+  // D4 — Table 12.
+  conditional('4.3', ['4.1', '4.2'], () => notYes(v('4.1')) && notYes(v('4.2')));
+  conditional('4.4', ['4.3'], () => state['4.3'] === 'asked' && notNo(v('4.3')));
+  conditional('4.5', ['4.4'], () => state['4.4'] === 'asked' && notNo(v('4.4')));
+
+  return state;
 }
 
-/** The answers a domain still needs before it can be judged. */
+export function isAsked(q: SignallingQuestion, answers: Answers): boolean {
+  return routeAll(answers)[q.id] === 'asked';
+}
+
+/**
+ * What this domain still needs from the reviewer, right now.
+ *
+ * Only questions being ASKED and left blank — not the ones waiting behind them.
+ * A reviewer looking at D3 with 3.1 unanswered can act on 3.1 and nothing else;
+ * listing "waiting on 3.1, 3.2, 3.3, 3.4" is four times the noise and three
+ * items they cannot do anything about.
+ *
+ * Judging is gated more strictly — see `canJudge` — because a domain with
+ * questions still pending is not judgeable even though there is nothing to
+ * chase yet.
+ */
 export function unansweredIn(domainIndex: number, answers: Answers): string[] {
+  const route = routeAll(answers);
   return ROB2_SIGNALLING[domainIndex].questions
-    .filter(q => isAsked(q, answers) && !answers[q.id])
+    .filter(q => route[q.id] === 'asked' && !answers[q.id])
     .map(q => q.id);
+}
+
+/** Whether every question this domain will ask has been answered. */
+export function canJudge(domainIndex: number, answers: Answers): boolean {
+  const route = routeAll(answers);
+  return ROB2_SIGNALLING[domainIndex].questions.every(
+    q => route[q.id] === 'skipped'
+      || (route[q.id] === 'asked' && !!answers[q.id]));
 }
 
 // ── The algorithm ────────────────────────────────────────────────────────────
@@ -330,65 +402,102 @@ function worse(a: Severity, b: Severity): Severity {
  * Each branch below is the tool's own narrative rule, in the tool's order, so a
  * reviewer can check the code against the guidance line by line.
  */
+/**
+ * The published RoB 2 mapping from signalling answers to a domain judgement.
+ *
+ * Transcribed from the guidance of 22 August 2019 — tables 4, 6, 10, 12 and 14
+ * — row by row, because the rules are per-domain and asymmetric and no
+ * shorthand reproduces them. An earlier version of this function was written
+ * from the *shape* of the rules rather than the tables, and disagreed with the
+ * instrument on thousands of answer combinations: it made D1 "high" on baseline
+ * imbalance the table calls "some concerns", read 2.4 = No as clearing D2 when
+ * the table says some concerns, and treated "no information" on 2.5, 2.7 and
+ * 4.5 as milder than the table does. Every rule below now cites its row.
+ *
+ * Returns `null` when a question the routing actually asks is still unanswered
+ * — never a guess. A half-answered domain displaying as "Low" is a claim nobody
+ * made.
+ */
 export function judgeDomain(domainIndex: number, answers: Answers): Severity | null {
-  if (unansweredIn(domainIndex, answers).length > 0) return null;
+  if (!canJudge(domainIndex, answers)) return null;
   const a = (id: string) => answers[id];
+  const route = routeAll(answers);
 
   switch (domainIndex) {
-    // D1 — high whenever baseline differences suggest a randomization failure,
-    // or the sequence was not concealed; low only when all three line up.
+    // ── D1 · Table 4 ──────────────────────────────────────────────────────
+    //   any · 1.2 N/PN · any                        → High
+    //   any · 1.2 NI   · 1.3 Y/PY                   → High
+    //   1.1 Y/PY/NI · 1.2 Y/PY · 1.3 NI/N/PN        → Low
+    //   everything else                             → Some concerns
+    // Note what is NOT here: 1.3 = Y/PY alongside a concealed sequence is
+    // "some concerns", not high. The table says so explicitly, and remarks that
+    // it deserves investigation rather than an automatic verdict.
     case 0: {
-      if (isYes(a('1.3'))) return 'high';
       if (isNo(a('1.2'))) return 'high';
-      if (isYes(a('1.1')) && isYes(a('1.2')) && isNo(a('1.3'))) return 'low';
+      if (a('1.2') === 'NI' && isYes(a('1.3'))) return 'high';
+      if (notNo(a('1.1')) && isYes(a('1.2')) && notYes(a('1.3'))) return 'low';
       return 'some';
     }
 
-    // D2 — two independent parts: what happened during the trial (2.1–2.5) and
-    // whether the analysis estimated the effect of *assignment* (2.6–2.7). The
-    // domain takes the worse of the two.
+    // ── D2 · Table 6 · the worse of two independent parts ─────────────────
     case 1: {
-      let deviations: Severity;
-      if (isNo(a('2.1')) && isNo(a('2.2'))) deviations = 'low';
-      else if (isNo(a('2.3'))) deviations = 'low';
-      else if (isNo(a('2.4'))) deviations = 'low';
-      else if (isNo(a('2.5'))) deviations = 'high';
-      else deviations = 'some';
+      // Part 1 — 2.1 to 2.5.
+      //   both 2.1 & 2.2 N/PN (so 2.3 unasked)      → Low
+      //   2.3 N/PN                                  → Low
+      //   2.3 NI                                    → Some concerns
+      //   2.3 Y/PY · 2.4 N/PN                       → Some concerns
+      //   2.3 Y/PY · 2.4 Y/PY/NI · 2.5 Y/PY         → Some concerns
+      //   2.3 Y/PY · 2.4 Y/PY/NI · 2.5 N/PN/NI      → High
+      let deviations: Severity = 'low';
+      if (route['2.3'] === 'asked') {
+        if (a('2.3') === 'NI') deviations = 'some';
+        else if (isYes(a('2.3'))) {
+          deviations = isNo(a('2.4')) || isYes(a('2.5')) ? 'some' : 'high';
+        }
+      }
 
-      let analysis: Severity;
-      if (isYes(a('2.6'))) analysis = 'low';
-      else if (isNo(a('2.7'))) analysis = 'low';
-      else if (isYes(a('2.7'))) analysis = 'high';
-      else analysis = 'some';
+      // Part 2 — 2.6 and 2.7.
+      //   2.6 Y/PY                                  → Low
+      //   2.6 N/PN/NI · 2.7 N/PN                    → Some concerns
+      //   2.6 N/PN/NI · 2.7 Y/PY/NI                 → High
+      const analysis: Severity = isYes(a('2.6')) ? 'low'
+        : isNo(a('2.7')) ? 'some' : 'high';
 
       return worse(deviations, analysis);
     }
 
-    // D3 — three separate ways to reach low risk, and only one route to high:
-    // missingness that is *likely* to have depended on the true value.
+    // ── D3 · Table 10 ─────────────────────────────────────────────────────
+    //   3.1 Y/PY                                    → Low
+    //   3.2 Y/PY                                    → Low
+    //   3.3 N/PN                                    → Low
+    //   3.4 N/PN                                    → Some concerns
+    //   3.4 Y/PY/NI                                 → High
     case 2: {
-      if (isYes(a('3.1'))) return 'low';
-      if (isYes(a('3.2'))) return 'low';
-      if (isNo(a('3.3'))) return 'low';
-      if (isYes(a('3.4'))) return 'high';
-      return 'some';
+      if (isYes(a('3.1')) || isYes(a('3.2')) || isNo(a('3.3'))) return 'low';
+      return isNo(a('3.4')) ? 'some' : 'high';
     }
 
-    // D4 — an inappropriate or group-dependent measurement is high on its own,
-    // as is assessment that was likely influenced by knowing the assignment.
+    // ── D4 · Table 12 ─────────────────────────────────────────────────────
+    //   4.1 Y/PY  or  4.2 Y/PY                      → High
+    //   4.3 N/PN  or  4.4 N/PN                      → Low, but Some concerns
+    //                                                 when 4.2 is NI
+    //   4.5 N/PN                                    → Some concerns
+    //   4.5 Y/PY/NI                                 → High
     case 3: {
       if (isYes(a('4.1')) || isYes(a('4.2'))) return 'high';
-      if (isYes(a('4.5'))) return 'high';
-      if (isNo(a('4.1')) && isNo(a('4.2')) && (isNo(a('4.3')) || isNo(a('4.4')))) return 'low';
-      return 'some';
+      if (isNo(a('4.3')) || isNo(a('4.4'))) {
+        return a('4.2') === 'NI' ? 'some' : 'low';
+      }
+      return isNo(a('4.5')) ? 'some' : 'high';
     }
 
-    // D5 — cherry-picking either the measurement or the analysis is high risk;
-    // low needs a pre-specified plan and neither kind of selection.
+    // ── D5 · Table 14 ─────────────────────────────────────────────────────
+    //   5.2 Y/PY  or  5.3 Y/PY                      → High
+    //   5.1 Y/PY · 5.2 N/PN · 5.3 N/PN              → Low
+    //   everything else                             → Some concerns
     case 4: {
       if (isYes(a('5.2')) || isYes(a('5.3'))) return 'high';
-      if (isYes(a('5.1')) && isNo(a('5.2')) && isNo(a('5.3'))) return 'low';
-      return 'some';
+      return isYes(a('5.1')) && isNo(a('5.2')) && isNo(a('5.3')) ? 'low' : 'some';
     }
 
     default:
