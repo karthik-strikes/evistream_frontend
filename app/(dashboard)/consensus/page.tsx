@@ -468,21 +468,15 @@ function ConsensusContent() {
       const data = await formsService.getAll(selectedProject.id);
       // Active forms, plus the risk-of-bias instrument.
       //
-      // A RoB 2 form is created by /risk-of-bias as a DRAFT on purpose: it is a
-      // data-entry schema nobody extracts with, and making it active would
-      // dispatch a code-generation run for a schema that will never be used —
-      // and leave it active with no `schema_def`, a state add-field,
-      // remove-field and the schema registry all assume cannot happen. So the
-      // form stays a draft and this list widens instead. Its assessments are
-      // ordinary manual extractions and adjudicate like any other; without
-      // this they were simply unreachable, and the RoB page's own promise of
-      // dual review went nowhere.
-      //
-      // `bindSignalling().usable` is the same switch the RoB page uses, so a
-      // form admitted here is exactly one that screen can read. An ordinary
-      // draft — one mid-generation — has no signalling columns and stays out.
-      const active = data.filter((f: any) => f.status === 'active'
-        || (f.status === 'draft' && bindSignalling(f.fields ?? []).usable));
+      // Risk-of-bias forms are left out. RoB 2 consensus is recorded on the
+      // Risk of Bias page's own Consensus screen (`/risk-of-bias?screen=consensus`),
+      // which writes the consensus record the RoB readers use. Recording it here
+      // as well would create a second, diverging consensus store
+      // (`consensus_results`) for the same assessments.
+      const isRobForm = (f: any) => (f.fields ?? []).some(
+        (x: any) => x?.field_name === 'risk_of_bias_assessments')
+        || bindSignalling(f.fields ?? []).usable;
+      const active = data.filter((f: any) => f.status === 'active' && !isRobForm(f));
       setForms(active);
       if (active.length > 0) {
         const urlFormId = searchParams.get('form');

@@ -50,6 +50,8 @@ export function downloadSvgAsImage(
   filename: string,
   format: 'png' | 'jpg',
   size: { width: number; height: number },
+  /** Pixels per SVG unit; defaults to 3x (see above). */
+  scale = RESOLUTION_SCALE,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
@@ -57,8 +59,8 @@ export function downloadSvgAsImage(
 
     img.onload = () => {
       const canvas = document.createElement('canvas');
-      canvas.width = Math.round(size.width * RESOLUTION_SCALE);
-      canvas.height = Math.round(size.height * RESOLUTION_SCALE);
+      canvas.width = Math.round(size.width * scale);
+      canvas.height = Math.round(size.height * scale);
       const ctx = canvas.getContext('2d');
       URL.revokeObjectURL(url);
       if (!ctx) {

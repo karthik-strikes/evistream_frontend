@@ -79,6 +79,7 @@ export function locatorText(raw: unknown): string {
   if (typeof raw === 'number') return `Page ${raw}`;
   if (typeof raw === 'object') {
     const o = raw as Record<string, any>;
+    if (typeof o.label === 'string' && o.label.trim()) return o.label.trim();
     const parts = [
       o.page !== undefined && o.page !== null ? `Page ${o.page}` : '',
       String(o.section ?? '').trim(),
@@ -223,7 +224,7 @@ export function writeAnswers(
   binding: SignallingBinding,
   answers: Answers,
   rationales: Record<string, string> = {},
-  evidence: Record<string, { quote?: string; locator?: string }> = {},
+  evidence: Record<string, { quote?: string; locator?: string; location?: Record<string, unknown> | null }> = {},
 ): Row {
   const next: Row = { ...row };
 
@@ -247,8 +248,15 @@ export function writeAnswers(
     const quote = given
       ? String(given.quote ?? '')
       : (unchanged ? String(envelope.source_text ?? '') : '');
+    // Sent as an OBJECT: the server's provenance merge keeps `source_location`
+    // only when it is a dict, so a bare string locator ("p. 3 · Methods") was
+    // dropped on every save. `{label}` survives, and every reader reads `.label`.
+    // A full location (page, bboxes, page size — e.g. an accepted AI quote or a
+    // passage selected in the PDF) is written whole, so the highlight survives.
     const locator = given
-      ? (given.locator || null)
+      ? (given.location && typeof given.location === 'object'
+        ? { ...given.location, label: given.locator || locatorText(given.location) }
+        : given.locator ? { label: given.locator } : null)
       : (unchanged ? envelope.source_location ?? null : null);
 
     if (existing && typeof existing === 'object' && !Array.isArray(existing) && 'value' in existing) {

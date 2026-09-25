@@ -1315,3 +1315,75 @@ html.dark .doc-checkbox:indeterminate {
   animation: glow-sweep 2s ease-in-out infinite;
 }
 
+/* ── RoB AI: five moons, one per domain (risk-of-bias workspace header) ──
+   Running/queued moons orbit a tilted ring; a finished domain's moon stops at
+   its own slot on the ring (green, or red if it failed). All done → a still ring. */
+.rob-ai-ring { position: relative; width: 28px; height: 16px; flex-shrink: 0; }
+.rob-ai-ring.is-working { animation: rob-ai-bob 2.4s ease-in-out infinite; }
+/* the orbit track */
+.rob-ai-ring::before {
+  content: ''; position: absolute; left: 50%; top: 50%; width: 21px; height: 8px; margin: -4px 0 0 -10.5px;
+  border-radius: 50%; border: 1px solid rgba(148, 163, 184, .28); z-index: 0;
+}
+/* the planet: back-half moons (z 1) pass behind it, front-half moons (z 3) in front */
+.rob-ai-ring::after {
+  content: ''; position: absolute; left: 50%; top: 50%; width: 6px; height: 6px; margin: -3px 0 0 -3px;
+  border-radius: 50%; z-index: 2;
+  background: radial-gradient(circle at 35% 30%, #e2e8f0, #94a3b8 70%);
+  transition: box-shadow .6s ease, background .6s ease;
+}
+.rob-ai-ring.is-working::after {
+  background: radial-gradient(circle at 35% 30%, #e0e7ff, #6366f1 75%);
+  box-shadow: 0 0 6px rgba(99, 102, 241, .5);
+}
+.rob-ai-ring.is-complete::after {
+  background: radial-gradient(circle at 35% 30%, #dcfce7, #16a34a 75%);
+  animation: rob-ai-glow 1.4s ease-out 1 both;
+}
+html.dark .rob-ai-ring::before { border-color: rgba(113, 113, 122, .45); }
+@keyframes rob-ai-glow {
+  0% { box-shadow: 0 0 0 0 rgba(22, 163, 74, .55); }
+  40% { box-shadow: 0 0 0 5px rgba(22, 163, 74, .18); }
+  100% { box-shadow: 0 0 3px 0 rgba(22, 163, 74, .35); }
+}
+.rob-ai-ring > span {
+  position: absolute; left: 50%; top: 50%; width: 5px; height: 5px; margin: -2.5px 0 0 -2.5px;
+  border-radius: 50%; transition: background-color .4s ease, box-shadow .4s ease, transform .5s cubic-bezier(.2,.9,.3,1.2), opacity .4s ease;
+}
+.rob-ai-ring > span.is-orbiting { background: #6366f1; box-shadow: 0 0 4px rgba(99,102,241,.55); animation: rob-ai-moon 1.5s linear infinite; }
+.rob-ai-ring > span.is-queued { background: #a5b4fc; }
+.rob-ai-ring > span.is-done { background: #16a34a; box-shadow: 0 0 4px rgba(22,163,74,.45); animation: rob-ai-land-green .6s cubic-bezier(.2,.9,.3,1.3) 1 both; }
+.rob-ai-ring > span.is-failed { background: #dc2626; box-shadow: 0 0 4px rgba(220,38,38,.4); animation: rob-ai-land-red .6s cubic-bezier(.2,.9,.3,1.3) 1 both; }
+.rob-ai-ring > span.is-done, .rob-ai-ring > span.is-failed, .rob-ai-ring > span.is-missing { transform: var(--slot); }
+/* a moon lands on its slot: a small pop and a ripple */
+@keyframes rob-ai-land-green {
+  0% { transform: var(--slot) scale(1.9); box-shadow: 0 0 0 0 rgba(22,163,74,.6); }
+  60% { transform: var(--slot) scale(.85); box-shadow: 0 0 0 4px rgba(22,163,74,0); }
+  100% { transform: var(--slot); box-shadow: 0 0 4px rgba(22,163,74,.45); }
+}
+@keyframes rob-ai-land-red {
+  0% { transform: var(--slot) scale(1.9); box-shadow: 0 0 0 0 rgba(220,38,38,.6); }
+  60% { transform: var(--slot) scale(.85); box-shadow: 0 0 0 4px rgba(220,38,38,0); }
+  100% { transform: var(--slot); box-shadow: 0 0 4px rgba(220,38,38,.4); }
+}
+.rob-ai-ring > span.is-missing { background: transparent; box-shadow: inset 0 0 0 1px #cbd5e1; }
+html.dark .rob-ai-ring > span.is-missing { box-shadow: inset 0 0 0 1px #52525b; }
+@keyframes rob-ai-moon {
+  0% { transform: translate(10.00px, -0.00px) scale(1.00); opacity: 0.90; z-index: 2; }
+  12.5% { transform: translate(7.07px, -2.47px) scale(0.73); opacity: 0.58; z-index: 1; }
+  25% { transform: translate(0.00px, -3.50px) scale(0.62); opacity: 0.45; z-index: 1; }
+  37.5% { transform: translate(-7.07px, -2.47px) scale(0.73); opacity: 0.58; z-index: 1; }
+  50% { transform: translate(-10.00px, -0.00px) scale(1.00); opacity: 0.90; z-index: 2; }
+  62.5% { transform: translate(-7.07px, 2.47px) scale(1.28); opacity: 0.97; z-index: 3; }
+  75% { transform: translate(-0.00px, 3.50px) scale(1.40); opacity: 1.00; z-index: 3; }
+  87.5% { transform: translate(7.07px, 2.47px) scale(1.28); opacity: 0.97; z-index: 3; }
+  100% { transform: translate(10.00px, 0.00px) scale(1.00); opacity: 0.90; z-index: 2; }
+}
+@keyframes rob-ai-bob { 0%, 100% { transform: translateY(1px) rotate(-6deg); } 50% { transform: translateY(-1.5px) rotate(6deg); } }
+.rob-ai-shimmer-soft {
+  background: linear-gradient(90deg, #3d3d3a 40%, #c9c7c0 50%, #3d3d3a 60%);
+  background-size: 250% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: rob-ai-shimmer-soft 2.2s linear infinite;
+}
+html.dark .rob-ai-shimmer-soft { background-image: linear-gradient(90deg, #d4d4d8 40%, #52525b 50%, #d4d4d8 60%); }
+@keyframes rob-ai-shimmer-soft { from { background-position: 100% 0; } to { background-position: -150% 0; } }

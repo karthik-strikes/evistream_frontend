@@ -276,8 +276,8 @@ export const ROB2_SIGNALLING: SignallingDomain[] = [
       {
         id: '5.2', domain: 4, higherRiskWhen: 'yes',
         text: 'Is the numerical result being assessed likely to have been selected, on the basis '
-          + 'of the results, from multiple eligible outcome measurements within the outcome '
-          + 'domain?',
+          + 'of the results, from multiple eligible outcome measurements (e.g. scales, '
+          + 'definitions, time points) within the outcome domain?',
       },
       {
         id: '5.3', domain: 4, higherRiskWhen: 'yes',
@@ -549,4 +549,290 @@ export function domainColumnPatterns(domainIndex: number): { judgment: RegExp; s
     judgment: new RegExp(`^(domain|d)[_\\s]?${n}[_\\s]?(risk[_\\s]?of[_\\s]?bias[_\\s]?)?judge?ment`, 'i'),
     support: new RegExp(`^(domain|d)[_\\s]?${n}[_\\s]?(support|justification|reason|rationale)`, 'i'),
   };
+}
+
+// ── Effect of adhering to intervention (Box 7 · Table 8) ─────────────────────
+//
+// Everything above is the effect of ASSIGNMENT — the ITT pathway, and the only
+// one the page used to offer. The review protocol can now pre-specify the effect
+// of ADHERING instead (or both, chosen per result). Only Domain 2 changes: its
+// questions, their routing and its algorithm. D1 and D3–D5 are identical.
+//
+// The adhering questions reuse the ids 2.1–2.6 and therefore the same storage
+// columns. That is safe only because every assessment stamps which effect it
+// was made under (`rob_workflow.effect`), and every reader — this file, the
+// Python mirror, consensus and export — routes on that stamp. Reading adhering
+// answers through the assignment tree would be silently wrong: 2.3 asks a
+// different question on each pathway.
+
+export type EffectOfInterest = 'assignment' | 'adherence';
+
+/**
+ * The deviation types a review can pre-specify for the adhering pathway. Each
+ * enables one "[If applicable]" question: 2.3, 2.4 and 2.5 respectively.
+ */
+export type DeviationType = 'nonprotocol' | 'implementation' | 'nonadherence';
+
+export const ALL_DEVIATION_TYPES: DeviationType[] = ['nonprotocol', 'implementation', 'nonadherence'];
+
+export const DEVIATION_LABEL: Record<DeviationType, string> = {
+  nonprotocol: 'Occurrence of non-protocol interventions',
+  implementation: 'Failures in implementing the intervention that could have affected the outcome',
+  nonadherence: 'Non-adherence to their assigned intervention by trial participants',
+};
+
+export interface PathwayOptions {
+  effect?: EffectOfInterest;
+  /** Adhering only. Defaults to all three. */
+  deviations?: DeviationType[];
+}
+
+export const ROB2_D2_ADHERING: SignallingDomain = {
+  code: 'D2',
+  name: 'Deviations from intended interventions',
+  about: 'Bias due to deviations from intended interventions — effect of adhering.',
+  questions: [
+    {
+      id: '2.1', domain: 1, higherRiskWhen: 'yes',
+      text: 'Were participants aware of their assigned intervention during the trial?',
+    },
+    {
+      id: '2.2', domain: 1, higherRiskWhen: 'yes',
+      text: 'Were carers and people delivering the interventions aware of participants’ '
+        + 'assigned intervention during the trial?',
+    },
+    {
+      id: '2.3', domain: 1, higherRiskWhen: 'no',
+      text: 'Were important non-protocol interventions balanced across intervention groups?',
+      askedWhen: a => notNo(a['2.1']) || notNo(a['2.2']),
+      routingNote: 'Asked only when participants or trial personnel were aware of the assigned '
+        + 'intervention, and the protocol addresses non-protocol interventions.',
+    },
+    {
+      id: '2.4', domain: 1, higherRiskWhen: 'yes',
+      text: 'Were there failures in implementing the intervention that could have affected the '
+        + 'outcome?',
+      routingNote: 'Asked only when the protocol addresses failures in implementing the '
+        + 'intervention.',
+    },
+    {
+      id: '2.5', domain: 1, higherRiskWhen: 'yes',
+      text: 'Was there non-adherence to the assigned intervention regimen that could have '
+        + 'affected participants’ outcomes?',
+      routingNote: 'Asked only when the protocol addresses non-adherence.',
+    },
+    {
+      id: '2.6', domain: 1, higherRiskWhen: 'no',
+      text: 'Was an appropriate analysis used to estimate the effect of adhering to '
+        + 'intervention?',
+      askedWhen: () => true,
+      routingNote: 'Asked only when non-protocol interventions were unbalanced or unreported '
+        + '(2.3), or there were implementation failures or non-adherence (2.4, 2.5).',
+    },
+  ],
+};
+
+/** The five domains as asked under this effect. D2 swaps; the rest never do. */
+export function signallingFor(effect: EffectOfInterest = 'assignment'): SignallingDomain[] {
+  if (effect !== 'adherence') return ROB2_SIGNALLING;
+  return ROB2_SIGNALLING.map((d, i) => (i === 1 ? ROB2_D2_ADHERING : d));
+}
+
+/** Every question asked under this effect, in order. */
+export function questionsFor(effect: EffectOfInterest = 'assignment'): SignallingQuestion[] {
+  return signallingFor(effect).flatMap(d => d.questions);
+}
+
+function deviationsOf(opts?: PathwayOptions): Set<DeviationType> {
+  const list = opts?.deviations && opts.deviations.length ? opts.deviations : ALL_DEVIATION_TYPES;
+  return new Set(list);
+}
+
+/**
+ * Routing under either effect. Assignment is exactly `routeAll`; adhering
+ * replaces D2's routing per Box 7 — 2.3/2.4/2.5 only where the protocol
+ * addresses that deviation type, 2.6 only where a deviation is present.
+ */
+export function routeAllFor(answers: Answers, opts?: PathwayOptions): Record<string, RouteState> {
+  const base = routeAll(answers);
+  if (opts?.effect !== 'adherence') return base;
+
+  const v = (id: string) => answers[id];
+  const devs = deviationsOf(opts);
+  const state: Record<string, RouteState> = { ...base };
+  const unresolved = (id: string) =>
+    state[id] === 'waiting' || (state[id] === 'asked' && !v(id));
+
+  state['2.1'] = 'asked';
+  state['2.2'] = 'asked';
+  state['2.7'] = 'skipped';
+
+  if (!devs.has('nonprotocol')) state['2.3'] = 'skipped';
+  else if (unresolved('2.1') || unresolved('2.2')) state['2.3'] = 'waiting';
+  else state['2.3'] = notNo(v('2.1')) || notNo(v('2.2')) ? 'asked' : 'skipped';
+
+  state['2.4'] = devs.has('implementation') ? 'asked' : 'skipped';
+  state['2.5'] = devs.has('nonadherence') ? 'asked' : 'skipped';
+
+  const parents = ['2.3', '2.4', '2.5'];
+  if (parents.some(unresolved)) state['2.6'] = 'waiting';
+  else state['2.6'] = adheringDeviation(answers, state) ? 'asked' : 'skipped';
+
+  return state;
+}
+
+/** Table 8's left-hand side: is there a deviation the analysis must address? */
+function adheringDeviation(answers: Answers, route: Record<string, RouteState>): boolean {
+  const v = (id: string) => answers[id];
+  return (route['2.3'] === 'asked' && notYes(v('2.3')))
+    || (route['2.4'] === 'asked' && notNo(v('2.4')))
+    || (route['2.5'] === 'asked' && notNo(v('2.5')));
+}
+
+export function unansweredInFor(domainIndex: number, answers: Answers, opts?: PathwayOptions): string[] {
+  const route = routeAllFor(answers, opts);
+  return signallingFor(opts?.effect)[domainIndex].questions
+    .filter(q => route[q.id] === 'asked' && !answers[q.id])
+    .map(q => q.id);
+}
+
+export function canJudgeFor(domainIndex: number, answers: Answers, opts?: PathwayOptions): boolean {
+  const route = routeAllFor(answers, opts);
+  return signallingFor(opts?.effect)[domainIndex].questions.every(
+    q => route[q.id] === 'skipped' || (route[q.id] === 'asked' && !!answers[q.id]));
+}
+
+/** `judgeDomain`, under either effect. Only D2 differs. */
+export function judgeDomainFor(
+  domainIndex: number, answers: Answers, opts?: PathwayOptions,
+): Severity | null {
+  if (opts?.effect !== 'adherence' || domainIndex !== 1) return judgeDomain(domainIndex, answers);
+  if (!canJudgeFor(1, answers, opts)) return null;
+  // ── D2 · adhering · Table 8 ──────────────────────────────────────────────
+  //   no deviation (2.3 Y/PY or NA, 2.4 & 2.5 N/PN or NA)   → Low
+  //   deviation · 2.6 Y/PY                                  → Some concerns
+  //   deviation · 2.6 N/PN/NI                               → High
+  const route = routeAllFor(answers, opts);
+  if (!adheringDeviation(answers, route)) return 'low';
+  return isYes(answers['2.6']) ? 'some' : 'high';
+}
+
+export interface DomainSuggestion {
+  severity: Severity | null;
+  /** One sentence naming the questions that decided it. */
+  reason: string;
+}
+
+/**
+ * The suggested judgement plus WHY, in the tool's terms.
+ *
+ * The severity always comes from `judgeDomainFor`; the sentence only describes
+ * which row of the table fired. It never decides anything, so a wording slip
+ * here cannot change a judgement.
+ */
+export function suggestDomain(
+  domainIndex: number, answers: Answers, opts?: PathwayOptions,
+): DomainSuggestion {
+  const missing = unansweredInFor(domainIndex, answers, opts);
+  const severity = judgeDomainFor(domainIndex, answers, opts);
+  if (severity === null) {
+    return {
+      severity,
+      reason: missing.length
+        ? `${missing.length} question${missing.length === 1 ? '' : 's'} unanswered (${missing.join(', ')})`
+        : 'Waiting on earlier answers',
+    };
+  }
+  const a = (id: string) => answers[id];
+  const route = routeAllFor(answers, opts);
+  let reason = '';
+  switch (domainIndex) {
+    case 0:
+      if (isNo(a('1.2'))) reason = 'Allocation sequence not concealed (1.2)';
+      else if (a('1.2') === 'NI') {
+        reason = isYes(a('1.3'))
+          ? 'Concealment not reported and baseline differences suggest a problem (1.2, 1.3)'
+          : 'Allocation concealment not reported (1.2)';
+      } else if (isYes(a('1.3'))) {
+        reason = 'Baseline differences suggest a problem despite concealment (1.3)';
+      } else if (isNo(a('1.1'))) reason = 'Sequence not random, though allocation was concealed (1.1)';
+      else reason = 'Allocation concealed, no baseline differences suggesting a problem';
+      break;
+    case 1:
+      if (opts?.effect === 'adherence') {
+        if (severity === 'low') {
+          reason = notNo(a('2.1')) || notNo(a('2.2'))
+            ? 'Aware of assignment, but no unbalanced non-protocol interventions, implementation failures or non-adherence'
+            : 'Participants and personnel unaware; no implementation failures or non-adherence';
+        } else {
+          const why = route['2.3'] === 'asked' && notYes(a('2.3'))
+            ? 'non-protocol interventions unbalanced or unreported (2.3)'
+            : route['2.4'] === 'asked' && notNo(a('2.4'))
+              ? 'implementation failures (2.4)' : 'non-adherence (2.5)';
+          reason = severity === 'some'
+            ? `Deviation present (${why}) but analysis appropriate (2.6)`
+            : `Deviation present (${why}) and analysis not appropriate (2.6)`;
+        }
+      } else {
+        let part1 = 'participants and personnel unaware';
+        let part1Sev: Severity = 'low';
+        if (route['2.3'] === 'asked') {
+          if (isNo(a('2.3'))) part1 = 'no deviations arising from the trial context (2.3)';
+          else if (a('2.3') === 'NI') { part1 = 'deviations not reported (2.3)'; part1Sev = 'some'; }
+          else if (isNo(a('2.4'))) { part1 = 'deviations unlikely to affect the outcome (2.4)'; part1Sev = 'some'; }
+          else if (isYes(a('2.5'))) { part1 = 'deviations balanced between groups (2.5)'; part1Sev = 'some'; }
+          else { part1 = 'deviations affected the outcome and were not balanced (2.4, 2.5)'; part1Sev = 'high'; }
+        }
+        const part2Sev: Severity = isYes(a('2.6')) ? 'low' : isNo(a('2.7')) ? 'some' : 'high';
+        const part2 = part2Sev === 'low' ? 'appropriate analysis (2.6)'
+          : part2Sev === 'some' ? 'analysis not appropriate, little potential impact (2.7)'
+            : 'analysis not appropriate, substantial potential impact (2.7)';
+        if (severity === 'low') reason = `Both parts low: ${part1}; ${part2}`;
+        else reason = `Part ${WORST[part1Sev] >= WORST[part2Sev] ? `1: ${part1}` : `2: ${part2}`}`;
+      }
+      break;
+    case 2:
+      if (isYes(a('3.1'))) reason = 'Data available for all or nearly all participants (3.1)';
+      else if (isYes(a('3.2'))) reason = 'Evidence the result was not biased by missing data (3.2)';
+      else if (isNo(a('3.3'))) reason = 'Missingness could not depend on the true value (3.3)';
+      else reason = severity === 'some'
+        ? 'Missingness could, but is unlikely to, depend on the true value (3.4)'
+        : 'Missingness likely depended on the true value (3.4)';
+      break;
+    case 3:
+      if (isYes(a('4.1'))) reason = 'Inappropriate measurement method (4.1)';
+      else if (isYes(a('4.2'))) reason = 'Measurement could have differed between groups (4.2)';
+      else if (isNo(a('4.3')) || isNo(a('4.4'))) {
+        const what = isNo(a('4.3')) ? 'Outcome assessors unaware of the intervention (4.3)'
+          : 'Assessment could not have been influenced by knowledge of the intervention (4.4)';
+        reason = a('4.2') === 'NI' ? `${what}, but differences in ascertainment not reported (4.2)` : what;
+      } else reason = severity === 'some'
+        ? 'Assessment could have been, but unlikely was, influenced (4.5)'
+        : 'Assessment likely influenced by knowledge of the intervention (4.5)';
+      break;
+    case 4:
+      if (severity === 'high') {
+        reason = `Result likely selected from multiple ${isYes(a('5.2')) ? 'outcome measurements (5.2)' : 'analyses (5.3)'}`;
+      } else if (severity === 'low') reason = 'Pre-specified plan followed; no selection of the reported result';
+      else if (a('5.2') === 'NI' || a('5.3') === 'NI') reason = 'Insufficient information on multiple measurements or analyses (5.2, 5.3)';
+      else reason = 'Not analysed to a pre-specified plan, or no plan available (5.1)';
+      break;
+  }
+  return { severity, reason };
+}
+
+/** Table 1's reason for the overall suggestion. */
+export function suggestOverall(domains: (Severity | null)[]): DomainSuggestion & { considerHigh: boolean } {
+  const out = judgeOverall(domains);
+  if (out.severity === null) {
+    const n = domains.filter(d => d === null).length;
+    return { ...out, reason: `${n} domain${n === 1 ? '' : 's'} not judged yet` };
+  }
+  const reason = out.severity === 'high'
+    ? `High risk of bias in ${domains.map((d, i) => (d === 'high' ? `D${i + 1}` : '')).filter(Boolean).join(', ')}`
+    : out.severity === 'low' ? 'Low risk of bias in all five domains'
+      : out.considerHigh
+        ? 'Some concerns in several domains. RoB 2 allows High if they substantially lower confidence in the result'
+        : `Some concerns in ${domains.map((d, i) => (d === 'some' ? `D${i + 1}` : '')).filter(Boolean).join(', ')}`;
+  return { ...out, reason };
 }

@@ -1,69 +1,127 @@
 import { apiClient } from '@/lib/api';
 
-/**
- * What the extraction already knows about the result being assessed.
- *
- * Sent with the draft request so the model is answering about *this* result:
- * "were data available for nearly all participants" has a different answer for
- * pain at 6 hours than at 48 hours, and the numbers that settle it are already
- * in the outcome tables.
- */
-export interface RobResultContext {
-  outcome?: string;
-  timepoint?: string;
-  comparison?: string;
-  measurement?: string;
-  n_randomized?: string;
-  n_analyzed?: string;
-  effect?: string;
-  design?: string;
-  notes?: Record<string, string>;
+// ── AI suggestions (RoB 2 signalling questions) ─────────────────────────────
+//
+// Contract: the AI answers signalling QUESTIONS with verified quotes; it never
+// returns a judgement. Visibility is enforced server-side by
+// `GET /rob/ai/drafts` — a question in `hidden` is simply not in `answers`.
+
+export type RobAiVisibility = 'off' | 'cr_only' | 'readers_and_cr';
+export type RobAiTrigger = 'opened' | 'consensus_ready' | 'manual';
+export type RobAiDomainStatus = 'missing' | 'queued' | 'running' | 'done' | 'failed';
+export type RobAiAnswerText = 'Yes' | 'Probably yes' | 'Probably no' | 'No' | 'No information';
+export type RobAiStrength = 'Strong' | 'Partial' | 'Insufficient';
+
+/** The extraction-cell shape, so `boxesFromLocation` and the evidence drawer read it unchanged. */
+export interface RobAiSourceLocation {
+  page?: number | null;
+  start_char?: number | null;
+  end_char?: number | null;
+  matched_text?: string | null;
+  confidence?: number | null;
+  section?: string | null;
+  grounding_method?: string | null;
+  bboxes?: Array<{ page: number; bbox: [number, number, number, number] }>;
+  page_width?: number;
+  page_height?: number;
+  [key: string]: unknown;
 }
 
-export interface RobDraftRequest {
+export interface RobAiQuote {
+  text: string;
+  page: number | null;
+  source_location: RobAiSourceLocation | null;
+}
+
+export interface RobAiAnswer {
+  question_id: string;
+  domain: number;
+  answer: RobAiAnswerText;
+  quotes: RobAiQuote[];
+  evidence_type: 'explicit' | 'inferred' | 'absent';
+  /** Derived server-side from the verified quotes — never model-reported. */
+  strength: RobAiStrength;
+  rationale: string;
+  /** Filled for No information: what the model looked for. */
+  looked_for: string;
+  conflicting: boolean;
+  /** Outcome scope only: measurements / timepoints whose answer differs. */
+  varies_across: Array<{ label: string; answer: string }>;
+  needs_human_review: boolean;
+  stripped_quotes: number;
+  draft_id: string;
+}
+
+export interface RobAiDomainState {
+  domain: number;
+  status: RobAiDomainStatus;
+  draft_id: string | null;
+  model: string | null;
+  created_at: string | null;
+  error: string | null;
+}
+
+export interface RobAiEstimate {
+  calls: number;
+  paper_tokens: number;
+}
+
+export interface RobAiRunRequest {
+  project_id: string;
   document_id: string;
-  form_id: string;
-  target_key?: string;
-  /**
-   * The result this draft is about.
-   *
-   * Its version is part of the server's cache key, so correcting a result's
-   * identity retires the drafts made against the old one instead of leaving
-   * them in place under a key that still looks right.
-   */
-  result_id?: string;
-  result_version?: number;
-  context?: RobResultContext;
-  /** 0-based domain indices. Defaults to all five. */
+  target_id: string;
+  /** 0-based; defaults to all five. */
   domains?: number[];
-  /** Re-run rather than serving the cached draft. */
+  trigger: RobAiTrigger;
   force?: boolean;
 }
 
-export interface RobDraftedAnswer {
-  question_id: string;
-  answer: string;
-  quote: string;
-  locator: string;
-  rationale: string;
-  domain: number;
+export interface RobAiRunResponse {
+  skipped?: string;
+  job_id?: string;
+  domains: Array<{ domain: number; scope_key: string; status: 'queued' | 'running' | 'done' | 'failed' }>;
+  estimate: RobAiEstimate;
 }
 
-export interface RobDraftResponse {
-  answers: RobDraftedAnswer[];
+export interface RobAiDraftsResponse {
+  visibility: RobAiVisibility;
+  seat: RobSeat | 'manager' | null;
+  context_mode: 'full' | 'retrieved' | null;
+  domains: RobAiDomainState[];
+  answers: RobAiAnswer[];
   /**
-   * Questions the model was asked but could not answer from the retrieved text.
-   *
-   * **Not "No information".** That is a claim about the paper — that the trial
-   * report is silent — and only a reviewer who can see which sources were
-   * searched is in a position to make it. This is a fact about the retrieval,
-   * and the screen says so.
+   * Retrieved mode only: questions the model could not answer from the
+   * passages it was given. **Not "No information"** — that is a claim about
+   * the paper; this is a fact about retrieval, and the screen says so.
    */
   not_found: string[];
-  drafted: number[];
-  cached: number[];
-  failed: number[];
-  note: string;
+  /** Question ids withheld from this caller. */
+  hidden: string[];
+  hidden_reason: 'cr_only' | 'answer_first' | null;
+  estimate: RobAiEstimate;
+}
+
+export interface RobAiExportRow {
+  study_label: string;
+  document_id: string;
+  target_id: string;
+  scope: string;
+  seat: string | null;
+  person: string | null;
+  domain: number;
+  question_id: string;
+  ai_answer: string | null;
+  strength: string | null;
+  human_answer: string | null;
+  final_answer: string | null;
+  action: string | null;
+  reason: string | null;
+  judgement_ai: string | null;
+  judgement_final: string | null;
+  model: string | null;
+  prompt_version: string | null;
+  draft_id: string | null;
+  at: string | null;
 }
 
 // ── The result registry ──────────────────────────────────────────────────────
@@ -211,16 +269,206 @@ export interface RobBuildResponse {
   note?: string;
 }
 
-export const robService = {
+
+// ── Review protocol (rob_protocols) ─────────────────────────────────────────
+//
+// Decisions made once for the whole review: scope, effect of interest, the
+// reviewers, each study's design. Every assessment is judged against them and
+// changes after the first assessment are logged as protocol deviations.
+
+export type RobScope = 'result' | 'outcome';
+export type RobProtocolEffect = 'assignment' | 'adherence' | 'both';
+export type RobDeviationType = 'nonprotocol' | 'implementation' | 'nonadherence';
+export type RobStudyDesign = 'parallel' | 'cluster' | 'crossover' | 'nrsi';
+export type RobSeat = 'reviewer_1' | 'reviewer_2' | 'adjudicator';
+
+export interface RobStudyDesignEntry {
+  design: RobStudyDesign;
+  confirmed: boolean;
+  confirmed_by?: string | null;
+  confirmed_at?: string | null;
+}
+
+export interface RobProtocolHistoryEntry {
+  at: string;
+  by?: string | null;
+  by_name?: string | null;
+  what: string;
+  why: string;
+}
+
+export interface RobProtocol {
+  project_id: string;
+  /** The RoB 2 storage form. Null until the first save creates it. */
+  form_id: string | null;
+  scope: RobScope | null;
+  effect: RobProtocolEffect | null;
+  deviation_types: RobDeviationType[];
+  reviewers: Record<RobSeat, string | null>;
+  study_designs: Record<string, RobStudyDesignEntry>;
+  tool_version: string;
   /**
-   * Ask the model to answer RoB 2's signalling questions for one result.
-   *
-   * Returns answers with evidence, never a risk-of-bias judgement — the label
-   * is derived in the browser by `rob2.ts:judgeDomain` from the answers the
-   * reviewer confirms.
+   * Free text: deviations from the intended interventions the review team
+   * expects in these trials. Shown to reviewers in the Domain 2 framing box.
    */
-  async draft(request: RobDraftRequest): Promise<RobDraftResponse> {
-    return apiClient.post<RobDraftResponse>('/api/v1/rob/draft', request);
+  anticipated_deviations: string;
+  /** {document_id: {form_id: source}} — absent means "auto" (consensus → R1 → R2 → AI). */
+  row_sources?: Record<string, Record<string, string>>;
+  /** Who may see AI suggestions (default `cr_only`). Absent on servers without the feature. */
+  ai_visibility?: RobAiVisibility;
+  /** When "Set up review protocol" was first completed. */
+  confirmed_at: string | null;
+  history: RobProtocolHistoryEntry[];
+  updated_at?: string | null;
+  /** Server-computed: assessments stored against this protocol (all people). */
+  assessment_count: number;
+}
+
+export interface RobProtocolPatch {
+  form_id?: string | null;
+  scope?: RobScope;
+  effect?: RobProtocolEffect;
+  deviation_types?: RobDeviationType[];
+  reviewers?: Partial<Record<RobSeat, string | null>>;
+  study_designs?: Record<string, RobStudyDesign>;
+  anticipated_deviations?: string;
+  /** Where one study's RoB rows come from (Comparisons page "Use:"). Managers only. */
+  row_source?: { document_id: string; form_id: string; source: string };
+  /** Managers only. */
+  ai_visibility?: RobAiVisibility;
+  confirm?: boolean;
+  /** Required when assessments exist and scope / effect / deviation types change. */
+  reason?: string;
+}
+
+export interface RobProtocolImpact {
+  /** Entries whose Domain 2 and Overall would be reset. */
+  assessments: number;
+  studies: number;
+}
+
+/** One person's progress on one target — no answers, safe under blinding. */
+export interface RobAssessmentStatus {
+  document_id: string;
+  extracted_by: string;
+  extraction_type: 'manual' | 'consensus';
+  seat: RobSeat | null;
+  target_id: string;
+  status: 'progress' | 'complete';
+  domains_judged: number;
+  updated_at: string | null;
+}
+
+export interface RobAssessmentRecord {
+  id: string;
+  document_id: string;
+  form_id: string;
+  extracted_by: string | null;
+  extracted_by_name?: string | null;
+  extraction_type: 'manual' | 'consensus';
+  seat: RobSeat | null;
+  extracted_data: Record<string, any>;
+  created_at: string;
+  updated_at: string | null;
+}
+
+export interface RobAssessmentsResponse {
+  form_id: string | null;
+  /**
+   * Records the caller may read. A counterpart reader's record arrives with
+   * only the entries BOTH readers have completed; the rest are stripped.
+   */
+  records: RobAssessmentRecord[];
+  /** Everyone's per-target status, values never included. */
+  statuses: RobAssessmentStatus[];
+  /** The caller's seat under the protocol, if any. */
+  my_seat: RobSeat | null;
+}
+
+/** One extraction a study's rows can come from (backend utils/rob_row_source). */
+export interface RobRowSourceOption {
+  key: string;            // consensus | reviewer_1 | reviewer_2 | ai | person:<id>
+  label: string;          // "Consensus", "R1 · Reham Elkayal", "AI extraction · not reviewed"
+  author: string | null;
+  author_name: string;
+  at: string;
+  row_count: number;
+}
+
+export interface RobStudyRowsForm {
+  form_id: string;
+  form_name: string;
+  table: string;
+  columns: string[];
+  mapping: Record<string, string>;
+  choice: string;         // "auto" or a saved source key
+  chosen: string | null;  // the source actually used
+  fell_back: boolean;     // the saved choice is gone; Auto is used instead
+  available: RobRowSourceOption[];
+  rows: Record<string, any>[];
+}
+
+export const robService = {
+
+  /** The project's review protocol, with defaults when none is stored yet. */
+  async getProtocol(projectId: string): Promise<RobProtocol> {
+    return apiClient.get<RobProtocol>(`/api/v1/rob/protocol?project_id=${encodeURIComponent(projectId)}`);
+  },
+
+  /**
+   * Change the protocol. Project admins only, except `study_designs` for a study
+   * whose design is not yet confirmed, which any reviewer may set at its first
+   * assessment. Changing scope, effect or deviation types once assessments
+   * exist needs `reason`; an effect change resets the affected Domain 2 and
+   * Overall judgements server-side and appends to `history`.
+   */
+  async updateProtocol(projectId: string, patch: RobProtocolPatch): Promise<RobProtocol> {
+    return apiClient.put<RobProtocol>('/api/v1/rob/protocol', { project_id: projectId, ...patch });
+  },
+
+  /** What an effect / deviation-type change would reset, before committing to it. */
+  async protocolImpact(projectId: string, patch: Pick<RobProtocolPatch, 'effect' | 'deviation_types'>): Promise<RobProtocolImpact> {
+    return apiClient.post<RobProtocolImpact>('/api/v1/rob/protocol/impact', { project_id: projectId, ...patch });
+  },
+
+  /**
+   * Turn a study's defined comparisons into results: every row held for want
+   * of a comparison becomes one result per comparison (Comparisons screen).
+   */
+  async resultsFromComparisons(documentId: string): Promise<{ created: number; retired: number }> {
+    return apiClient.post(`/api/v1/rob/studies/${documentId}/results-from-comparisons`, {});
+  },
+
+  /**
+   * A study's extracted rows per mapped source form, from the same source the
+   * results are built from. Managers only.
+   */
+  async studyRows(documentId: string): Promise<{ document_id: string; forms: RobStudyRowsForm[] }> {
+    return apiClient.get(`/api/v1/rob/studies/${documentId}/rows`);
+  },
+
+  /** Every RoB 2 assessment record in the project, blinded per assessment. */
+  async listAssessments(projectId: string): Promise<RobAssessmentsResponse> {
+    return apiClient.get<RobAssessmentsResponse>(`/api/v1/rob/assessments?project_id=${encodeURIComponent(projectId)}`);
+  },
+  /**
+   * Start (or join) an AI run for one assessment target. Idempotent server-side:
+   * an existing draft is reused unless `force`. `opened` / `consensus_ready`
+   * may come back `{skipped}` — that is a normal answer, not an error.
+   */
+  async aiRun(request: RobAiRunRequest): Promise<RobAiRunResponse> {
+    return apiClient.post<RobAiRunResponse>('/api/v1/rob/ai/run', request);
+  },
+
+  /** The validated drafts for one target, filtered by the visibility rule server-side. */
+  async aiDrafts(projectId: string, documentId: string, targetId: string): Promise<RobAiDraftsResponse> {
+    const params = new URLSearchParams({ project_id: projectId, document_id: documentId, target_id: targetId });
+    return apiClient.get<RobAiDraftsResponse>(`/api/v1/rob/ai/drafts?${params.toString()}`);
+  },
+
+  /** Research export: one row per assessment entry × question (managers). */
+  async aiExport(projectId: string): Promise<{ rows: RobAiExportRow[] }> {
+    return apiClient.get(`/api/v1/rob/ai/export?project_id=${encodeURIComponent(projectId)}`);
   },
 
   /**
@@ -273,8 +521,13 @@ export const robService = {
    * comparison that gained a result a moment ago is refused with **409**
    * rather than removed on the strength of a count taken beforehand.
    */
-  async deleteContrast(contrastId: string): Promise<void> {
-    await apiClient.delete(`/api/v1/rob/contrasts/${contrastId}`);
+  /**
+   * Remove a comparison. With `releaseResults`, its results first go back to
+   * waiting for a comparison (refused if any of them is already assessed).
+   */
+  async deleteContrast(contrastId: string, opts?: { releaseResults?: boolean }): Promise<void> {
+    const qs = opts?.releaseResults ? '?release_results=true' : '';
+    await apiClient.delete(`/api/v1/rob/contrasts/${contrastId}${qs}`);
   },
 
   /** Every assessable result, with its contrast resolved. */

@@ -25,7 +25,9 @@ export type CellOrigin =
   /** Typed a value with no baseline at all. */
   | 'human_authored'
   /** Looked at the baseline and kept it. */
-  | 'human_confirmed';
+  | 'human_confirmed'
+  /** Accepted a verified RoB 2 AI suggestion (backend checks the draft and quote). */
+  | 'ai_suggestion';
 
 /** How well the quote under the value still supports it. */
 export type EvidenceState =
@@ -44,6 +46,7 @@ export const HUMAN_ORIGINS: ReadonlySet<CellOrigin> = new Set<CellOrigin>([
   'human_edited',
   'human_authored',
   'human_confirmed',
+  'ai_suggestion',
 ]);
 
 export interface CellProvenance {
@@ -94,6 +97,7 @@ export const ORIGIN_LABEL: Record<CellOrigin, string> = {
   human_edited: 'Changed by a reviewer',
   human_authored: 'Entered by a reviewer',
   human_confirmed: 'Confirmed by a reviewer',
+  ai_suggestion: 'Accepted from an AI suggestion',
 };
 
 export const EVIDENCE_LABEL: Record<EvidenceState, string> = {
