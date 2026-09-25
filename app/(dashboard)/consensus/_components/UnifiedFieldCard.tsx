@@ -44,6 +44,23 @@ import { FieldRenderer } from '../../manual-extraction/_components/FieldRenderer
 import { TableField } from '../../manual-extraction/_components/TableField';
 import { isTableField } from '../../manual-extraction/_lib/fieldKinds';
 import { unambiguousAbsenceLabel } from '../../manual-extraction/_lib/absenceInput';
+import { keyColumnsOfField } from '../../manual-extraction/_lib/sourcing';
+import {
+  alignTableRows,
+  applyManualPairs,
+  automaticChoice,
+  buildConsensusRows,
+  canPair,
+  differingColumns,
+  manualId,
+  refKey,
+  SOURCE_ORDER,
+  type AlignedRecord,
+  type Alignment,
+  type ColumnSpec,
+  type RecordChoice,
+  type RowRef,
+} from '../_lib/alignRows';
 import {
   isUnfilled,
   pickedSourceKeys,
@@ -726,14 +743,17 @@ export function UnifiedFieldCard({
 
       {isTable ? (
         <TableSourceGrid
+          key={tableSnapshotKey(sources)}
           sources={sources}
           field={field!}
           picked={picked}
+          decision={decision}
           sourceMeta={sourceMeta}
           onPick={key => onDecision(`accept_${key}` as Decision)}
           onSeed={seedFrom}
           onJump={onJumpToEvidence ? jump : undefined}
           onJumpCell={onJumpToEvidence ? jumpCell : undefined}
+          onUseRows={rows => { onCustomValue(rows); onDecision('custom'); }}
         />
       ) : (
         <div
@@ -774,6 +794,22 @@ export function UnifiedFieldCard({
 }
 
 // ── Table helpers ─────────────────────────────────────────────────────────────
+
+/**
+ * Identity of the loaded sources, for resetting a table grid's pairings and
+ * row choices. The page keys cards by position, so without this a pairing made
+ * on one paper would carry onto the same field of the next.
+ */
+function tableSnapshotKey(sources: UnifiedFieldCardProps['sources']): string {
+  try {
+    const s = JSON.stringify([sources.ai ?? null, sources.r1 ?? null, sources.r2 ?? null]);
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    return `${s.length}:${h}`;
+  } catch {
+    return 'table';
+  }
+}
 
 function cellValue(raw: any): string {
   if (raw == null) return '';
@@ -820,15 +856,15 @@ function cellMeta(raw: any): EvidenceMeta | undefined {
  * Which cells of row `i` differ from the other sources' row `i`, and whether the
  * row differs at all.
  *
- * One implementation for both row renderers. `TableRowsCompact` had its own copy
+ * One implementation for the row renderers. A removed `TableRowsCompact` had its own copy
  * containing `cellValue(...) !== other?.[col] !== undefined && …`, which parses
  * as `(a !== b) !== undefined` — a boolean is never `undefined`, so that clause
  * was unconditionally true and the `&&` silently degraded to the third clause. It
  * happened to produce a plausible answer, which is why it survived.
  *
- * Row pairing is by array index, unchanged. Pairing on the composite key instead
- * would change which cells are flagged, and that is a data-semantics decision
- * needing its own verification — not a side effect of a restyle.
+ * Pairs by array index, so it is only used where there is one source to show
+ * (`compareTo` empty). Disputed tables are aligned by composite key instead —
+ * see `TableSourceGrid` and `_lib/alignRows.ts`.
  */
 function computeRowDiff(row: any, rowIdx: number, cols: FormField[], compareTo: any[][]) {
   const others = compareTo.map(o => o[rowIdx]).filter(o => o !== undefined);
@@ -981,76 +1017,48 @@ function TableRowCard({ row, rowIdx, cols, differs, differingCells, onJumpCell }
   );
 }
 
-function TableRowsCompact({ rows, cols, compareTo, expandedRowIdx, onToggle }: {
-  rows: any[];
-  cols: FormField[];
-  compareTo: any[][];
-  expandedRowIdx: number | null;
-  onToggle: (rowIdx: number) => void;
-}) {
-  const [showAll, setShowAll] = useState(false);
-  if (!rows || rows.length === 0) {
-    return <div className="px-1 text-[11px] italic text-gray-400 dark:text-zinc-600">empty</div>;
-  }
-  const visible = showAll ? rows : rows.slice(0, 3);
-  const hidden = rows.length - visible.length;
-  return (
-    <div className="space-y-0.5">
-      {visible.map((row, i) => {
-        const { differs } = computeRowDiff(row, i, cols, compareTo);
-        const isExpanded = expandedRowIdx === i;
-        const summary = cols
-          .map(c => cellValue(row?.[c.field_name]))
-          .filter(s => s.trim())
-          .slice(0, 2)
-          .join(' · ') || `Row ${i + 1}`;
-        return (
-          <div
-            key={i}
-            role="button"
-            tabIndex={0}
-            onClick={e => { e.stopPropagation(); onToggle(i); }}
-            onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onToggle(i); } }}
-            className={cn(
-              'flex select-none items-center gap-1.5 rounded px-1.5 py-0.5 text-xs transition-colors',
-              isExpanded
-                ? 'bg-white/80 ring-1 ring-gray-200 dark:bg-black/30 dark:ring-[#2a2a2a]'
-                : differs
-                  ? cn(STATE_COLORS.active.text, 'hover:bg-amber-50/80 dark:hover:bg-amber-900/20')
-                  : 'text-gray-600 hover:bg-white/60 dark:text-zinc-400 dark:hover:bg-black/20',
-            )}
-          >
-            <span className="flex-shrink-0 font-mono text-[10px] tabular-nums text-gray-400 dark:text-zinc-500">#{i + 1}</span>
-            <span className="flex-1 truncate">{summary}</span>
-            {differs && !isExpanded && <span className="flex-shrink-0 text-[10px] text-amber-600 dark:text-amber-300">⚠</span>}
-            {isExpanded
-              ? <ChevronDown className="h-2.5 w-2.5 flex-shrink-0 text-gray-400" />
-              : <ChevronRight className="h-2.5 w-2.5 flex-shrink-0 text-gray-400 opacity-40" />}
-          </div>
-        );
-      })}
-      {hidden > 0 && <MoreRows hidden={hidden} onShow={() => setShowAll(true)} />}
-    </div>
-  );
-}
+// ── Table conflicts: record by record ─────────────────────────────────────────
 
-function TableSourceGrid({ sources, field, picked, sourceMeta, onPick, onSeed, onJump, onJumpCell }: {
+/**
+ * A disputed table, as one card per study record.
+ *
+ * This used to be three boxes of rows paired by array index, so R2 entering
+ * Placebo first compared R2's Placebo against the AI's Naproxen and lit every
+ * cell. Rows are now joined by `_lib/alignRows.ts` — a complete composite key,
+ * unique per source — and each record shows its AI / R1 / R2 versions side by
+ * side, whatever position each source put it in. Anything that key cannot
+ * settle (a duplicate key, a gap in the key, a key spelled differently) stands
+ * alone and says so, and the reviewer pairs it by hand.
+ *
+ * The reviewer then picks one source's row per record, or leaves the record
+ * out; the result is saved through the existing `custom` decision as the
+ * sources' own row objects, so every cell keeps its quote. Picking a whole
+ * table stays one click on its box.
+ */
+function TableSourceGrid({ sources, field, picked, decision, sourceMeta, onPick, onSeed, onJump, onJumpCell, onUseRows }: {
   sources: UnifiedFieldCardProps['sources'];
+  /** The field's current decision: a whole-table pick folds the record list away. */
+  decision: string | null;
   field: FormField;
   picked: Set<SourceKey>;
   sourceMeta?: UnifiedFieldCardProps['sourceMeta'];
   onPick: (key: SourceKey) => void;
   onSeed: (key: SourceKey) => void;
   onJump?: (key: SourceKey) => void;
-  /** Per-cell evidence, for the expanded row below the grid. */
   onJumpCell?: (key: SourceKey, rowIdx: number, col: FormField, raw: any) => void;
+  /** Save the table built from per-record choices. */
+  onUseRows: (rows: any[]) => void;
 }) {
   const cols = field.subform_fields ?? [];
-  const [expanded, setExpanded] = useState<{ src: SourceKey; rowIdx: number } | null>(null);
+  const specs: ColumnSpec[] = cols.map(c => ({ field_name: c.field_name, options: c.options ?? null }));
+  const keyNames = keyColumnsOfField(field);
+  const keyCols = keyNames
+    .map(k => specs.find(s => s.field_name === k))
+    .filter((s): s is ColumnSpec => !!s);
 
   // A source that reported the whole table absent sends the scalar "NR"/"NA",
-  // not an array. Coercing that to [] rendered it as "empty" — indistinguishable
-  // from an extraction that failed, which is the opposite claim.
+  // not an array. It is shown as that, once, and kept out of the records — so
+  // it never reads as "R2 missed every row".
   const entries = (['ai', 'r1', 'r2'] as SourceKey[])
     .filter(k => sources[k] != null)
     .map(k => ({
@@ -1058,30 +1066,47 @@ function TableSourceGrid({ sources, field, picked, sourceMeta, onPick, onSeed, o
       rows: Array.isArray(sources[k]) ? (sources[k] as any[]) : [],
       absence: unambiguousAbsenceLabel(sources[k]),
     }));
+  const rowsBySource: Partial<Record<SourceKey, any[]>> = {};
+  for (const e of entries) if (!e.absence && Array.isArray(sources[e.key])) rowsBySource[e.key] = e.rows;
+  const present = SOURCE_ORDER.filter(s => rowsBySource[s]);
 
-  const toggleRow = (src: SourceKey, rowIdx: number) =>
-    setExpanded(prev => (prev?.src === src && prev.rowIdx === rowIdx ? null : { src, rowIdx }));
+  const [groups, setGroups] = useState<string[][]>([]);
+  const [choices, setChoices] = useState<Record<string, RecordChoice>>({});
+  const [openId, setOpenId] = useState<string | null>(null);
+  const [pairingId, setPairingId] = useState<string | null>(null);
+  const [combine, setCombine] = useState(false);
 
-  const expandedEntry = expanded ? entries.find(e => e.key === expanded.src) : null;
-  const expandedRow = expandedEntry ? expandedEntry.rows[expanded!.rowIdx] : null;
+  // A whole table was picked (a box, or the majority bar). That settles the
+  // field, so twenty "needs decision" rows underneath would contradict the
+  // "resolved" pill above them. The records fold away until asked for.
+  const wholeTable: SourceKey | null =
+    decision && decision.startsWith('accept_') && picked.size > 0 ? [...picked][0] : null;
+  const showRecords = !wholeTable || combine;
 
-  const differingCells = new Set<string>();
-  if (expanded && expandedRow) {
-    const otherRows = entries.filter(e => e.key !== expanded.src).map(e => e.rows[expanded.rowIdx]);
-    for (const col of cols) {
-      const mine = cellValue(expandedRow?.[col.field_name]).trim().toLowerCase();
-      if (otherRows.some(o => o === undefined || cellValue(o?.[col.field_name]).trim().toLowerCase() !== mine)) {
-        differingCells.add(col.field_name);
-      }
-    }
-  }
+  const records = applyManualPairs(alignTableRows(rowsBySource, keyCols), groups);
+  const choiceOf = (rec: AlignedRecord) => choices[rec.id] ?? automaticChoice(rec, specs, present);
+  const built = buildConsensusRows(records, choiceOf);
+  const decided = records.filter(r => choiceOf(r) !== null).length;
+
+  const refsOf = (rec: AlignedRecord) => SOURCE_ORDER.map(s => rec.members[s]).filter((r): r is RowRef => !!r);
+  const choose = (rec: AlignedRecord, c: RecordChoice) => setChoices(prev => ({ ...prev, [rec.id]: c }));
+  const pair = (a: AlignedRecord, b: AlignedRecord) => {
+    const merged = new Set([...refsOf(a), ...refsOf(b)].map(refKey));
+    // Any group either side was already in is absorbed, so a row stays in one.
+    setGroups(prev => [...prev.filter(g => !g.some(k => merged.has(k))), [...merged]]);
+    setPairingId(null);
+    setOpenId(manualId([...refsOf(a), ...refsOf(b)]));
+  };
+  const unpair = (rec: AlignedRecord) => {
+    const mine = new Set(refsOf(rec).map(refKey));
+    setGroups(prev => prev.filter(g => !g.some(k => mine.has(k))));
+    setChoices(prev => { const next = { ...prev }; delete next[rec.id]; return next; });
+  };
 
   return (
-    <div className="mt-2.5 space-y-2">
-      <div
-        className="grid gap-2"
-        style={{ gridTemplateColumns: `repeat(${entries.length}, minmax(0, 1fr))` }}
-      >
+    <div className="mt-2.5 space-y-2" onClick={e => e.stopPropagation()}>
+      {/* Whole-table shortcut: still one click on a source's box. */}
+      <div className="grid gap-2" style={{ gridTemplateColumns: `repeat(${entries.length}, minmax(0, 1fr))` }}>
         {entries.map(e => (
           <SourceBox
             key={e.key}
@@ -1099,51 +1124,305 @@ function TableSourceGrid({ sources, field, picked, sourceMeta, onPick, onSeed, o
                 {e.absence === NR_LABEL ? 'table not reported' : 'table not applicable'}
               </span>
             ) : (
-              <TableRowsCompact
-                rows={e.rows}
-                cols={cols}
-                compareTo={entries.filter(o => o.key !== e.key).map(o => o.rows)}
-                expandedRowIdx={expanded?.src === e.key ? expanded.rowIdx : null}
-                onToggle={rowIdx => toggleRow(e.key, rowIdx)}
-              />
+              <span className="px-1 text-[11px] text-gray-500 dark:text-zinc-400">
+                {e.rows.length} row{e.rows.length === 1 ? '' : 's'} · use whole table
+              </span>
             )}
           </SourceBox>
         ))}
       </div>
 
-      {expanded && expandedRow && expandedEntry && (
-        <div
-          className={cn('rounded-xl border bg-white/60 px-3 py-2.5 dark:bg-[#0a0a0a]', sourceColors(expandedEntry.key).border)}
-          onClick={e => e.stopPropagation()}
-        >
-          <div className="mb-2 flex items-center justify-between">
-            <span className={cn(ML, sourceColors(expandedEntry.key).text)}>
-              {sourceColors(expandedEntry.key).label} · Row #{expanded.rowIdx + 1}
+      {records.length > 0 && wholeTable && !combine && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-gray-100 px-3 py-2 dark:border-[#1f1f1f]">
+          <span className="text-xs text-gray-500 dark:text-zinc-400">
+            Using {sourceColors(wholeTable).label}&apos;s whole table
+            {rowsBySource[wholeTable] && ` — ${rowsBySource[wholeTable]!.length} row${rowsBySource[wholeTable]!.length === 1 ? '' : 's'}`}
+          </span>
+          <button
+            type="button"
+            onClick={() => setCombine(true)}
+            className="cursor-pointer border-none bg-transparent text-[11px] font-semibold text-gray-500 hover:text-gray-800 dark:text-zinc-400 dark:hover:text-zinc-200"
+          >
+            Compare record by record
+          </button>
+        </div>
+      )}
+
+      {records.length > 0 && showRecords && (
+        <div className="rounded-xl border border-gray-100 dark:border-[#1f1f1f]">
+          <div className="flex flex-wrap items-baseline justify-between gap-2 border-b border-gray-100 px-3 py-2 dark:border-[#1f1f1f]">
+            <span className={cn(ML, 'text-gray-500 dark:text-zinc-400')}>
+              {records.length} record{records.length === 1 ? '' : 's'}
             </span>
-            <button
-              type="button"
-              onClick={e => { e.stopPropagation(); setExpanded(null); }}
-              className="cursor-pointer border-none bg-transparent text-xs text-gray-400 hover:text-gray-600 dark:text-zinc-500 dark:hover:text-zinc-300"
+            <span
+              className="text-[11px] text-gray-400 dark:text-zinc-500"
+              title={keyCols.length
+                ? `Rows are lined up using: ${keyCols.map(k => labelOf(cols, k.field_name)).join(', ')}`
+                : undefined}
             >
-              Close
-            </button>
+              {keyCols.length
+                ? 'Rows that describe the same result are shown side by side'
+                : <span className={STATE_COLORS.active.text}>Rows are lined up by their order in each table — check each one is the same result</span>}
+            </span>
+            {wholeTable && (
+              <button
+                type="button"
+                onClick={() => setCombine(false)}
+                className="cursor-pointer border-none bg-transparent text-[11px] text-gray-400 hover:text-gray-600 dark:text-zinc-500 dark:hover:text-zinc-300"
+              >
+                Hide
+              </button>
+            )}
           </div>
-          <div className="grid grid-cols-2 gap-x-6 gap-y-3">
-            {cols.map((col, colIdx) => (
-              <RowCell
-                key={col.field_name}
-                col={col}
-                raw={expandedRow?.[col.field_name]}
-                isDiff={differingCells.has(col.field_name)}
-                fullWidth={colIdx === cols.length - 1 && cols.length % 2 !== 0}
-                onJump={
-                  onJumpCell
-                    ? () => onJumpCell(expandedEntry.key, expanded!.rowIdx, col, expandedRow?.[col.field_name])
-                    : undefined
-                }
+
+          {records.map(rec => (
+            <RecordCard
+              key={rec.id}
+              rec={rec}
+              cols={cols}
+              specs={specs}
+              keyNames={keyNames}
+              present={present}
+              choice={choiceOf(rec)}
+              auto={!choices[rec.id] && choiceOf(rec) !== null}
+              open={openId === rec.id}
+              onToggle={() => setOpenId(id => (id === rec.id ? null : rec.id))}
+              onChoose={c => choose(rec, c)}
+              pairing={pairingId === rec.id}
+              onStartPair={() => setPairingId(id => (id === rec.id ? null : rec.id))}
+              candidates={records.filter(o => canPair(rec, o))}
+              onPair={other => pair(rec, other)}
+              onUnpair={() => unpair(rec)}
+              onJumpCell={onJumpCell}
+            />
+          ))}
+
+          <div className="flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 px-3 py-2 dark:border-[#1f1f1f]">
+            <span className="text-[11px] text-gray-400 dark:text-zinc-500">
+              {decided} of {records.length} decided
+              {built && ` · ${built.length} row${built.length === 1 ? '' : 's'} kept`}
+            </span>
+            <DecisionButton
+              label={built
+                ? `Use these ${built.length} row${built.length === 1 ? '' : 's'}${wholeTable ? ' instead' : ''}`
+                : 'Decide every record first'}
+              active={false}
+              onClick={() => { if (built) onUseRows(built); }}
+            />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function labelOf(cols: FormField[], name: string): string {
+  const c = cols.find(x => x.field_name === name);
+  return (c?.display_name || name).replace(/_/g, ' ');
+}
+
+/**
+ * What a reviewer reads about how a record was lined up. Plain words only: the
+ * matcher's own vocabulary (key, composite, duplicate key) stays in
+ * `_lib/alignRows.ts`. A safely matched record shows no chip at all.
+ */
+const NEEDS_MATCHING = {
+  label: 'Needs matching',
+  cls: 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300',
+};
+const ALIGNMENT_CHIP: Record<Alignment, { label: string; cls: string; title: string } | null> = {
+  key: null,
+  manual: { label: 'Matched by you', cls: 'bg-blue-50 text-blue-700 dark:bg-blue-900/20 dark:text-blue-300', title: 'You said these rows describe the same result' },
+  'positional-unverified': { label: 'Lined up by order', cls: 'bg-amber-50 text-amber-700 dark:bg-amber-900/20 dark:text-amber-300', title: 'Lined up only by position in each table — check these rows describe the same result' },
+  ambiguous: { ...NEEDS_MATCHING, title: 'More than one row in a table could be this result, so it was not matched automatically. Match it to the right record, or include or exclude it.' },
+  'incomplete-key': { ...NEEDS_MATCHING, title: 'This row could not be matched automatically. Match it to the right record, or include or exclude it.' },
+};
+
+function recordSummary(rec: AlignedRecord, cols: FormField[], keyNames: string[]): string {
+  const first = SOURCE_ORDER.map(s => rec.members[s]).find(Boolean);
+  const row = first?.row;
+  const names = keyNames.length ? keyNames : cols.map(c => c.field_name);
+  const parts = names.map(n => cellValue(row?.[n]).trim()).filter(Boolean);
+  return (keyNames.length ? parts : parts.slice(0, 2)).join(' · ') || 'Row without a label';
+}
+
+function refsLabel(rec: AlignedRecord): string {
+  return SOURCE_ORDER
+    .filter(s => rec.members[s])
+    .map(s => `${sourceColors(s).short} #${rec.members[s]!.rowIndex + 1}`)
+    .join(' · ');
+}
+
+function RecordCard({
+  rec, cols, specs, keyNames, present, choice, auto, open, onToggle, onChoose,
+  pairing, onStartPair, candidates, onPair, onUnpair, onJumpCell,
+}: {
+  rec: AlignedRecord;
+  cols: FormField[];
+  specs: ColumnSpec[];
+  keyNames: string[];
+  present: SourceKey[];
+  choice: RecordChoice | null;
+  auto: boolean;
+  open: boolean;
+  onToggle: () => void;
+  onChoose: (c: RecordChoice) => void;
+  pairing: boolean;
+  onStartPair: () => void;
+  candidates: AlignedRecord[];
+  onPair: (other: AlignedRecord) => void;
+  onUnpair: () => void;
+  onJumpCell?: (key: SourceKey, rowIdx: number, col: FormField, raw: any) => void;
+}) {
+  const members = SOURCE_ORDER.filter(s => rec.members[s]);
+  const missing = present.filter(s => !rec.members[s]);
+  const diff = differingColumns(rec, specs);
+  const chip = ALIGNMENT_CHIP[rec.alignment];
+
+  const status =
+    missing.length && members.length
+      ? `Only ${members.map(s => sourceColors(s).label).join(' and ')} ${members.length === 1 ? 'has' : 'have'} this`
+      : diff.size
+        ? `${diff.size} differ${diff.size === 1 ? 's' : ''}`
+        : members.length > 1 ? 'all agree' : '';
+
+  const choiceText =
+    choice === 'exclude' ? 'excluded'
+      : choice ? `${auto ? 'agreed' : `using ${sourceColors(choice).short}`}`
+      : 'needs decision';
+
+  return (
+    <div className="border-b border-gray-100 last:border-b-0 dark:border-[#1f1f1f]">
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}
+        className="flex cursor-pointer select-none flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 transition-colors hover:bg-gray-50/60 dark:hover:bg-[rgba(255,255,255,0.02)]"
+      >
+        {open
+          ? <ChevronDown className="h-3 w-3 flex-shrink-0 text-gray-400" />
+          : <ChevronRight className="h-3 w-3 flex-shrink-0 text-gray-400" />}
+        {chip && (
+          <span className={cn('flex-shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold', chip.cls)} title={chip.title}>
+            {chip.label}
+          </span>
+        )}
+        <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-700 dark:text-zinc-200">
+          {recordSummary(rec, cols, keyNames)}
+        </span>
+        <span className="flex-shrink-0 font-mono text-[10px] tabular-nums text-gray-400 dark:text-zinc-600">{refsLabel(rec)}</span>
+        {status && (
+          <span className={cn(
+            'flex-shrink-0 text-[10px]',
+            status === 'all agree' ? 'text-emerald-600 dark:text-emerald-400' : STATE_COLORS.active.text,
+          )}>
+            {status}
+          </span>
+        )}
+        <span className={cn(
+          'flex-shrink-0 rounded-full px-1.5 py-px text-[10px] font-semibold',
+          choice === null ? cn(STATE_COLORS.active.bg, STATE_COLORS.active.text) : cn(STATE_COLORS.resolved.bg, STATE_COLORS.resolved.text),
+        )}>
+          {choiceText}
+        </span>
+      </div>
+
+      {open && (
+        <div className="space-y-2.5 px-3 pb-3">
+          <div className="overflow-x-auto rounded-lg border border-gray-100 dark:border-[#1f1f1f]">
+            <table className="w-full border-collapse text-xs">
+              <thead>
+                <tr className="bg-gray-50/60 dark:bg-[#0f0f0f]">
+                  <th className="px-2 py-1.5 text-left text-[10px] font-bold uppercase tracking-normal text-gray-400 dark:text-zinc-500">Column</th>
+                  {[...members, ...missing].map(s => (
+                    <th key={s} className={cn('px-2 py-1.5 text-left text-[10px] font-bold uppercase tracking-normal', sourceColors(s).text)}>
+                      {sourceColors(s).label}
+                      <span className="ml-1 font-mono font-normal normal-case text-gray-400 dark:text-zinc-600">
+                        {rec.members[s] ? `row #${rec.members[s]!.rowIndex + 1}` : 'not found'}
+                      </span>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {cols.map(col => {
+                  const isDiff = diff.has(col.field_name);
+                  return (
+                    <tr key={col.field_name} className={cn('border-t border-gray-100 dark:border-[#1f1f1f]', isDiff && 'bg-amber-50/70 dark:bg-amber-900/15')}>
+                      <td className={cn('px-2 py-1.5 align-top text-[11px] font-semibold', isDiff ? STATE_COLORS.active.text : 'text-gray-500 dark:text-zinc-400')}>
+                        {labelOf(cols, col.field_name)}
+                      </td>
+                      {[...members, ...missing].map(s => {
+                        const ref = rec.members[s];
+                        if (!ref) return <td key={s} className="px-2 py-1.5 align-top italic text-gray-300 dark:text-zinc-700">—</td>;
+                        const raw = ref.row?.[col.field_name];
+                        const val = cellValue(raw).trim();
+                        const meta = cellMeta(raw);
+                        return (
+                          <td key={s} className="px-2 py-1.5 align-top">
+                            <span className={cn('break-words', val ? 'text-gray-700 dark:text-zinc-300' : 'italic text-gray-400 dark:text-zinc-600')}>
+                              {val || 'empty'}
+                            </span>
+                            {meta && onJumpCell && hasJumpableEvidence(meta) && (
+                              <button
+                                type="button"
+                                title="Show this cell's evidence in the PDF"
+                                onClick={e => { e.stopPropagation(); onJumpCell(s, ref.rowIndex, col, raw); }}
+                                className="ml-1 inline-flex cursor-pointer border-none bg-transparent p-0 align-middle text-gray-300 hover:text-gray-600 dark:text-zinc-600 dark:hover:text-zinc-300"
+                              >
+                                <Quote className="h-2.5 w-2.5" />
+                              </button>
+                            )}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-1.5">
+            {members.map(s => (
+              <DecisionButton
+                key={s}
+                label={members.length === 1 ? 'Include' : `Use ${sourceColors(s).short} row`}
+                active={choice === s && !auto}
+                tone="good"
+                onClick={() => onChoose(s)}
               />
             ))}
+            <DecisionButton label="Exclude" active={choice === 'exclude'} onClick={() => onChoose('exclude')} />
+            <span className="flex-1" />
+            {rec.alignment === 'manual' ? (
+              <button type="button" onClick={onUnpair} className="cursor-pointer border-none bg-transparent text-[11px] text-gray-400 hover:text-gray-600 dark:text-zinc-500 dark:hover:text-zinc-300">
+                Unpair
+              </button>
+            ) : missing.length > 0 && candidates.length > 0 ? (
+              <button type="button" onClick={onStartPair} className="cursor-pointer border-none bg-transparent text-[11px] text-gray-400 hover:text-gray-600 dark:text-zinc-500 dark:hover:text-zinc-300">
+                {pairing ? 'Cancel' : 'Match to another record'}
+              </button>
+            ) : null}
           </div>
+
+          {pairing && (
+            <div className="space-y-1 rounded-lg border border-dashed border-gray-200 p-2 dark:border-[#2a2a2a]">
+              <p className="text-[11px] text-gray-400 dark:text-zinc-500">Which record is this the same result as? Records that already have a row from this reviewer are not listed.</p>
+              {candidates.map(o => (
+                <button
+                  key={o.id}
+                  type="button"
+                  onClick={() => onPair(o)}
+                  className="flex w-full cursor-pointer items-center gap-2 rounded-md border border-gray-100 bg-white/60 px-2 py-1 text-left text-xs hover:border-gray-300 dark:border-[#1f1f1f] dark:bg-[#0f0f0f] dark:hover:border-[#3f3f3f]"
+                >
+                  <span className="min-w-0 flex-1 truncate text-gray-700 dark:text-zinc-300">{recordSummary(o, cols, keyNames)}</span>
+                  <span className="flex-shrink-0 font-mono text-[10px] text-gray-400 dark:text-zinc-600">{refsLabel(o)}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>
