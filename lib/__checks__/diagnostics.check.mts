@@ -301,6 +301,25 @@ const cont = (key: string, m1: number, s1: number, n1: number,
   check('leave-one-out is suppressed below the threshold',
     leaveOneOut(withOutlier.slice(0, MIN_LEAVE_ONE_OUT - 1), 'RR', 'random') === null);
   check('...and MIN_LEAVE_ONE_OUT is above MIN_POOLABLE', MIN_LEAVE_ONE_OUT === 4);
+
+  // The tau² estimator reaches every re-pool (Sep 2026). With REML, a row must
+  // equal a direct REML pool of the rest — and differ from the DL row, or the
+  // option was dropped on the way in.
+  const scattered = [
+    binary('A', 40, 100, 20, 100), binary('B', 25, 100, 30, 100),
+    binary('C', 60, 100, 20, 100), binary('D', 30, 100, 29, 100),
+    binary('E', 50, 100, 15, 100),
+  ];
+  const looReml = leaveOneOut(scattered, 'RR', 'random', { tau2Method: 'reml' })!;
+  const looDl = leaveOneOut(scattered, 'RR', 'random')!;
+  const directReml = runMetaAnalysis(scattered.filter(s => s.key !== 'A'), 'RR', 'random', { tau2Method: 'reml' });
+  close('a REML leave-one-out row equals a direct REML pool',
+    looReml.rows.find(r => r.label === 'A')!.est!, directReml.pooled!.est, 1e-12);
+  check('...and differs from the DL row',
+    Math.abs(looReml.rows[0].est! - looDl.rows[0].est!) > 1e-6,
+    `${looReml.rows[0].est} vs ${looDl.rows[0].est}`);
+  close('the REML baseline is the REML pool',
+    looReml.baseline.est, runMetaAnalysis(scattered, 'RR', 'random', { tau2Method: 'reml' }).pooled!.est, 1e-12);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -334,6 +353,20 @@ const cont = (key: string, m1: number, s1: number, n1: number,
   const split = subgroupAnalysis(different, 'RR', 'random', g);
   check('separated subgroups give a large Q', split.test!.q > 10, String(split.test!.q));
   check('...and a small p', split.test!.p < 0.01, String(split.test!.p));
+
+  // Within-group pools use the requested tau² estimator.
+  const spread = [
+    binary('a1', 80, 100, 20, 100, { evidence: { g: 'X' } }),
+    binary('a2', 50, 100, 21, 100, { evidence: { g: 'X' } }),
+    binary('a3', 82, 100, 40, 100, { evidence: { g: 'X' } }),
+    binary('a4', 30, 100, 25, 100, { evidence: { g: 'X' } }),
+  ];
+  const sgPm = subgroupAnalysis(spread, 'RR', 'random', g, { tau2Method: 'pm' });
+  const directPm = runMetaAnalysis(spread, 'RR', 'random', { tau2Method: 'pm' });
+  const sgDl = subgroupAnalysis(spread, 'RR', 'random', g);
+  close('a PM subgroup equals a direct PM pool', sgPm.rows[0].est!, directPm.pooled!.est, 1e-12);
+  check('...and differs from the DL subgroup', Math.abs(sgPm.rows[0].est! - sgDl.rows[0].est!) > 1e-6,
+    `${sgPm.rows[0].est} vs ${sgDl.rows[0].est}`);
 
   // A group too small to pool is listed, not dropped.
   const lopsided = subgroupAnalysis([

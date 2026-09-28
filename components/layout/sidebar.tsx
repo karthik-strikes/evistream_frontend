@@ -1,8 +1,20 @@
 'use client';
 
+/**
+ * Primary navigation rail — rebuilt Sep 26 2026 from
+ * `zhandoffs/EviStreams Sidebar.dc.html` (README §1).
+ *
+ * Projects is the only workspace-level item; the divider below it is the
+ * project boundary, and everything under it belongs to the project chosen in
+ * the top-bar selector. With no current project the scoped block is replaced
+ * by "No project selected · Choose a project →" — never disabled links.
+ * Home is not in the rail; it lives in the top bar.
+ */
+
 import Link from 'next/link';
-import { usePathname, useRouter } from 'next/navigation';
-import { useState, useEffect } from 'react';
+import { usePathname } from 'next/navigation';
+import { useState, useEffect, useCallback, type FocusEvent, type MouseEvent } from 'react';
+import { createPortal } from 'react-dom';
 import {
   FileText,
   FileCheck,
@@ -12,7 +24,6 @@ import {
   Edit,
   Settings,
   Loader2,
-  PanelLeft,
   PanelLeftClose,
   CheckSquare2,
   Shield,
@@ -21,96 +32,122 @@ import {
 import { Logo } from '@/components/ui/logo';
 import { ForestPlotIcon } from '@/components/ui/forest-plot-icon';
 import { cn } from '@/lib/utils';
-import { typography } from '@/lib/typography';
 import type { LucideIcon } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import { useProject } from '@/contexts/ProjectContext';
 import { useProjectPermissions } from '@/hooks/useProjectPermissions';
+import { useNavCounts, type NavCount, type NavCountKey } from '@/hooks/useNavCounts';
 
 /** Lucide icons, plus any local SVG component taking the same className prop. */
 type NavIcon = LucideIcon | React.ComponentType<{ className?: string }>;
 
+// Workflow hue for the active bar and the collapsed count dot.
+const WF = { docs: '#F0536B', ai: '#4F86F7', forms: '#F5A623', results: '#22B573', rob: '#0a0a0a', neutral: '#6b7280' } as const;
+type Wf = keyof typeof WF;
+
 interface NavigationItem {
   name: string;
-  href: string;
+  /** Static href, or built from the current project id. */
+  href: string | ((projectId: string) => string);
   icon: NavIcon;
-  badge?: string;
+  wf: Wf;
   /** Single permission, or several — the item shows if the user holds ANY of them. */
   permission?: string | string[];
+  countKey?: NavCountKey;
 }
 
 interface NavigationSection {
+  key: string;
   title: string;
   items: NavigationItem[];
 }
 
-const navigationSections: NavigationSection[] = [
+const WORKSPACE: NavigationSection = {
+  key: 'ws',
+  title: 'Workspace',
+  items: [{ name: 'Projects', href: '/projects', icon: LayoutGrid, wf: 'neutral' }],
+};
+
+const SCOPED: NavigationSection[] = [
   {
-    title: 'Workspace',
+    key: 'sources',
+    title: 'Sources',
     items: [
-      { name: 'Projects', href: '/projects', icon: LayoutGrid },
+      { name: 'Documents', href: '/documents', icon: FileText, wf: 'docs', permission: 'can_view_docs' },
+      { name: 'Forms', href: '/forms', icon: FileCheck, wf: 'forms', permission: 'can_view_docs' },
     ],
   },
   {
-    title: 'Data Management',
-    items: [
-      { name: 'Documents', href: '/documents', icon: FileText, permission: 'can_view_docs' },
-      { name: 'Forms', href: '/forms', icon: FileCheck, permission: 'can_view_docs' },
-    ],
-  },
-  {
+    key: 'extraction',
     title: 'Extraction',
     items: [
-      { name: 'Run Extraction', href: '/extractions', icon: PlayCircle, permission: ['can_run_extractions', 'can_view_results'] },
-      { name: 'Manual Extract', href: '/manual-extraction', icon: Edit, permission: 'can_run_manual_extractions' },
-      // Gated on EITHER permission (an array is OR). The page was reachable only
-      // by adjudicators, but editing an assessment requires a reviewer seat —
-      // so the people who actually fill it in could not see the link at all.
-      { name: 'Risk of Bias', href: '/risk-of-bias', icon: Shield, badge: 'New', permission: ['can_run_manual_extractions', 'can_adjudicate'] },
-      { name: 'Consensus', href: '/consensus', icon: CheckSquare2, permission: 'can_adjudicate' },
-      { name: 'Results', href: '/results', icon: BarChart3, permission: 'can_view_results' },
-      { name: 'Synthesis', href: '/synthesis', icon: ForestPlotIcon, badge: 'New', permission: 'can_view_results' },
+      // A destination, not a command: the run action lives on the page.
+      { name: 'AI extraction', href: '/extractions', icon: PlayCircle, wf: 'ai', permission: ['can_run_extractions', 'can_view_results'] },
+      { name: 'Manual extraction', href: '/manual-extraction', icon: Edit, wf: 'forms', permission: 'can_run_manual_extractions', countKey: 'extraction' },
+      { name: 'Consensus', href: '/consensus', icon: CheckSquare2, wf: 'results', permission: 'can_adjudicate', countKey: 'consensus' },
+      { name: 'Results', href: '/results', icon: BarChart3, wf: 'results', permission: 'can_view_results' },
     ],
   },
   {
-    title: 'Monitoring',
+    key: 'appraisal',
+    title: 'Appraisal & synthesis',
     items: [
-      { name: 'Jobs', href: '/jobs', icon: Loader2, permission: 'can_view_results' },
-      { name: 'Usage', href: '/usage', icon: DollarSign },
+      // Gated on EITHER permission (an array is OR): editing an assessment
+      // needs a reviewer seat, so readers must see the link too.
+      { name: 'Risk of bias', href: '/risk-of-bias', icon: Shield, wf: 'rob', permission: ['can_run_manual_extractions', 'can_adjudicate'], countKey: 'rob' },
+      { name: 'Synthesis', href: '/synthesis', icon: ForestPlotIcon, wf: 'results', permission: 'can_view_results', countKey: 'synthesis' },
     ],
   },
   {
-    title: 'Settings',
+    key: 'ops',
+    title: 'Operations',
     items: [
-      { name: 'Settings', href: '/settings', icon: Settings },
+      { name: 'Usage', href: '/usage', icon: DollarSign, wf: 'neutral' },
+      { name: 'Jobs', href: '/jobs', icon: Loader2, wf: 'ai', permission: 'can_view_results' },
+    ],
+  },
+  {
+    key: 'project',
+    title: 'Project',
+    items: [
+      { name: 'Project settings', href: (pid) => `/projects/${pid}`, icon: Settings, wf: 'neutral' },
     ],
   },
 ];
 
-function NavTooltip({ label, side = 'right' }: { label: string; side?: 'right' | 'bottom' }) {
-  return (
-    <span
-      role="tooltip"
-      className={cn(
-        'pointer-events-none absolute z-50 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-xs font-medium text-white opacity-0 shadow-md transition-opacity duration-150 delay-300 group-hover:opacity-100 dark:bg-white dark:text-gray-900',
-        side === 'right' && 'left-full top-1/2 ml-2 -translate-y-1/2',
-        side === 'bottom' && 'left-1/2 top-full mt-1.5 -translate-x-1/2',
-      )}
-    >
-      {label}
-    </span>
-  );
+const ROLE_LABEL: Record<string, string> = {
+  admin: 'Admin', owner: 'Owner', manager: 'Manager', member: 'Member', viewer: 'Viewer',
+};
+
+function initialsOf(name: string): string {
+  const parts = name.trim().split(/[\s@._-]+/).filter(Boolean);
+  return ((parts[0]?.[0] ?? '?') + (parts[1]?.[0] ?? '')).toUpperCase();
 }
+
+/** Tooltip suffix / aria-label state for a count. */
+function countSuffix(raw: NavCount): string {
+  if (typeof raw === 'number' && raw > 0) return `${raw} open for you`;
+  if (raw === 'loading') return 'Counting your open items…';
+  if (raw === 'error') return 'Work count unavailable';
+  return '';
+}
+
+interface Tip { text: string; left: number; top: number }
 
 export function Sidebar() {
   const pathname = usePathname();
-  const router = useRouter();
   const [collapsed, setCollapsed] = useState<boolean>(() => {
     if (typeof window === 'undefined') return true;
     const v = window.localStorage.getItem('evistream:sidebar-collapsed');
     return v === null ? true : v === '1';
   });
-  const { isAdmin } = useAuth();
+  const { isAdmin, currentUser } = useAuth();
+  const { selectedProject, projects } = useProject();
   const perms = useProjectPermissions();
+  const counts = useNavCounts();
+  const [tip, setTip] = useState<Tip | null>(null);
+  const [mounted, setMounted] = useState(false);
+  useEffect(() => setMounted(true), []);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -130,157 +167,208 @@ export function Sidebar() {
     return () => window.removeEventListener('keydown', onKey);
   }, []);
 
-  const filteredSections = navigationSections.map(section => ({
-    ...section,
-    items: section.items.filter(item => {
-      if (!item.permission) return true;
-      if (isAdmin || perms.isOwner) return true;
-      const keys = Array.isArray(item.permission) ? item.permission : [item.permission];
-      return keys.some(k => !!(perms as Record<string, unknown>)[k]);
-    }),
-  })).filter(section => section.items.length > 0);
+  // A collapse/expand or navigation moves every item — drop a stale tooltip.
+  useEffect(() => setTip(null), [collapsed, pathname]);
 
-  const allSections = [
-    ...filteredSections,
-    ...(isAdmin ? [{
-      title: 'Administration',
-      items: [{ name: 'Admin Panel', href: '/admin', icon: Shield }],
-    }] : []),
-  ];
+  const pid = selectedProject?.id ?? null;
+
+  const allowed = (item: NavigationItem) => {
+    if (!item.permission) return true;
+    if (isAdmin || perms.isOwner) return true;
+    const keys = Array.isArray(item.permission) ? item.permission : [item.permission];
+    return keys.some(k => !!(perms as Record<string, unknown>)[k]);
+  };
+
+  const scoped: NavigationSection[] = pid
+    ? [
+        ...SCOPED.map(s => ({ ...s, items: s.items.filter(allowed) })).filter(s => s.items.length > 0),
+        ...(isAdmin ? [{ key: 'admin', title: 'Administration', items: [{ name: 'Admin Panel', href: '/admin', icon: Shield, wf: 'neutral' as Wf }] }] : []),
+      ]
+    : (isAdmin ? [{ key: 'admin', title: 'Administration', items: [{ name: 'Admin Panel', href: '/admin', icon: Shield, wf: 'neutral' as Wf }] }] : []);
+
+  const hrefOf = (item: NavigationItem) => (typeof item.href === 'function' ? item.href(pid ?? '') : item.href);
+
+  const settingsHref = pid ? `/projects/${pid}` : null;
+  const isActive = (item: NavigationItem) => {
+    const href = hrefOf(item);
+    if (item.name === 'Projects') {
+      // Inspecting ANOTHER project's settings still belongs to Projects.
+      return pathname === '/projects' || (pathname.startsWith('/projects/') && !(settingsHref && (pathname === settingsHref || pathname.startsWith(settingsHref + '/'))));
+    }
+    return pathname === href || pathname.startsWith(href + '/');
+  };
+
+  const showTip = useCallback((e: MouseEvent<HTMLElement> | FocusEvent<HTMLElement>, text: string | null) => {
+    if (!text) { setTip(null); return; }
+    const r = e.currentTarget.getBoundingClientRect();
+    setTip({ text, left: r.right + 10, top: r.top + r.height / 2 });
+  }, []);
+  const hideTip = useCallback(() => setTip(null), []);
+
+  const renderItem = (item: NavigationItem) => {
+    const active = isActive(item);
+    const Icon = item.icon;
+    const raw: NavCount = item.countKey ? counts[item.countKey] : undefined;
+    const count = typeof raw === 'number' && raw > 0 ? raw : 0;
+    const suffix = item.countKey ? countSuffix(raw) : '';
+    const label = suffix ? `${item.name} · ${suffix}` : item.name;
+    // Collapsed: the whole label (with count). Expanded: only the states that
+    // have no visible badge (loading / unavailable).
+    const tipText = collapsed ? label : (raw === 'loading' || raw === 'error') ? suffix : null;
+    const color = item.wf === 'rob' ? undefined : WF[item.wf];
+    return (
+      <div key={item.name} className="relative">
+        <Link
+          href={hrefOf(item)}
+          aria-current={active ? 'page' : undefined}
+          aria-label={label}
+          onMouseEnter={e => showTip(e, tipText)}
+          onMouseLeave={hideTip}
+          onFocus={e => showTip(e, tipText)}
+          onBlur={hideTip}
+          className={cn(
+            'relative flex items-center gap-3 whitespace-nowrap rounded-lg px-3 py-2 text-sm text-[#0a0a0a] transition-colors hover:bg-gray-100 dark:text-zinc-300 dark:hover:bg-[#1a1a1a]',
+            active ? 'bg-gray-100 font-medium dark:bg-[#1a1a1a] dark:text-white' : 'font-normal',
+            collapsed ? 'justify-center' : 'justify-start',
+          )}
+        >
+          {active && (
+            <span aria-hidden
+              className={cn('absolute bottom-2 left-0 top-2 w-[3px] rounded-r-[3px]', item.wf === 'rob' && 'bg-[#0a0a0a] dark:bg-zinc-100')}
+              style={color ? { background: color } : undefined} />
+          )}
+          <span className="relative inline-flex shrink-0">
+            <Icon className="h-4 w-4 flex-shrink-0" />
+            {collapsed && count > 0 && (
+              <span aria-hidden
+                className={cn('absolute -right-1 -top-[3px] box-content h-[7px] w-[7px] rounded-full border-[1.5px] border-[#f9fafb] dark:border-[#0a0a0a]', item.wf === 'rob' && 'bg-[#0a0a0a] dark:bg-zinc-100')}
+                style={color ? { background: color } : undefined} />
+            )}
+          </span>
+          {!collapsed && (
+            <>
+              <span className="min-w-0 flex-1 overflow-hidden text-ellipsis">{item.name}</span>
+              {count > 0 && (
+                <span aria-hidden
+                  className="rounded-full bg-gray-200 px-1.5 text-[11px] font-semibold leading-[18px] tabular-nums text-gray-700 dark:bg-[#2a2a2a] dark:text-zinc-300">
+                  {count}
+                </span>
+              )}
+            </>
+          )}
+        </Link>
+      </div>
+    );
+  };
+
+  const groupHeader = (title: string) => (collapsed
+    ? <div className="mx-2 mb-2 h-px bg-gray-200 dark:bg-[#2a2a2a]" />
+    : <h3 className="m-0 mb-1.5 whitespace-nowrap px-3 text-xs font-semibold uppercase tracking-[.05em] text-gray-500 dark:text-zinc-500">{title}</h3>);
+
+  const userName = currentUser?.full_name || currentUser?.email || '';
+  const roleLine = pid
+    ? (isAdmin ? 'Admin' : ROLE_LABEL[perms.role] ?? 'Member')
+    : `Member of ${projects.length} project${projects.length === 1 ? '' : 's'}`;
 
   return (
-    <div
+    <aside
+      aria-label="Sidebar"
       className={cn(
-        'sticky top-0 flex h-screen flex-col border-r border-gray-200 bg-gray-50 transition-[width] duration-200 ease-out flex-shrink-0 overflow-y-auto overflow-x-hidden dark:bg-[#0a0a0a] dark:border-[#1a1a1a]',
-        collapsed ? 'w-16' : 'w-56'
+        'sticky top-0 flex h-screen flex-shrink-0 flex-col overflow-hidden border-r border-gray-200 bg-[#f9fafb] transition-[width] duration-200 ease-out dark:border-[#1a1a1a] dark:bg-[#0a0a0a]',
+        collapsed ? 'w-16' : 'w-56',
       )}
     >
-      {/* Header — unified DOM; brand text + close button fade via opacity + max-width */}
-      <div className="flex h-16 items-center px-3 gap-3">
-        {/* Logo button: collapsed → opens sidebar; expanded → navigates to /dashboard */}
+      {/* Header — the logo is the toggle in both widths; the brand is not a link. */}
+      <div className="flex h-16 flex-shrink-0 items-center gap-3 px-3">
         <button
-          onClick={() => collapsed ? setCollapsed(false) : router.push('/dashboard')}
-          aria-label={collapsed ? 'Open sidebar' : 'Go to dashboard'}
-          className="group relative flex-shrink-0 w-7 h-7 rounded-md"
+          type="button"
+          onClick={() => setCollapsed(c => !c)}
+          aria-label="Toggle sidebar (⌘\)"
+          title="Toggle sidebar · ⌘\"
+          aria-expanded={!collapsed}
+          className="flex h-7 w-7 flex-shrink-0 items-center justify-center rounded-md border-0 bg-transparent p-0"
         >
-          <Logo
-            size={28}
-            className={cn(
-              'absolute inset-0 transition-opacity duration-150',
-              collapsed && 'group-hover:opacity-0'
-            )}
-          />
-          {collapsed && (
-            <div className="absolute inset-0 flex items-center justify-center transition-opacity duration-150 opacity-0 group-hover:opacity-100">
-              <PanelLeft className="h-5 w-5 text-gray-600 dark:text-zinc-400" />
-            </div>
-          )}
+          <Logo size={28} />
         </button>
-
-        {/* Brand text — link, fades in/out symmetric to width animation */}
-        <Link
-          href="/dashboard"
-          className={cn(
-            'flex flex-col min-w-0 overflow-hidden whitespace-nowrap transition-all duration-200 ease-out',
-            collapsed
-              ? 'opacity-0 max-w-0 pointer-events-none delay-0'
-              : 'opacity-100 max-w-[140px] delay-100'
-          )}
-        >
-          <span className="text-base font-bold leading-none dark:text-white">eviStreams</span>
-          <span className="text-xs text-gray-500 leading-none mt-0.5 dark:text-[#888888]">Medical AI</span>
-        </Link>
-
-        <div className="flex-1" />
-
-        {/* Close button — visible only when expanded */}
-        <button
-          onClick={() => setCollapsed(true)}
-          aria-label="Close sidebar"
-          className={cn(
-            'flex-shrink-0 flex items-center justify-center rounded-lg overflow-hidden text-gray-600 dark:text-zinc-400 hover:bg-gray-100 dark:hover:bg-[#1a1a1a] transition-all duration-200 ease-out',
-            collapsed
-              ? 'opacity-0 max-w-0 p-0 pointer-events-none delay-0'
-              : 'opacity-100 max-w-[36px] p-1.5 delay-100'
-          )}
-        >
-          <PanelLeftClose className="h-5 w-5" />
-        </button>
+        {!collapsed && (
+          <>
+            <span className="flex min-w-0 flex-col whitespace-nowrap text-[#0a0a0a] dark:text-white">
+              <span className="text-base font-bold leading-none">eviStreams</span>
+              <span className="mt-[3px] text-xs leading-none text-gray-500 dark:text-[#888888]">Medical AI</span>
+            </span>
+            <div className="flex-1" />
+            <button
+              type="button"
+              onClick={() => setCollapsed(true)}
+              aria-label="Close sidebar (⌘\)"
+              title="Close sidebar · ⌘\"
+              className="flex flex-shrink-0 items-center justify-center rounded-lg border-0 bg-transparent p-1.5 text-gray-600 hover:bg-gray-100 dark:text-zinc-400 dark:hover:bg-[#1a1a1a]"
+            >
+              <PanelLeftClose className="h-5 w-5" />
+            </button>
+          </>
+        )}
       </div>
 
-      <nav className="flex-1 overflow-y-auto overflow-x-hidden p-2">
-        {allSections.map((section, sectionIndex) => (
-          <div key={section.title} className={sectionIndex > 0 ? 'mt-6' : ''}>
-            <h3
-              className={cn(
-                typography.nav.section,
-                'px-3 overflow-hidden whitespace-nowrap transition-all duration-200 ease-out',
-                collapsed
-                  ? 'opacity-0 max-h-0 mb-0 delay-0'
-                  : 'opacity-100 max-h-6 mb-2 delay-100'
-              )}
-            >
-              {section.title}
-            </h3>
-            {sectionIndex > 0 && (
-              <div
-                className={cn(
-                  'h-px bg-gray-100 mx-2 overflow-hidden dark:bg-[#2a2a2a] transition-all duration-200 ease-out',
-                  collapsed
-                    ? 'opacity-100 my-2 max-h-px delay-100'
-                    : 'opacity-0 my-0 max-h-0 delay-0'
-                )}
-              />
-            )}
-            <div className="space-y-1">
-              {section.items.map((item) => {
-                const isActive = pathname === item.href || pathname.startsWith(item.href + '/');
-                const Icon = item.icon;
-                return (
-                  <Link
-                    key={item.name}
-                    href={item.href}
-                    className={cn(
-                      'group relative flex items-center rounded px-3 py-2 transition-colors',
-                      isActive
-                        ? cn(typography.nav.itemActive, 'bg-gray-100 dark:bg-[#1a1a1a] dark:text-white')
-                        : cn(typography.nav.item, 'hover:bg-gray-50 dark:text-zinc-400 dark:hover:bg-[#141414]'),
-                      collapsed && 'justify-center'
-                    )}
-                  >
-                    <Icon className="h-4 w-4 flex-shrink-0" />
-                    <span
-                      className={cn(
-                        'truncate overflow-hidden transition-all duration-200 ease-out',
-                        collapsed
-                          ? 'opacity-0 max-w-0 ml-0 delay-0'
-                          : 'opacity-100 max-w-[180px] ml-3 delay-100'
-                      )}
-                    >
-                      {item.name}
-                    </span>
-                    {/* Badge rides the same fade as the label — a lone pill next
-                        to an icon in the collapsed rail reads as an error. */}
-                    {item.badge && (
-                      <span
-                        className={cn(
-                          'overflow-hidden whitespace-nowrap rounded-full bg-gray-200 px-1.5 text-[10px] font-semibold leading-4 text-gray-600 transition-all duration-200 ease-out dark:bg-[#2a2a2a] dark:text-zinc-400',
-                          collapsed
-                            ? 'ml-0 max-w-0 px-0 opacity-0 delay-0'
-                            : 'ml-auto max-w-[48px] opacity-100 delay-100',
-                        )}
-                      >
-                        {item.badge}
-                      </span>
-                    )}
-                    {collapsed && <NavTooltip label={item.name} side="right" />}
-                  </Link>
-                );
-              })}
+      {/* The nav scrolls on its own so the footer stays reachable at 200% zoom. */}
+      <nav aria-label="Primary" className="flex min-h-0 flex-auto flex-col gap-4 overflow-y-auto overflow-x-hidden p-2">
+        <div className="flex flex-col gap-0.5">
+          {groupHeader(WORKSPACE.title)}
+          {WORKSPACE.items.map(renderItem)}
+        </div>
+
+        {/* Project boundary */}
+        <div className="flex flex-col gap-0.5">
+          <div className={cn('h-px bg-gray-200 dark:bg-[#2a2a2a]', collapsed ? 'mx-2 mt-1' : 'mx-1 mt-1')} />
+          {!pid && !collapsed && (
+            <div className="px-3 pb-1 pt-3 text-[13px] leading-[18px] text-gray-500 dark:text-zinc-400">
+              No project selected.{' '}
+              <Link href="/projects" className="font-medium text-[#0a0a0a] underline underline-offset-2 dark:text-zinc-100">
+                Choose a project →
+              </Link>
             </div>
+          )}
+        </div>
+
+        {scoped.map(section => (
+          <div key={section.key} className="flex flex-col gap-0.5">
+            {groupHeader(section.title)}
+            {section.items.map(renderItem)}
           </div>
         ))}
       </nav>
-    </div>
+
+      <div className="mt-auto flex-shrink-0 border-t border-[#eef0f2] p-2 dark:border-[#1a1a1a]">
+        {collapsed ? (
+          <div className="flex justify-center py-1.5">
+            <span title={`${userName} · ${roleLine}`}
+              className="inline-flex h-6 w-6 items-center justify-center rounded-full bg-gray-200 text-[10px] font-semibold text-gray-700 dark:bg-[#2a2a2a] dark:text-zinc-300">
+              {initialsOf(userName || '?')}
+            </span>
+          </div>
+        ) : (
+          <div className="flex items-center gap-2.5 rounded-lg px-3 py-1.5">
+            <span aria-hidden
+              className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-gray-200 text-[10px] font-semibold text-gray-700 dark:bg-[#2a2a2a] dark:text-zinc-300">
+              {initialsOf(userName || '?')}
+            </span>
+            <span className="flex min-w-0 flex-1 flex-col">
+              <span className="truncate text-xs font-medium text-[#0a0a0a] dark:text-zinc-100">{userName}</span>
+              <span className="whitespace-nowrap text-[11px] text-gray-500 dark:text-zinc-500">{roleLine}</span>
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Tooltip via portal + fixed position so the scrolling nav never clips it. */}
+      {mounted && tip && createPortal(
+        <span role="tooltip"
+          style={{ left: tip.left, top: tip.top }}
+          className="pointer-events-none fixed z-[100] -translate-y-1/2 whitespace-nowrap rounded-md bg-[#111827] px-2 py-1 text-xs font-medium text-white shadow-[0_4px_12px_rgba(0,0,0,.15)]">
+          {tip.text}
+        </span>,
+        document.body,
+      )}
+    </aside>
   );
 }

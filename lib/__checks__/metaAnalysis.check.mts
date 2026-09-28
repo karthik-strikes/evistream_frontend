@@ -31,6 +31,9 @@ import {
   nullValue,
   numberNeededToTreat,
   poolingMethodsFor,
+  estimateTau2,
+  i2ConfidenceInterval,
+  MIN_PREDICTION,
   type MetaStudy,
   type BinaryArm,
   type ContinuousArm,
@@ -232,6 +235,9 @@ function cont(
     binary('B', 55, 100, 50, 100), // no real effect
     binary('C', 25, 100, 60, 100), // favours the comparator
     binary('D', 70, 100, 30, 100),
+    // A fifth study since Sep 2026: the prediction interval is suppressed below
+    // k = 5, and this section is about what a PI looks like when it exists.
+    binary('E', 60, 100, 45, 100),
   ];
   const rnd = runMetaAnalysis(scattered, 'RR', 'random');
   const fix = runMetaAnalysis(scattered, 'RR', 'fixed');
@@ -458,18 +464,21 @@ function cont(
     binary('F', 35, 100, 25, 100),
   ];
 
-  for (const k of [3, 4, 6]) {
+  // Sep 2026: k = 3 and 4 moved from "has a PI on t_{k-2}" to "PI suppressed"
+  // (section 30). The t_{k-2} rule is still pinned here at k = 5 and 6.
+  for (const k of [5, 6]) {
     const r = runMetaAnalysis(spread.slice(0, k), 'RR', 'random');
-    check(`k = ${k}: prediction df is k - 2`, r.prediction!.df === k - 2, String(r.prediction!.df));
-    close(`k = ${k}: prediction t is the table value`, r.prediction!.t, studentTCritical(k - 2), 1e-9);
-    check(`k = ${k}: prediction t exceeds 1.96`, r.prediction!.t > 1.96, String(r.prediction!.t));
+    check(`k = ${k}: prediction df is k - 2`, r.prediction?.df === k - 2, String(r.prediction?.df));
+    close(`k = ${k}: prediction t is the table value`, r.prediction?.t ?? NaN, studentTCritical(k - 2), 1e-9);
+    check(`k = ${k}: prediction t exceeds 1.96`, (r.prediction?.t ?? 0) > 1.96, String(r.prediction?.t));
   }
+  close('k = 5: prediction t is t(3) = 3.1824', runMetaAnalysis(spread.slice(0, 5), 'RR', 'random').prediction?.t ?? NaN, 3.1824, 5e-4);
 
   // The multiplier shrinks toward z as studies accumulate — the interval must
   // not be uniformly inflated, only inflated where tau2 is poorly pinned down.
-  const four = runMetaAnalysis(spread.slice(0, 4), 'RR', 'random');
+  const four = runMetaAnalysis(spread.slice(0, 5), 'RR', 'random');
   const six = runMetaAnalysis(spread, 'RR', 'random');
-  check('the prediction multiplier falls as k rises', six.prediction!.t < four.prediction!.t);
+  check('the prediction multiplier falls as k rises', (six.prediction?.t ?? Infinity) < (four.prediction?.t ?? 0));
 
   // And the whole interval still has to contain the pooled estimate.
   check(
@@ -1102,6 +1111,180 @@ function cont(
   check('too small a sample is named',
     bad.notEstimable.some(n => n.study.key === 'B' && n.reason === 'sample_too_small'));
   check('and the usable ones are below the pooling floor', bad.pooled === null);
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 27. tau² estimators: DL, REML, Paule–Mandel on metafor's dat.bcg (log RR)
+//     Reference values from metafor's documentation for rma(yi, vi, data = dat)
+//     with method = "DL" / "REML" / "PM": tau² = 0.3088 / 0.3132 / 0.3181, and
+//     the REML pool mu = −0.7145 (SE 0.1798). Cross-checked to 1e-9 against an
+//     INDEPENDENT Python implementation (REML by bounded scalar maximisation of
+//     the restricted log-likelihood — not Fisher scoring — and PM by brentq):
+//       DL 0.30876026286, REML 0.31324325267, PM 0.31806845221
+//       mu: DL −0.71411722207, REML −0.71453234166, PM −0.71496815349
+//       Q = 152.2330080824 on 12 df.
+// ─────────────────────────────────────────────────────────────────────────────
+const BCG: Array<[number, number, number, number]> = [
+  [4, 119, 11, 128], [6, 300, 29, 274], [3, 228, 11, 209], [62, 13536, 248, 12619],
+  [33, 5036, 47, 5761], [180, 1361, 372, 1079], [8, 2537, 10, 619], [505, 87886, 499, 87892],
+  [29, 7470, 45, 7232], [17, 1699, 65, 1600], [186, 50448, 141, 27197], [5, 2493, 3, 2338],
+  [27, 16886, 29, 17825],
+];
+const bcg = BCG.map(([tp, tn, cp, cn], i) => binary(`T${i + 1}`, tp, tp + tn, cp, cp + cn));
+{
+  const dl = runMetaAnalysis(bcg, 'RR', 'random');
+  const reml = runMetaAnalysis(bcg, 'RR', 'random', { tau2Method: 'reml' });
+  const pm = runMetaAnalysis(bcg, 'RR', 'random', { tau2Method: 'pm' });
+
+  check('the default estimator is DL', dl.tau2Method === 'dl');
+  check('REML is recorded on the result', reml.tau2Method === 'reml');
+  check('PM is recorded on the result', pm.tau2Method === 'pm');
+  check('REML converged', reml.tau2Converged === true);
+
+  close('bcg Q', dl.heterogeneity!.q, 152.2330080824, 1e-7);
+  close('bcg DL tau² = 0.3088 (metafor)', dl.heterogeneity!.tau2, 0.3088, 5e-5);
+  close('bcg REML tau² = 0.3132 (metafor)', reml.heterogeneity!.tau2, 0.3132, 5e-5);
+  close('bcg PM tau² = 0.3181 (metafor)', pm.heterogeneity!.tau2, 0.3181, 5e-5);
+  close('bcg DL tau² vs independent impl', dl.heterogeneity!.tau2, 0.30876026286, 1e-9);
+  close('bcg REML tau² vs independent impl', reml.heterogeneity!.tau2, 0.31324325267, 1e-8);
+  close('bcg PM tau² vs independent impl', pm.heterogeneity!.tau2, 0.31806845221, 1e-9);
+  close('bcg REML mu = −0.7145 (metafor)', reml.pooled!.mu, -0.7145, 5e-5);
+  close('bcg REML SE = 0.1798 (metafor)', reml.pooled!.se, 0.1798, 5e-5);
+  close('bcg PM mu vs independent impl', pm.pooled!.mu, -0.71496815349, 1e-8);
+
+  // Q and I² come from the fixed-effect pass, so they do not depend on the estimator.
+  check('Q is the same under every estimator',
+    dl.heterogeneity!.q === reml.heterogeneity!.q && dl.heterogeneity!.q === pm.heterogeneity!.q);
+
+  // The estimator must reach the weights, not only the label.
+  check('REML moves the pooled estimate', Math.abs(reml.pooled!.mu - dl.pooled!.mu) > 1e-5);
+  const wSum = (r: typeof reml) => r.studies.reduce((a, st) => a + st.weightPct, 0);
+  close('REML weights sum to 100', wSum(reml), 100, 1e-9);
+  close('PM weights sum to 100', wSum(pm), 100, 1e-9);
+
+  // Fixed effect never estimates tau², whatever was asked for.
+  const fixedReml = runMetaAnalysis(bcg, 'RR', 'fixed', { tau2Method: 'reml' });
+  check('a fixed-effect pool has tau² = 0 even when REML is requested', fixedReml.heterogeneity!.tau2 === 0);
+
+  // estimateTau2 on its own.
+  const y = [-0.5, 0.4, 0.1, 0.9];
+  const v = [0.05, 0.06, 0.04, 0.1];
+  close('k=4 DL tau² vs independent impl', estimateTau2(y, v, 'dl').tau2, 0.23200892857, 1e-9);
+  close('k=4 REML tau² vs independent impl', estimateTau2(y, v, 'reml').tau2, 0.26165206991, 1e-8);
+  close('k=4 PM tau² vs independent impl', estimateTau2(y, v, 'pm').tau2, 0.27102554285, 1e-9);
+
+  // Homogeneous: Q below df ⇒ every estimator truncates at exactly zero.
+  const yh = [0.1, 0.3, -0.05, 0.2, 0.15];
+  const vh = [0.04, 0.09, 0.05, 0.06, 0.08];
+  for (const m of ['dl', 'reml', 'pm'] as const) {
+    check(`${m} truncates at zero when Q < df`, estimateTau2(yh, vh, m).tau2 === 0,
+      String(estimateTau2(yh, vh, m).tau2));
+  }
+
+  // Identical studies: nothing to estimate.
+  const same = [binary('A', 20, 100, 30, 100), binary('B', 20, 100, 30, 100), binary('C', 20, 100, 30, 100)];
+  for (const m of ['reml', 'pm'] as const) {
+    check(`${m}: identical studies give tau² = 0`,
+      runMetaAnalysis(same, 'RR', 'random', { tau2Method: m }).heterogeneity!.tau2 === 0);
+  }
+
+  // Subgroups and leave-one-out now take the estimator too (checked in diagnostics.check.mts).
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 28. I² confidence interval — Higgins & Thompson (2002), test-based
+//     bcg: Q = 152.233, k = 13 > so B = ½(ln Q − ln 12)/(√(2Q) − √23)
+//          = 0.10039045825; I² 95% CI 88.31629 to 94.68181 (independent impl).
+//     Q ≤ k branch: B = √(1/(2(k−2)(1 − 1/(3(k−2)²)))).
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const r = runMetaAnalysis(bcg, 'RR', 'random');
+  const h = r.heterogeneity!;
+  close('bcg I² = 92.12%', h.i2, 92.117346855, 1e-6);
+  close('bcg I² lower = 88.32%', h.i2Lo ?? NaN, 88.316294987, 1e-6);
+  close('bcg I² upper = 94.68%', h.i2Hi ?? NaN, 94.681805083, 1e-6);
+  check('the I² interval brackets I²', (h.i2Lo ?? Infinity) <= h.i2 && h.i2 <= (h.i2Hi ?? -Infinity));
+
+  // Hand check of the Q > k branch at a round number: Q = 30, k = 6.
+  // df = 5, Q/df = 6, so H = √6 and ln H = ½ ln 6 = 0.895880.
+  // B = ½(ln 30 − ln 5)/(√60 − √9) = 0.895880/4.745967 = 0.188766.
+  // Lower: ln H − 1.96B = 0.895880 − 0.369981 = 0.525899 → H = 1.69199,
+  // H² = 2.86284, I² = 1 − 1/2.86284 = 65.069%.
+  const B = 0.5 * Math.log(6) / (Math.sqrt(60) - 3);
+  const hLo = Math.exp(0.5 * Math.log(6) - 1.96 * B);
+  const hHi = Math.exp(0.5 * Math.log(6) + 1.96 * B);
+  const ci30 = i2ConfidenceInterval(30, 6)!;
+  close('Q=30,k=6 lower', ci30.lo, (1 - 1 / (hLo * hLo)) * 100, 1e-9);
+  close('Q=30,k=6 upper', ci30.hi, (1 - 1 / (hHi * hHi)) * 100, 1e-9);
+  close('Q=30,k=6 lower ≈ 65.069% (worked by hand above)', ci30.lo, 65.069, 1e-3);
+
+  // Q ≤ k branch (homogeneous k = 5, Q = 1.0655): lower floors at 0, upper 26.505%.
+  const lo = i2ConfidenceInterval(1.0654858849077091, 5)!;
+  check('Q ≤ k: lower bound floors at 0', lo.lo === 0, String(lo.lo));
+  close('Q ≤ k: upper bound = 26.505% (independent impl)', lo.hi, 26.505171358, 1e-6);
+  // Q between df and k uses the k−2 branch too: k = 4, Q = 3.5 (> 3, ≤ 4).
+  const mid = i2ConfidenceInterval(3.5, 4)!;
+  const Bm = Math.sqrt(1 / (2 * 2 * (1 - 1 / (3 * 4))));
+  const Hm = Math.sqrt(3.5 / 3);
+  close('df < Q ≤ k uses the k−2 variance', mid.hi, (1 - 1 / (Hm * Math.exp(1.96 * Bm)) ** 2) * 100, 1e-9);
+
+  check('k = 2 with Q ≤ k has no interval', i2ConfidenceInterval(1, 2) === null);
+  check('k = 2 with Q > k has one', i2ConfidenceInterval(9, 2) !== null);
+  check('k = 1 has none', i2ConfidenceInterval(0, 1) === null);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 29. Hartung–Knapp p-value: t on k − 1, not z
+//     bcg (DL): p = 0.0019207668 (independent impl, scipy t.sf); z would give
+//     a far smaller p.
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const r = runMetaAnalysis(bcg, 'RR', 'random', { ciMethod: 'hk' });
+  check('ciMethod is recorded', r.ciMethod === 'hk');
+  check('ciMethod defaults to z', runMetaAnalysis(bcg, 'RR', 'random').ciMethod === 'z');
+  close('bcg HK p = 0.0019208 (t on 12 df)', r.hksj!.p, 0.0019207668, 1e-9);
+  close('bcg HK lower (log) = −1.10782', Math.log(r.hksj!.lo), -1.1078213542, 1e-8);
+  const zP = normalTwoSidedP(r.pooled!.mu / r.hksj!.se);
+  check('the HK p is larger than the same statistic on z', r.hksj!.p > zP, `${r.hksj!.p} vs ${zP}`);
+  close('HK p is the t tail of mu/se_hk', r.hksj!.p, studentTTwoSidedP(r.pooled!.mu / r.hksj!.se, 12), 1e-12);
+  // 'hk' changes what is recorded, never the z interval callers already read.
+  const z = runMetaAnalysis(bcg, 'RR', 'random');
+  check('pooled stays the z interval under ciMethod=hk',
+    z.pooled!.lo === r.pooled!.lo && z.pooled!.hi === r.pooled!.hi);
+  const reml = runMetaAnalysis(bcg, 'RR', 'random', { tau2Method: 'reml', ciMethod: 'hk' });
+  close('bcg HK p under REML (independent impl)', reml.hksj!.p, 0.0019200151, 1e-9);
+  // A proportion has no null; there is no HK test to report.
+  const prop = runMetaAnalysis([
+    { key: 'a', label: 'a', documentId: 'a', proportion: { events: 3, total: 50 } },
+    { key: 'b', label: 'b', documentId: 'b', proportion: { events: 9, total: 40 } },
+    { key: 'c', label: 'c', documentId: 'c', proportion: { events: 8, total: 60 } },
+  ] as MetaStudy[], 'PROP', 'random', { proportionMethod: 'logit' });
+  check('a proportion reports no HK p', prop.hksj === null || Number.isNaN(prop.hksj.p));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 30. Prediction interval suppressed below k = 5
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const spread = [
+    binary('A', 20, 100, 30, 100), binary('B', 23, 100, 29, 100), binary('C', 26, 100, 28, 100),
+    binary('D', 29, 100, 27, 100), binary('E', 32, 100, 26, 100),
+  ];
+  check('MIN_PREDICTION is 5', MIN_PREDICTION === 5);
+  for (const k of [3, 4]) {
+    const r = runMetaAnalysis(spread.slice(0, k), 'RR', 'random');
+    check(`k = ${k}: no prediction interval`, r.prediction === null);
+    check(`k = ${k}: the reason is stated`, r.predictionSuppressed === `k = ${k} < 5`, String(r.predictionSuppressed));
+    check(`k = ${k}: the pooled estimate is still there`, r.pooled !== null);
+  }
+  const five = runMetaAnalysis(spread, 'RR', 'random');
+  check('k = 5: the prediction interval is reported', five.prediction !== null);
+  check('k = 5: nothing suppressed', five.predictionSuppressed === null);
+  // Fixed effect never had a PI, so nothing was "suppressed".
+  check('fixed effect: no suppression reason', runMetaAnalysis(spread.slice(0, 3), 'RR', 'fixed').predictionSuppressed === null);
+  // Below the pooling floor there is no pool to predict from, so no reason either.
+  check('below MIN_POOLABLE: no suppression reason', runMetaAnalysis(spread.slice(0, 2), 'RR', 'random').predictionSuppressed === null);
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

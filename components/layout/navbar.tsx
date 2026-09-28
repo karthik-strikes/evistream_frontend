@@ -51,7 +51,7 @@ export function Navbar({ title, description }: NavbarProps) {
     authService.logout();
   };
 
-  const isDashboardOrProjects = pathname === '/dashboard' || pathname === '/projects';
+  const isDashboardOrProjects = pathname === '/dashboard' || pathname === '/projects' || pathname.startsWith('/projects/');
 
   return (
     <>
@@ -76,9 +76,11 @@ export function Navbar({ title, description }: NavbarProps) {
             <div className="flex-1" />
           )}
 
-          {/* Center: Dashboard + Projects tabs (only on dashboard/projects pages) */}
+          {/* Center: Home + Projects tabs (only on dashboard/projects pages). Absolute-
+              centred only when there is room; on a phone they flow between the
+              spacer and the selector instead of sitting on top of it. */}
           {isDashboardOrProjects && (
-            <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-0.5">
+            <div className="flex shrink-0 items-center gap-0.5 sm:absolute sm:left-1/2 sm:-translate-x-1/2">
               <Link
                 href="/dashboard"
                 className={cn(
@@ -88,7 +90,7 @@ export function Navbar({ title, description }: NavbarProps) {
                     : "font-medium text-gray-400 dark:text-gray-500 hover:text-gray-700 dark:hover:text-gray-300"
                 )}
               >
-                Dashboard
+                Home
               </Link>
               <Link
                 href="/projects"

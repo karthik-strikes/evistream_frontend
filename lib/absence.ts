@@ -252,7 +252,8 @@ export function compareKey(cell: any, options?: string[] | null): string | null 
   return valueKey(value);
 }
 
-function valueKey(value: any): string {
+/** Canonical token for a substantive value (mirrors absence._value_key). */
+export function valueKey(value: any): string {
   if (value === null || value === undefined) return '';
   if (typeof value === 'boolean') return value ? 'true' : 'false';
   if (typeof value === 'number') return String(value);

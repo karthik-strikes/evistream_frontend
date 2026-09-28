@@ -19,7 +19,9 @@
  *     comparison" and "appeared in the plot".
  */
 
-import { chiSquareUpperP, normalTwoSidedP, studentTCritical } from './distributions';
+import {
+  chiSquareUpperP, normalTwoSidedP, studentTCritical, studentTTwoSidedP,
+} from './distributions';
 import {
   correlationEffectAndSE, correlationInverse, fitProportionGlmm, proportionEffectAndSE,
   proportionInverse, wilsonCI, type ProportionMethod,
@@ -71,6 +73,43 @@ export const MODEL_LABEL: Record<PoolingModel, string> = {
   mh: 'Fixed effect (Mantel–Haenszel)',
   peto: "Fixed effect (Peto's odds ratio)",
 };
+
+/**
+ * How the between-study variance is estimated under random effects.
+ *
+ *  - `dl`   DerSimonian–Laird (1986): closed-form method of moments. The historic
+ *           default, and the one every check in this repo was first pinned on.
+ *  - `reml` Restricted maximum likelihood, by Fisher scoring. The estimator the
+ *           Cochrane Handbook (v6.3+) and metafor default to.
+ *  - `pm`   Paule–Mandel (1982): the tau² at which the generalised Q equals its
+ *           expectation, k − 1.
+ *
+ * All three are truncated at zero. The choice is recorded on the result so a run
+ * can say which estimator produced its numbers.
+ */
+export type Tau2Method = 'dl' | 'reml' | 'pm';
+
+export const TAU2_LABEL: Record<Tau2Method, string> = {
+  dl: 'DerSimonian–Laird',
+  reml: 'REML',
+  pm: 'Paule–Mandel',
+};
+
+/** The model's full name, with the tau² estimator a random-effects pool used. */
+export function modelLabel(model: PoolingModel, tau2Method: Tau2Method = 'dl'): string {
+  if (model !== 'random') return MODEL_LABEL[model];
+  return `Random effects (${TAU2_LABEL[tau2Method]})`;
+}
+
+/** Confidence-interval method for the pooled estimate: z (Wald) or Hartung–Knapp. */
+export type CiMethod = 'z' | 'hk';
+
+/**
+ * Below this many studies the prediction interval is not reported. With k − 2
+ * degrees of freedom its t multiplier is 12.7 at k = 3 and 4.3 at k = 4, so the
+ * interval is almost entirely the multiplier rather than the data.
+ */
+export const MIN_PREDICTION = 5;
 
 export const MODEL_SHORT: Record<PoolingModel, string> = {
   random: 'Random effects',
@@ -191,6 +230,32 @@ export interface PrecomputedEffect {
   };
 }
 
+/**
+ * One conversion applied to a study's numbers before pooling — an SE turned into
+ * an SD, a median and IQR turned into a mean and SD, a cluster design effect.
+ * Carried so the Harmonization tab (and the transformation record behind it) can
+ * say exactly what was assumed. Built by `_lib/buildStudies.ts`; never read by
+ * the math here.
+ */
+export type ConversionKind =
+  | 'se_to_sd' | 'ci_to_sd' | 'median_iqr_wan' | 'median_range_wan'
+  | 'iqr_width' | 'range_width' | 'median_as_mean'
+  /** Cluster design effect: n_eff = n / (1 + (m − 1)·ICC). Its own record, never merged with a multi-arm split. */
+  | 'design_effect';
+
+export interface ConversionRecord {
+  kind: ConversionKind;
+  /** The formula as applied, e.g. "SD = √n × (upper − lower) / (2 × t₂₄)". */
+  formula: string;
+  assumptions: string[];
+  /** Citation for the method, e.g. "Wan et al. 2014, BMC Med Res Methodol 14:135". */
+  method_ref: string;
+  /** The numbers that went in, by name. */
+  inputs: Record<string, number>;
+  /** Which arm it applied to; absent when it applied to the whole study. */
+  arm?: 'treatment' | 'comparator';
+}
+
 interface MetaStudyCommon {
   /** Stable identity for React keys and hover state. */
   key: string;
@@ -205,6 +270,13 @@ interface MetaStudyCommon {
   flipSign?: boolean;
   /** Free-form passthrough the evidence drawer reads; never used in the math. */
   evidence?: Record<string, unknown>;
+  /** Conversions applied while building this study. Passed through, never used in the math. */
+  conversions?: ConversionRecord[];
+  /**
+   * Arm sizes as randomised, when a cluster design effect replaced them with
+   * effective sizes in the arms. The arms hold the effective n the math uses.
+   */
+  nRandomised?: { treatment: number; comparator: number };
 }
 
 /** A study whose arms were extracted, so any arm-based measure can be derived. */
@@ -304,6 +376,11 @@ export interface StudyEffect {
   weightPct: number;
   /** 0.5 was added to every cell because this study had a zero cell. */
   corrected: boolean;
+  conversions?: ConversionRecord[];
+  /** Effective arm sizes (as pooled) when a cluster design effect was applied. */
+  nEffective?: { treatment: number; comparator: number };
+  /** Arm sizes as randomised, beside `nEffective`. */
+  nRandomised?: { treatment: number; comparator: number };
 }
 
 export interface NotEstimableStudy {
@@ -327,6 +404,18 @@ export interface MetaResult {
    */
   prediction: { lo: number; hi: number; df: number; t: number } | null;
   /**
+   * Why a prediction interval that the model would otherwise report is withheld —
+   * "k = 4 < 5" — or null when nothing was suppressed (including when no interval
+   * applies at all, e.g. under a fixed-effect model).
+   */
+  predictionSuppressed: string | null;
+  /** The tau² estimator used. Recorded even for a fixed-effect pool, where tau² is 0. */
+  tau2Method: Tau2Method;
+  /** False only when REML hit its iteration cap without converging (tau² is the last iterate). */
+  tau2Converged: boolean;
+  /** The CI method the caller asked to read. `pooled` is always the z interval; `hksj` the HK one. */
+  ciMethod: CiMethod;
+  /**
    * Hartung–Knapp–Sidik–Jonkman interval for the same pooled estimate.
    *
    * Random-effects only, and never a replacement for `pooled`: it is the same
@@ -347,18 +436,36 @@ export interface MetaResult {
     df: number;
     /** True when this interval is narrower than the standard one (q well below 1). */
     narrower: boolean;
+    /**
+     * Two-sided p for mu / se on t with k − 1 df — the HK test of the pooled
+     * effect. NaN for a measure with no null (a proportion).
+     */
+    p: number;
   } | null;
   heterogeneity: {
     q: number;
     df: number;
     p: number;
+    /** Percent, from Q: max(0, (Q − df) / Q) · 100 — independent of the tau² estimator. */
     i2: number;
+    /**
+     * 95% interval for I², percent, by the Higgins & Thompson (2002) test-based
+     * method on ln H. Null when it is undefined (k = 2 with Q ≤ k).
+     */
+    i2Lo: number | null;
+    i2Hi: number | null;
     tau2: number;
+    /** Kept for compatibility; the UI no longer shows it. */
     label: HeterogeneityLabel;
   } | null;
   overallEffect: { z: number; p: number } | null;
-  /** Column totals for the "Total (95% CI)" row. */
+  /** Column totals for the "Total (95% CI)" row. Effective n when a design effect applied. */
   totals: { treatment: string; comparator: string };
+  /**
+   * Randomised-n totals, present only when at least one study's arms were
+   * reduced by a cluster design effect — the forest totals then show both.
+   */
+  totalsRandomised: { treatment: string; comparator: string } | null;
   correctedCount: number;
   /**
    * Set when the requested pooling method cannot be computed for this measure or
@@ -622,7 +729,7 @@ function armTotals(studies: StudyEffect[]): { treatment: string; comparator: str
     const sum = (pick: (s: StudyEffect) => BinaryArm) => {
       const e = studies.reduce((a, s) => a + pick(s).events, 0);
       const n = studies.reduce((a, s) => a + pick(s).total, 0);
-      return `${e}/${n}`;
+      return `${roundCount(e)}/${roundCount(n)}`;
     };
     return {
       treatment: sum(s => s.treatment as BinaryArm),
@@ -630,11 +737,36 @@ function armTotals(studies: StudyEffect[]): { treatment: string; comparator: str
     };
   }
   const total = (pick: (s: StudyEffect) => ContinuousArm) =>
-    String(studies.reduce((a, s) => a + pick(s).n, 0));
+    String(roundCount(studies.reduce((a, s) => a + pick(s).n, 0)));
   return {
     treatment: total(s => s.treatment as ContinuousArm),
     comparator: total(s => s.comparator as ContinuousArm),
   };
+}
+
+/** n per arm as the math sees it (effective n after any design effect). */
+function armSizes(s: MetaStudy): { treatment: number; comparator: number } | null {
+  if (!s.treatment || !s.comparator) return null;
+  const n = (a: Arm) => (isBinaryArm(a) ? a.total : a.n);
+  return { treatment: n(s.treatment), comparator: n(s.comparator) };
+}
+
+/**
+ * Totals of randomised n, when any study carried a design effect. Studies without
+ * one contribute their arms unchanged (their randomised n is their effective n).
+ */
+function randomisedTotals(studies: StudyEffect[]): { treatment: string; comparator: string } | null {
+  if (!studies.some(s => s.nRandomised)) return null;
+  if (studies.some(s => !s.treatment || !s.comparator)) return null;
+  const n = (a: Arm) => (isBinaryArm(a) ? a.total : a.n);
+  const t = studies.reduce((a, s) => a + (s.nRandomised?.treatment ?? n(s.treatment!)), 0);
+  const c = studies.reduce((a, s) => a + (s.nRandomised?.comparator ?? n(s.comparator!)), 0);
+  return { treatment: String(roundCount(t)), comparator: String(roundCount(c)) };
+}
+
+/** Effective counts can be fractional; print them to one decimal, integers as-is. */
+function roundCount(v: number): number {
+  return Number.isInteger(v) ? v : Number(v.toFixed(1));
 }
 
 interface CountStudy {
@@ -829,6 +961,111 @@ export interface MetaOptions {
    * Defaults to the one-stage GLMM, which needs no continuity correction.
    */
   proportionMethod?: ProportionMethod;
+  /** tau² estimator under random effects. Defaults to DerSimonian–Laird. */
+  tau2Method?: Tau2Method;
+  /**
+   * Which interval the caller reads as primary. Defaults to 'z'. Choosing 'hk'
+   * changes nothing numerically — `pooled` stays the z interval and `hksj` is
+   * computed either way — it is recorded so the run and its figure can say
+   * which one was reported.
+   */
+  ciMethod?: CiMethod;
+}
+
+/**
+ * Between-study variance by the chosen estimator, truncated at zero.
+ *
+ * REML is Fisher scoring on the restricted likelihood, started from the DL
+ * estimate: score = ½[Σw²(y−μ)² − tr P], information = ½ tr(P²), with
+ * P = W − wwᵀ/Σw, so tr P = Σw − Σw²/Σw and
+ * tr P² = Σw² − 2Σw³/Σw + (Σw²/Σw)². Converged when a step moves tau² by less
+ * than 1e-10; capped at 100 iterations.
+ *
+ * Paule–Mandel solves Σw(τ²)(y − μ(τ²))² = k − 1. The left side falls
+ * monotonically in τ², so it is bracketed and bisected; when Q at τ² = 0 is
+ * already at or below k − 1 the answer is 0.
+ */
+export function estimateTau2(
+  y: number[],
+  v: number[],
+  method: Tau2Method,
+): { tau2: number; iterations: number; converged: boolean } {
+  const k = y.length;
+  const df = k - 1;
+  if (k < 2 || v.length !== k) return { tau2: 0, iterations: 0, converged: true };
+
+  const moments = (t2: number) => {
+    const w = v.map(vi => 1 / (vi + t2));
+    const sw = w.reduce((a, x) => a + x, 0);
+    const mu = w.reduce((a, wi, i) => a + wi * y[i], 0) / sw;
+    return { w, sw, mu };
+  };
+
+  const fe = moments(0);
+  const q0 = fe.w.reduce((a, wi, i) => a + wi * (y[i] - fe.mu) ** 2, 0);
+  const c = fe.sw - fe.w.reduce((a, wi) => a + wi * wi, 0) / fe.sw;
+  const dl = c > 0 ? Math.max(0, (q0 - df) / c) : 0;
+  if (method === 'dl') return { tau2: dl, iterations: 0, converged: true };
+
+  if (method === 'pm') {
+    const qGen = (t2: number) => {
+      const { w, mu } = moments(t2);
+      return w.reduce((a, wi, i) => a + wi * (y[i] - mu) ** 2, 0);
+    };
+    if (!(q0 > df)) return { tau2: 0, iterations: 0, converged: true };
+    let lo = 0;
+    let hi = Math.max(dl, 1e-4);
+    let it = 0;
+    while (qGen(hi) > df && it < 200) { lo = hi; hi *= 2; it++; }
+    if (qGen(hi) > df) return { tau2: hi, iterations: it, converged: false };
+    for (let j = 0; j < 400; j++) {
+      const mid = (lo + hi) / 2;
+      if (qGen(mid) > df) lo = mid; else hi = mid;
+      it++;
+      if (hi - lo < 1e-13 * Math.max(1, hi)) break;
+    }
+    return { tau2: (lo + hi) / 2, iterations: it, converged: true };
+  }
+
+  // REML, Fisher scoring.
+  let t2 = dl;
+  for (let it = 1; it <= 100; it++) {
+    const { w, sw, mu } = moments(t2);
+    const sw2 = w.reduce((a, wi) => a + wi * wi, 0);
+    const sw3 = w.reduce((a, wi) => a + wi * wi * wi, 0);
+    const swr2 = w.reduce((a, wi, i) => a + wi * wi * (y[i] - mu) ** 2, 0);
+    const score = 0.5 * (swr2 - (sw - sw2 / sw));
+    const info = 0.5 * (sw2 - (2 * sw3) / sw + (sw2 / sw) ** 2);
+    if (!(info > 0) || !Number.isFinite(score)) return { tau2: t2, iterations: it, converged: false };
+    const next = Math.max(0, t2 + score / info);
+    if (Math.abs(next - t2) < 1e-10) return { tau2: next, iterations: it, converged: true };
+    t2 = next;
+  }
+  return { tau2: t2, iterations: 100, converged: false };
+}
+
+/**
+ * Higgins & Thompson (2002) test-based 95% interval for I², in percent.
+ *
+ * H = √(Q/df). SE(ln H) is B = ½(ln Q − ln df)/(√(2Q) − √(2k − 3)) when Q > k,
+ * else B = √(1 / (2(k − 2)(1 − 1/(3(k − 2)²)))). The H interval
+ * exp(ln H ± 1.96·B) maps to I² = (H² − 1)/H², each bound floored at zero.
+ */
+export function i2ConfidenceInterval(q: number, k: number): { lo: number; hi: number } | null {
+  const df = k - 1;
+  if (!(df >= 1) || !Number.isFinite(q) || q < 0) return null;
+  let b: number;
+  if (q > k) {
+    b = (0.5 * (Math.log(q) - Math.log(df))) / (Math.sqrt(2 * q) - Math.sqrt(2 * k - 3));
+  } else {
+    if (k <= 2) return null;
+    b = Math.sqrt(1 / (2 * (k - 2) * (1 - 1 / (3 * (k - 2) ** 2))));
+  }
+  if (!Number.isFinite(b) || b <= 0) return null;
+  // q = 0 makes ln H = −∞; every I² bound below the floor is 0 there.
+  const lnH = q > 0 ? 0.5 * Math.log(q / df) : -Infinity;
+  const toI2 = (h: number) => (Number.isFinite(h) && h > 0 ? Math.max(0, (h * h - 1) / (h * h)) * 100 : 0);
+  return { lo: toI2(Math.exp(lnH - 1.96 * b)), hi: toI2(Math.exp(lnH + 1.96 * b)) };
 }
 
 export function runMetaAnalysis(
@@ -841,6 +1078,8 @@ export function runMetaAnalysis(
   const notEstimable: NotEstimableStudy[] = [];
 
   const proportionMethod: ProportionMethod = options.proportionMethod ?? 'glmm';
+  const tau2Method: Tau2Method = options.tau2Method ?? 'dl';
+  const ciMethod: CiMethod = options.ciMethod ?? 'z';
 
   for (const study of input) {
     const eff = effectOf(study, measure, proportionMethod);
@@ -868,11 +1107,13 @@ export function runMetaAnalysis(
   const q = k > 0 ? usable.reduce((a, u, i) => a + wFixed[i] * (u.eff.y - yFixed) ** 2, 0) : 0;
   const df = k - 1;
 
-  // DerSimonian–Laird between-study variance.
+  // Between-study variance, by the chosen estimator (DerSimonian–Laird by default).
   let tau2 = 0;
+  let tau2Converged = true;
   if (model === 'random' && df > 0) {
-    const c = swFixed - wFixed.reduce((a, w) => a + w * w, 0) / swFixed;
-    tau2 = c > 0 ? Math.max(0, (q - df) / c) : 0;
+    const est = estimateTau2(usable.map(u => u.eff.y), usable.map(u => u.eff.v), tau2Method);
+    tau2 = est.tau2;
+    tau2Converged = est.converged;
   }
 
   // Inverse-variance weights, which are also the fallback for everything the
@@ -986,6 +1227,10 @@ export function runMetaAnalysis(
       proportion: u.study.proportion,
       correlation: u.study.correlation,
       evidence: u.study.evidence,
+      ...(u.study.conversions ? { conversions: u.study.conversions } : {}),
+      ...(u.study.nRandomised
+        ? { nRandomised: u.study.nRandomised, nEffective: armSizes(u.study) ?? undefined }
+        : {}),
       y: u.eff.y,
       v: u.eff.v,
       est: wilson && u.study.proportion
@@ -1015,11 +1260,18 @@ export function runMetaAnalysis(
   // not decoration — tau2 was estimated from these same k studies, and pretending
   // it is known (z = 1.96) makes the interval too narrow by 18% at k = 10 and by
   // more than a factor of 2 at k = 4, which is inside the range this screen pools.
+  //
+  // Below MIN_PREDICTION studies the interval is withheld with its reason: at
+  // k = 3 the multiplier is t_1 = 12.7, and what is drawn is the multiplier.
   const piDf = k - 2;
   const piT = studentTCritical(piDf);
   const tau2ForPrediction = usingGlmm ? glmmFit!.tau2 : tau2;
+  const predictionApplies = poolable && model === 'random' && df > 0 && Number.isFinite(piT);
+  const predictionSuppressed = predictionApplies && k < MIN_PREDICTION
+    ? `k = ${k} < ${MIN_PREDICTION}`
+    : null;
   const prediction =
-    poolable && model === 'random' && df > 0 && Number.isFinite(piT)
+    predictionApplies && !predictionSuppressed
       ? {
           lo: toDisplay(mu - piT * Math.sqrt(tau2ForPrediction + se * se)),
           hi: toDisplay(mu + piT * Math.sqrt(tau2ForPrediction + se * se)),
@@ -1057,14 +1309,21 @@ export function runMetaAnalysis(
         t: hksjT,
         df: hksjDf,
         narrower: hksjT * seHk < 1.96 * se,
+        p: hasNullValue(measure) ? studentTTwoSidedP(mu / seHk, hksjDf) : NaN,
       };
     }
   }
 
   const i2 = df > 0 && q > 0 ? Math.max(0, ((q - df) / q) * 100) : 0;
+  const i2Ci = i2ConfidenceInterval(q, k);
   const heterogeneity =
     poolable && df > 0 && !usingGlmm
-      ? { q, df, p: chiSquareUpperP(q, df), i2, tau2, label: heterogeneityLabel(i2) }
+      ? {
+          q, df, p: chiSquareUpperP(q, df), i2,
+          i2Lo: i2Ci ? i2Ci.lo : null,
+          i2Hi: i2Ci ? i2Ci.hi : null,
+          tau2, label: heterogeneityLabel(i2),
+        }
       : null;
 
   /**
@@ -1139,6 +1398,10 @@ export function runMetaAnalysis(
     notEstimable,
     pooled,
     prediction,
+    predictionSuppressed,
+    tau2Method,
+    tau2Converged,
+    ciMethod,
     hksj,
     poolingMethodRefusal,
     sparseDataWarning,
@@ -1148,6 +1411,7 @@ export function runMetaAnalysis(
     heterogeneity,
     overallEffect,
     totals: armTotals(studies),
+    totalsRandomised: randomisedTotals(studies),
     correctedCount: studies.filter(s => s.corrected).length,
   };
 }
@@ -1284,7 +1548,9 @@ function short(v: number): string {
 /** One arm as the plot's data column shows it. */
 export function armCellText(arm?: Arm): string {
   if (!arm) return '—';
-  return isBinaryArm(arm) ? `${arm.events}/${arm.total}` : String(arm.n);
+  return isBinaryArm(arm)
+    ? `${roundCount(arm.events)}/${roundCount(arm.total)}`
+    : String(roundCount(arm.n));
 }
 
 /**

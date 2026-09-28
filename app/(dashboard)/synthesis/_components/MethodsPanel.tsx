@@ -3,7 +3,7 @@
 import { useEffect, useState } from 'react';
 import 'katex/dist/katex.min.css';
 
-import { MODEL_LABEL, type MetaResult } from '@/lib/metaAnalysis';
+import { modelLabel, type MetaResult } from '@/lib/metaAnalysis';
 import { PROPORTION_METHOD_LABEL } from '@/lib/singleGroupMeta';
 import { plainReading } from '../_lib/plainReading';
 import { methodsFormulas, methodsNotation } from '../_lib/methodsText';
@@ -63,7 +63,7 @@ export function MethodsPanel({
         </summary>
 
         <div className="text-[12.5px] text-gray-500 dark:text-zinc-400 mt-2.5 leading-relaxed">
-          {MODEL_LABEL[result.model]}
+          {modelLabel(result.model, result.tau2Method)}{result.ciMethod === 'hk' ? ', Hartung–Knapp interval' : ''}
           {result.proportionMethod ? ` · ${PROPORTION_METHOD_LABEL[result.proportionMethod]}` : ''}
           {' · '}
           {result.studies.length} {result.studies.length === 1 ? 'study' : 'studies'}

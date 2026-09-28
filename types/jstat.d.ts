@@ -24,6 +24,7 @@ declare module 'jstat' {
     };
     normal: {
       cdf(x: number, mean: number, std: number): number;
+      inv(p: number, mean: number, std: number): number;
     };
   }
   const jstat: JStatDistributions;

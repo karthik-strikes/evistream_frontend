@@ -17,6 +17,7 @@ import {
   MIN_POOLABLE,
   runMetaAnalysis,
   type EffectMeasure,
+  type MetaOptions,
   type MetaResult,
   type MetaStudy,
   type PoolingModel,
@@ -69,13 +70,15 @@ export function leaveOneOut(
   studies: MetaStudy[],
   measure: EffectMeasure,
   model: PoolingModel,
+  /** Passed to every re-pool, so leave-one-out uses the plot's own tau² estimator. */
+  options: MetaOptions = {},
 ): LeaveOneOutResult | null {
   if (studies.length < MIN_LEAVE_ONE_OUT) return null;
-  const all = runMetaAnalysis(studies, measure, model);
+  const all = runMetaAnalysis(studies, measure, model, options);
   if (!all.pooled) return null;
 
   const rows: LeaveOneOutRow[] = studies.map((s, i) => {
-    const without = runMetaAnalysis(studies.filter((_, j) => j !== i), measure, model);
+    const without = runMetaAnalysis(studies.filter((_, j) => j !== i), measure, model, options);
     const pooled = without.pooled;
     return {
       key: s.key,
@@ -142,6 +145,8 @@ export function subgroupAnalysis(
   measure: EffectMeasure,
   model: PoolingModel,
   groupOf: (study: MetaStudy) => string,
+  /** Passed to each within-group pool (tau² estimator and friends). */
+  options: MetaOptions = {},
 ): SubgroupResult {
   const groups = new Map<string, MetaStudy[]>();
   for (const s of studies) {
@@ -154,7 +159,7 @@ export function subgroupAnalysis(
   const rows: SubgroupRow[] = [];
 
   for (const [name, members] of groups) {
-    const r = runMetaAnalysis(members, measure, model);
+    const r = runMetaAnalysis(members, measure, model, options);
     if (r.pooled) {
       pooled.push({ mu: r.pooled.mu, se: r.pooled.se });
       rows.push({

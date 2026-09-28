@@ -24,12 +24,13 @@ import { useExtractionKeyboard } from './_hooks/useExtractionKeyboard';
 import { isTableField, flattenScalarFields, isRequiredField, type AiTablePrefill } from './_lib/fieldKinds';
 import { SCOPE_ROW, scopeOf } from '@/lib/fieldScopes';
 import { reachableCellFilter, spreadSharedSources } from './_lib/linkedGroups';
+import { currentFormRev, fieldsAtRevision, unhideCell, visibilityOf } from '@/lib/fieldConditions';
 import {
   remapAiPrefill, remapKeySet, remapRows, remapSources, rowsRemoved, type RowRemap,
 } from './_lib/rowMoves';
 import { SourcingProvider, type SourcingValue } from './_lib/SourcingContext';
 import {
-  applySources, pruneSources, unsourcedKeys, describeKey,
+  applySources, pruneSources, unsourcedKeys, describeKey, parseKey,
   evidencedKeys, sourcesFromSaved, aiEvidenceFromRow, resolveAiEvidence,
   boxesFromLocation,
   type SourceMap, type AttachedSource, type EvidenceBoxes,
@@ -45,7 +46,12 @@ const DRAFT_DEBOUNCE_MS = 3500;
 /** Normalize AI extraction keys: strip '.value' suffix, preserve arrays for table fields */
 function normalizeAiData(raw: Record<string, any>): Record<string, any> {
   const out: Record<string, any> = {};
-  for (const [key, val] of Object.entries(raw)) {
+  for (const [key, rawVal] of Object.entries(raw)) {
+    // A follow-up skipped by a conditional question is stored as NA with the
+    // reviewer's own answer in `hidden_answer`: put the ANSWER back in the form.
+    // The question stays hidden while it does not apply, and the answer
+    // reappears if the reviewer switches the parent back.
+    const val = unhideCell(rawVal);
     const cleanKey = key.endsWith('.value') ? key.slice(0, -6) : key;
     if (Array.isArray(val)) {
       out[cleanKey] = val;
@@ -92,7 +98,8 @@ function unwrapSavedTables(data: Record<string, any>): Record<string, any> {
     out[key] = val.map(row => {
       if (!row || typeof row !== 'object') return row;
       const flat: Record<string, string> = {};
-      for (const [col, cell] of Object.entries(row)) {
+      for (const [col, rawCell] of Object.entries(row)) {
+        const cell = unhideCell(rawCell);
         if (cell != null && typeof cell === 'object') {
           const c = cell as any;
           // A cell the pipeline failed on must not prefill as a value — the
@@ -275,6 +282,11 @@ function ManualExtractionContent() {
   // Whether the server already holds a row for this doc+form+role. The browser
   // draft is only a crash fallback and must lose to it — see useDraftAutoSave.
   const [hasServerRow, setHasServerRow] = useState(false);
+  // Conditional questions: the rule revision the open record is pinned to
+  // (null = no stored record yet, so it will be created under the current
+  // rules) and whether the reviewer chose to move it to the current rules.
+  const [rulesRev, setRulesRev] = useState<number | null>(null);
+  const [upgradeRules, setUpgradeRules] = useState(false);
   /** When the stored row was last written — the other half of the draft
    *  comparison. Only answerable since `extraction_results.updated_at` existed
    *  (migrations/add_updated_at_to_extraction_results.sql). */
@@ -714,7 +726,9 @@ function ManualExtractionContent() {
           const row: Record<string, string> = {};
           const aiCells = new Set<string>();
           for (const col of subCols) {
-            const cell = item?.[col];
+            // A cell the AI answered but a condition skipped carries the answer
+            // in hidden_answer — prefill it; it stays hidden while it does not apply.
+            const cell = unhideCell(item?.[col]);
             let val = '';
             if (cell == null) {
               val = '';
@@ -745,8 +759,10 @@ function ManualExtractionContent() {
 
   /** Restore the sourcing state that came back with a saved extraction. */
   const applySaved = useCallback((
-    saved: { sources: SourceMap; evidenced: Set<string>; wasPartial: boolean; savedAt: string | null } | null,
+    saved: { sources: SourceMap; evidenced: Set<string>; wasPartial: boolean; savedAt: string | null; rulesRev?: number } | null,
   ) => {
+    setRulesRev(saved ? (saved.rulesRev ?? 0) : null);
+    setUpgradeRules(false);
     setSources(saved?.sources ?? {});
     setSavedEvidence(saved?.evidenced ?? new Set());
     setActiveSourceKey(null);
@@ -800,6 +816,7 @@ function ManualExtractionContent() {
     /** When the server last wrote this row, so the browser's crash-recovery
      *  copy can be compared against it instead of guessed about. */
     savedAt: string | null;
+    rulesRev: number;
   } | null> => {
     if (!selectedProject) return null;
     try {
@@ -844,6 +861,7 @@ function ManualExtractionContent() {
         evidenced: evidencedKeys(raw),
         wasPartial,
         savedAt: manualResult.updated_at ?? manualResult.created_at ?? null,
+        rulesRev: Number(manualResult.condition_rules_rev || 0),
       };
     } catch { return null; }
   }, [selectedProject?.id, currentUser?.id]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -959,6 +977,8 @@ function ManualExtractionContent() {
     draftScopeRef.current = '';
     userTouchedRef.current = false;
     setHasServerRow(false);
+    setRulesRev(null);
+    setUpgradeRules(false);
     setServerSavedAt(null);
     setMode('select');
   }, []);
@@ -1052,9 +1072,29 @@ function ManualExtractionContent() {
     [selectedForm, formData],
   );
 
+  // ── Conditional questions ────────────────────────────────────────────────
+  // The record is judged by the rules it is pinned to; a new record, or one the
+  // reviewer chose to move forward, by the form's current rules. The server
+  // applies the same revision on save — this copy only decides what is shown.
+  const currentRulesRev = currentFormRev(selectedForm?.metadata);
+  const effectiveRulesRev = rulesRev === null || upgradeRules ? currentRulesRev : rulesRev;
+  const conditionFields = useMemo(
+    () => (selectedForm ? fieldsAtRevision(selectedForm.fields as any, selectedForm.metadata, effectiveRulesRev) : []),
+    [selectedForm, effectiveRulesRev],
+  );
+  const visibility = useMemo(() => visibilityOf(conditionFields as any, formData), [conditionFields, formData]);
+  const keyShown = useCallback((key: string) => {
+    const p = parseKey(key);
+    if (!('row' in p)) return visibility.shown(p.field);
+    if (!visibility.shown(p.field)) return false;
+    const rows = Array.isArray(formData[p.field]) ? formData[p.field] : [];
+    return !visibility.hiddenInRow(p.field, rows[p.row] ?? {}).has(p.column);
+  }, [visibility, formData]);
+
   const unsourced = useMemo(
-    () => unsourcedKeys(formData, aiOriginal, sources, savedEvidence, reachableCell),
-    [formData, aiOriginal, sources, savedEvidence, reachableCell],
+    // A hidden follow-up owes nothing: its answer is kept, not asserted.
+    () => unsourcedKeys(formData, aiOriginal, sources, savedEvidence, reachableCell).filter(keyShown),
+    [formData, aiOriginal, sources, savedEvidence, reachableCell, keyShown],
   );
 
   const attachSource = useCallback((key: string, source: AttachedSource) => {
@@ -1241,7 +1281,8 @@ function ManualExtractionContent() {
 
     // Scalar required check
     const scalarFields = flattenScalarFields(selectedForm.fields);
-    const emptyScalar = scalarFields.filter(f => isRequiredField(f) && !formData[f.field_name]?.toString().trim());
+    // A hidden follow-up is not asked, so it cannot be missing.
+    const emptyScalar = scalarFields.filter(f => isRequiredField(f) && visibility.shown(f.field_name) && !formData[f.field_name]?.toString().trim());
     if (emptyScalar.length > 0) {
       toast({ title: 'Validation Error', description: `Fill in: ${emptyScalar.map(f => f.field_name.replace(/_/g, ' ')).join(', ')}`, variant: 'error' });
       return;
@@ -1250,7 +1291,7 @@ function ManualExtractionContent() {
     // Table required check — collect errors and surface them to TableField for auto-expand + red ring
     const newTableErrors: Record<string, Record<number, Set<string>>> = {};
     for (const field of selectedForm.fields) {
-      if (!isTableField(field) || !isRequiredField(field)) continue;
+      if (!isTableField(field) || !isRequiredField(field) || !visibility.shown(field.field_name)) continue;
       const rows: Array<Record<string, string>> = Array.isArray(formData[field.field_name]) ? formData[field.field_name] : [];
       if (rows.length === 0) {
         toast({ title: 'Validation Error', description: `${field.field_name.replace(/_/g, ' ')} needs at least one row`, variant: 'error' });
@@ -1259,7 +1300,8 @@ function ManualExtractionContent() {
       const requiredCols = (field.subform_fields ?? []).filter(isRequiredField);
       const rowErrors: Record<number, Set<string>> = {};
       for (let i = 0; i < rows.length; i++) {
-        const missing = requiredCols.filter(sf => !rows[i][sf.field_name]?.toString().trim());
+        const hidden = visibility.hiddenInRow(field.field_name, rows[i]);
+        const missing = requiredCols.filter(sf => !hidden.has(sf.field_name) && !rows[i][sf.field_name]?.toString().trim());
         if (missing.length > 0) rowErrors[i] = new Set(missing.map(sf => sf.field_name));
       }
       if (Object.keys(rowErrors).length > 0) newTableErrors[field.field_name] = rowErrors;
@@ -1312,7 +1354,10 @@ function ManualExtractionContent() {
         extracted_data: applySources(formData, pruned),
         extraction_type: 'manual',
         reviewer_role: activeRole,
+        upgrade_condition_rules: upgradeRules,
       });
+      setRulesRev(Number(stored?.condition_rules_rev || 0));
+      setUpgradeRules(false);
       // The seat the row actually landed in. The server may have claimed a free
       // reader one for this save, and it is the only party that can see the
       // current assignments — so its answer replaces ours. Without this the
@@ -1394,7 +1439,10 @@ function ManualExtractionContent() {
         extraction_type: 'manual',
         reviewer_role: activeRole,
         is_partial: true,
+        upgrade_condition_rules: upgradeRules,
       });
+      setRulesRev(Number(stored?.condition_rules_rev || 0));
+      setUpgradeRules(false);
       // Same as the full save: a draft is the first thing that lands, so it is
       // usually the save that claims the seat.
       const storedRole = stored?.reviewer_role ?? null;
@@ -1791,6 +1839,13 @@ function ManualExtractionContent() {
             : unsourced.length > 0 ? describeKey(unsourced[0])
             : null
           }
+          conditions={{
+            fields: conditionFields as any,
+            behind: rulesRev !== null && rulesRev < currentRulesRev && !upgradeRules,
+            upgrading: upgradeRules,
+            onPreviewUpgrade: () => setUpgradeRules(true),
+            onCancelUpgrade: () => setUpgradeRules(false),
+          }}
           grouping={can_create_forms ? {
             savingField: savingGrouping,
             onSave: handleSaveGrouping,

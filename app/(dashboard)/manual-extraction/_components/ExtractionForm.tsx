@@ -15,6 +15,26 @@ import type { RowRemap } from '../_lib/rowMoves';
 import { useSourcing } from '../_lib/SourcingContext';
 import { GroupSetupDialog, type GroupingProps } from './GroupSetupDialog';
 import { describeKey, parseKey } from '../_lib/sourcing';
+import { labelOf, visibilityOf } from '@/lib/fieldConditions';
+import { GitBranch } from 'lucide-react';
+
+/**
+ * Conditional questions. `fields` carry the rules of the revision this record is
+ * judged by (it may be older than the form's current rules — see page.tsx).
+ * The form only HIDES follow-ups; every answer is still sent, and the server
+ * stores a skipped one as NA with the answer kept, so hiding never loses work.
+ */
+export interface ConditionsProp {
+  fields: FormField[];
+  /** The record was saved under older rules than the form's current ones. */
+  behind: boolean;
+  /** The reviewer chose to judge it by the current rules (applied on save). */
+  upgrading: boolean;
+  onPreviewUpgrade: () => void;
+  onCancelUpgrade: () => void;
+}
+
+const answered = (v: any) => (Array.isArray(v) ? v.length > 0 : v != null && String(v).trim() !== '');
 
 /** State of the background draft save, shown where the "Save partial" button
  *  used to be. `off` means there is nothing to autosave — the stored row is
@@ -47,6 +67,7 @@ interface ExtractionFormProps {
    *  time, and sending them Back to re-pick the form to fix that is the opposite
    *  of the point. */
   grouping?: GroupingProps;
+  conditions?: ConditionsProp;
 }
 
 /**
@@ -77,6 +98,7 @@ export function ExtractionForm({
   saving,
   hasNextDoc,
   grouping,
+  conditions,
 }: ExtractionFormProps) {
   const [collapsedSections, setCollapsedSections] = useState<Set<string>>(new Set());
   const [groupingField, setGroupingField] = useState<FormField | null>(null);
@@ -103,26 +125,52 @@ export function ExtractionForm({
     return out;
   }, [form.fields]);
 
-  const filledScalars = scalarFields.filter(f => formData[f.field_name]?.toString().trim()).length;
+  // ── Conditional questions: what is asked right now ──────────────────────
+  const vis = useMemo(
+    () => (conditions ? visibilityOf(conditions.fields as any, formData) : null),
+    [conditions, formData],
+  );
+  const shown = (name: string) => !vis || vis.shown(name);
+  const hiddenCols = vis ? (table: string) => (row: Record<string, any>) => vis.hiddenInRow(table, row) : null;
+  // "You just hid N answers" — with Undo. The answers are not lost either way;
+  // this is so a stray click doesn't make work silently disappear from view.
+  const [hideNote, setHideNote] = useState<null | { parent: string; prev: any; labels: string[] }>(null);
+  const changeField = (name: string, value: any) => {
+    if (conditions) {
+      const before = visibilityOf(conditions.fields as any, formData);
+      const after = visibilityOf(conditions.fields as any, { ...formData, [name]: value });
+      const lost = conditions.fields.filter(f =>
+        before.shown(f.field_name) && !after.shown(f.field_name) && answered(formData[f.field_name]));
+      setHideNote(lost.length ? { parent: name, prev: formData[name], labels: lost.map(f => labelOf(f)) } : null);
+    }
+    onFieldChange(name, value);
+  };
+  const visibleScalarFields = scalarFields.filter(f => shown(f.field_name));
+  const visibleTables = tableFieldsList.filter(f => shown(f.field_name));
+
+  const filledScalars = visibleScalarFields.filter(f => formData[f.field_name]?.toString().trim()).length;
   // A table contributes the fraction of its cells that are answered, not a
   // whole point the moment it has one row — a 25-row table with a single filled
   // cell used to read exactly like a finished one.
-  const tableProgress = tableFieldsList.reduce((sum, f) => {
+  const tableProgress = visibleTables.reduce((sum, f) => {
     const rows: Array<Record<string, string>> = Array.isArray(formData[f.field_name])
       ? formData[f.field_name] : [];
     const cols = f.subform_fields ?? [];
     if (rows.length === 0 || cols.length === 0) return sum;
-    const answered = rows.reduce(
-      (n, row) => n + cols.filter(c => row?.[c.field_name]?.toString().trim()).length,
-      0,
-    );
-    return sum + answered / (rows.length * cols.length);
+    let asked = 0;
+    const done = rows.reduce((n, row) => {
+      const hidden = vis ? vis.hiddenInRow(f.field_name, row) : null;
+      const rowCols = hidden ? cols.filter(c => !hidden.has(c.field_name)) : cols;
+      asked += rowCols.length;
+      return n + rowCols.filter(c => row?.[c.field_name]?.toString().trim()).length;
+    }, 0);
+    return asked ? sum + done / asked : sum + 1;
   }, 0);
   const filled = filledScalars + tableProgress;
-  const total = scalarFields.length + tableFieldsList.length;
+  const total = visibleScalarFields.length + visibleTables.length;
   const pct = total > 0 ? Math.round((filled / total) * 100) : 0;
 
-  const emptyFields = scalarFields.filter(f => !formData[f.field_name]?.toString().trim());
+  const emptyFields = visibleScalarFields.filter(f => !formData[f.field_name]?.toString().trim());
 
   const toggleSection = (name: string) => {
     setCollapsedSections(prev => {
@@ -154,7 +202,7 @@ export function ExtractionForm({
       key={field.field_name}
       field={field}
       value={formData[field.field_name]}
-      onChange={(v) => onFieldChange(field.field_name, v)}
+      onChange={(v) => changeField(field.field_name, v)}
       isAiPrefilled={aiPrefilledKeys.has(field.field_name)}
       id={`field-${field.field_name}`}
       sourceKey={field.field_name}
@@ -172,6 +220,7 @@ export function ExtractionForm({
       errors: tableErrors[field.field_name],
       saving,
       onEditGrouping: grouping ? () => setGroupingField(field) : undefined,
+      hiddenCols: hiddenCols ? hiddenCols(field.field_name) : undefined,
     };
     // A field whose columns are all per-row is today's flat table and renders as
     // one. The grouped view appears only where the form says something is
@@ -262,7 +311,40 @@ export function ExtractionForm({
 
       {/* Fields */}
       <div className="min-h-0 flex-1 overflow-y-auto px-6 py-5">
-        {blocks.map((block, i) => (
+        {conditions && (conditions.behind || conditions.upgrading) && (
+          <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-[12px] text-slate-600 dark:border-[#262626] dark:bg-[#141414] dark:text-zinc-400">
+            <GitBranch className="h-3.5 w-3.5 flex-none" />
+            {conditions.upgrading ? (
+              <>
+                <span className="min-w-0 flex-1">Showing this form&apos;s <span className="font-medium text-slate-800 dark:text-zinc-200">current</span> follow-up rules. Saving applies them to this paper; answers they hide are kept.</span>
+                <button onClick={conditions.onCancelUpgrade} className="font-medium text-slate-700 underline decoration-dotted underline-offset-2 hover:text-slate-900 dark:text-zinc-300">Keep the earlier rules</button>
+              </>
+            ) : (
+              <>
+                <span className="min-w-0 flex-1">This paper was saved before the form&apos;s follow-up questions last changed, so it still uses the earlier rules.</span>
+                <button onClick={conditions.onPreviewUpgrade} className="font-medium text-slate-700 underline decoration-dotted underline-offset-2 hover:text-slate-900 dark:text-zinc-300">Update this paper to the current rules</button>
+              </>
+            )}
+          </div>
+        )}
+        {hideNote && (
+          <div className="mb-4 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-[12px] text-slate-600 dark:border-[#262626] dark:bg-[#111] dark:text-zinc-400">
+            <span className="min-w-0 flex-1">
+              Hid {hideNote.labels.length} answered follow-up{hideNote.labels.length === 1 ? '' : 's'} ({hideNote.labels.join(', ')}). They are kept and come back if you change {labelOf(conditions?.fields.find(f => f.field_name === hideNote.parent), hideNote.parent)} back.
+            </span>
+            <button
+              onClick={() => { onFieldChange(hideNote.parent, hideNote.prev); setHideNote(null); }}
+              className="font-medium text-slate-700 underline decoration-dotted underline-offset-2 hover:text-slate-900 dark:text-zinc-300"
+            >Undo</button>
+            <button onClick={() => setHideNote(null)} className="text-slate-400 hover:text-slate-600" aria-label="Dismiss">×</button>
+          </div>
+        )}
+        {blocks
+          .map(block => block.kind === 'scalars'
+            ? { ...block, fields: block.fields.filter(f => shown(f.field_name)) }
+            : block)
+          .filter(block => block.kind === 'scalars' ? block.fields.length > 0 : shown(block.field.field_name))
+          .map((block, i) => (
           <div key={block.key}>
             {i > 0 && <Divider className="my-6" />}
             {block.kind === 'scalars' && <AutoGrid min={250}>{block.fields.map(renderScalar)}</AutoGrid>}

@@ -53,6 +53,12 @@ export function studentTCritical(df: number, level = 0.95): number {
   return jStat.studentt.inv(1 - (1 - level) / 2, df);
 }
 
+/** Standard normal quantile Φ⁻¹(p). NaN outside (0, 1). */
+export function normalQuantile(p: number): number {
+  if (!(p > 0 && p < 1)) return NaN;
+  return jStat.normal.inv(p, 0, 1);
+}
+
 function clampP(p: number): number {
   if (!Number.isFinite(p)) return NaN;
   return Math.min(1, Math.max(0, p));

@@ -385,6 +385,23 @@ export interface FormField {
   // the list of names that field declares. Read through _lib/linkedGroups.
   scope?: string;
   groups?: string[];
+  // Conditional question: ask this field / column only when its parent's
+  // answer matches. null on the wire = clear it. See lib/fieldConditions.ts.
+  condition?: FieldCondition | null;
+}
+
+/**
+ * "Ask only if <field> is <values>". `from` applies to table columns only:
+ * 'row' = a sibling column in the same row, 'form' = a top-level field.
+ * `rule_id` / `rev` are assigned by the server; anything sent is ignored.
+ */
+export interface FieldCondition {
+  field: string;
+  op: 'equals' | 'in';
+  values: string[];
+  from?: 'form' | 'row';
+  rule_id?: string;
+  rev?: number;
 }
 
 /**
@@ -426,6 +443,8 @@ export interface FieldEditUpdate {
   // per-row rather than leaving a dangling reference.
   groups?: string[];
   column_scopes?: Record<string, string>;
+  required?: boolean;            // manual-extraction flag; forms.fields only
+  condition?: FieldCondition | null;  // top-level fields; null clears. Columns go via subfield-edit.
 }
 
 /** One column's proposed scope, from POST /forms/{id}/fields/{name}/suggest-groups. */
@@ -479,6 +498,8 @@ export interface Form {
   project_id: string;
   form_name: string;
   form_description: string | null;
+  /** Team notes — UI only; never sent to codegen or extraction. */
+  notes?: string | null;
   fields: FormField[];
   status: 'draft' | 'generating' | 'awaiting_review' | 'regenerating' | 'active' | 'failed';
   schema_name: string | null;
@@ -612,6 +633,8 @@ export interface ExtractionResult {
   /** When the row was last written. Added with the column in Sep 2026; older
    *  clients and rows may not carry it, hence optional. */
   updated_at?: string | null;
+  /** Conditional-question rule revision this result was judged under; 0/null = no rules. */
+  condition_rules_rev?: number | null;
 }
 
 export interface ConsensusResult {

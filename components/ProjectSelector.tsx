@@ -126,9 +126,9 @@ export function ProjectSelector() {
       <button
         ref={buttonRef}
         onClick={handleToggle}
-        className="flex items-center gap-1.5 px-2 py-1.5 rounded-md hover:bg-gray-100/80 dark:hover:bg-white/5 transition-colors max-w-[180px]"
+        className="flex items-center gap-1.5 px-2 py-1.5 rounded-md hover:bg-gray-100/80 dark:hover:bg-white/5 transition-colors max-w-[90px] min-[560px]:max-w-[180px]"
       >
-        <span className="text-xs font-medium text-gray-600 dark:text-zinc-300 truncate">
+        <span className="text-xs font-medium text-gray-600 dark:text-zinc-300 truncate" title={selectedProject?.name}>
           {selectedProject?.name || 'Select Project'}
         </span>
         <ChevronDown className={cn("h-3 w-3 text-gray-400 dark:text-zinc-500 transition-transform shrink-0", isOpen && "rotate-180")} />

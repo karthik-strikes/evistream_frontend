@@ -25,14 +25,26 @@ import { Panel, Group as PanelGroup, Separator as PanelResizeHandle } from 'reac
 import { Tooltip } from '@/components/ui/tooltip';
 import { EmptyState } from '@/components/ui';
 import { RingChart } from './_components/RingChart';
-import { AgreedFieldRow, UnifiedFieldCard, type EvidenceMeta } from './_components/UnifiedFieldCard';
+import { AgreedFieldRow, UnifiedFieldCard, cellValue, type EvidenceMeta } from './_components/UnifiedFieldCard';
+import { ConsensusWorkspace, type ConsensusStage, type ScalarChange, type ScalarRow, type TableItem } from './_components/ConsensusWorkspace';
+import {
+  buildTableModel,
+  coerceTableState,
+  emptyTableState,
+  type TableConsensusState,
+  type TableModel,
+} from './_lib/entities';
+import { keyColumnsOfField } from '../manual-extraction/_lib/sourcing';
+import { unambiguousAbsenceLabel } from '../manual-extraction/_lib/absenceInput';
 import { boxesFromLocation, type EvidenceBoxes } from '@/lib/sourceBoxes';
 import {
   decisionFromResolutionSource,
   isFieldResolved,
   isUnfilled,
+  resolutionLabel,
   resolveField,
   type Decision,
+  type ResolutionSource,
   type SourceKey,
 } from './_lib/resolve';
 import { ROLE_COLORS, sourceColors, STATE_COLORS } from '@/lib/reviewerColors';
@@ -157,6 +169,26 @@ function valuesMatch(a: any, b: any): boolean {
   const kb = compareKey(b);
   if (ka === null || kb === null) return false;
   return ka === kb;
+}
+
+/**
+ * A table field goes through Align → Resolve as results, not as one value,
+ * whenever some source actually gave rows. A table every source left empty or
+ * reported absent is a single answer, and keeps the ordinary field card.
+ */
+function isEntityTable(f: { field?: FormField; sources: { ai?: any; r1?: any; r2?: any } }): boolean {
+  if (!f.field || !isTableField(f.field)) return false;
+  return (['ai', 'r1', 'r2'] as SourceKey[]).some(k => Array.isArray(f.sources[k]) && f.sources[k].length > 0);
+}
+
+function shortValue(v: any): string {
+  if (isUnfilled(v)) return '';
+  if (Array.isArray(v)) {
+    if (v.every(x => typeof x !== 'object' || x === null)) return v.join(', ');
+    return `${v.length} row${v.length === 1 ? '' : 's'}`;
+  }
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
 }
 
 /** Treat has_manual as equivalent to has_r1 for unified view */
@@ -446,6 +478,24 @@ function ConsensusContent() {
   // as R2, was moved to R1, and saved again. Detected and shown, never silently
   // compared.
   const [sameAuthorBothSlots, setSameAuthorBothSlots] = useState(false);
+
+  // Three-step workspace (dual-source papers). Per table field: what the
+  // adjudicator decided about matches, inclusion and cell values.
+  const [tableStates, setTableStates] = useState<Record<string, TableConsensusState>>({});
+  const [stage, setStage] = useState<ConsensusStage>('align');
+  const [paperHidden, setPaperHidden] = useState(false);
+  const [scalarNotes, setScalarNotes] = useState<Record<string, string>>({});
+  /** Which sources have an extraction of the open paper at all. */
+  const [docSources, setDocSources] = useState<SourceKey[]>([]);
+  // Below tablet width the paper collapses so the decision gets the room;
+  // "Show paper" or any evidence link brings it back. Only ever hides on its
+  // own — growing the window leaves the reviewer's choice alone.
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 1023px)');
+    const onChange = () => { if (mq.matches) setPaperHidden(true); };
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
 
   // Summary screen state (after submit)
   const [lastReviewDoc, setLastReviewDoc] = useState<ConsensusSummaryDoc | null>(null);
@@ -806,6 +856,68 @@ function ConsensusContent() {
         else if (b.decision === 'na') { b.decision = 'custom'; b.customValue = NA_LABEL; }
       }
 
+      // Table decisions: the saved workspace state, else a legacy whole-table
+      // pick (reproduces what was saved), then any unsaved draft on top.
+      const nextTables: Record<string, TableConsensusState> = {};
+      const nextNotes: Record<string, string> = {};
+      const LEGACY: Record<string, SourceKey> = {
+        accept_ai: 'ai', accept_r1: 'r1', accept_r2: 'r2', ai: 'ai', reviewer_1: 'r1', reviewer_2: 'r2',
+      };
+      for (const b of built) {
+        const ed = existingDecisions[b.fieldName];
+        const er = existingResolutions[b.fieldName];
+        const note = er?.adjudicator_note ?? ed?.note;
+        if (typeof note === 'string' && note) nextNotes[b.fieldName] = note;
+        if (!isEntityTable(b)) continue;
+        if (ed?.consensus_state) nextTables[b.fieldName] = coerceTableState(ed.consensus_state);
+        else {
+          const legacy = LEGACY[ed?.decision] ?? LEGACY[er?.resolution_source];
+          nextTables[b.fieldName] = legacy ? { ...emptyTableState(), legacyPick: legacy } : emptyTableState();
+        }
+      }
+      try {
+        const saved2 = localStorage.getItem(`cdr2:${selectedProject!.id}:${selectedForm.id}:${doc.document_id}`);
+        if (saved2) {
+          const d = JSON.parse(saved2);
+          for (const [fn, st] of Object.entries(d?.tables ?? {})) if (fn in nextTables) nextTables[fn] = coerceTableState(st);
+          for (const [fn, n] of Object.entries(d?.notes ?? {})) if (typeof n === 'string') nextNotes[fn] = n;
+        }
+      } catch {}
+      // Single-value fields, in the three-step workspace: every source that has
+      // an extraction of this paper counts, and a blank is a value of its own —
+      // "R1 left it empty, AI and R2 say 92" is a difference to settle, not an
+      // agreement (methodology §16/§19). Decisions saved under the older rule
+      // are carried across so a reopen reproduces what was saved.
+      const srcs: SourceKey[] = [aiResult && 'ai', hasR1 && 'r1', hasR2 && 'r2'].filter(Boolean) as SourceKey[];
+      setDocSources(srcs);
+      const willBeAiOnly = !!aiResult && !hasR1 && !hasR2;
+      if (!willBeAiOnly) {
+        for (const b of built) {
+          if (isEntityTable(b)) continue;
+          const keys = srcs.map(k => compareKey(b.sourceCells[k] ?? '', b.options) ?? `\u0000${k}`);
+          let agreed = srcs.length >= 2 && new Set(keys).size === 1;
+          const firstFilled = srcs.find(k => !isUnfilled(b.sources[k]));
+          const matchOf = (v: any) => srcs.find(k => compareKey(b.sourceCells[k] ?? '', b.options) === compareKey(v ?? '', b.options));
+          const d = b.decision as string | null;
+          if (d === 'accept_majority' || d === 'accept_suggestion') {
+            const k = b.suggestion ? matchOf(b.suggestion.value) : undefined;
+            b.decision = k ? (`accept_${k}` as Decision) : null;
+          } else if (d === 'correct') {
+            b.decision = firstFilled ? (`accept_${firstFilled}` as Decision) : null;
+          } else if (d === 'incorrect') {
+            b.decision = 'custom'; b.customValue = b.legacyCorrection;
+          }
+          if (agreed && b.decision && b.decision !== 'agreed') agreed = false; // an override stays visible
+          if (agreed) b.decision = 'agreed';
+          else if (b.decision === 'agreed') b.decision = firstFilled ? (`accept_${firstFilled}` as Decision) : null;
+          b.agreed = agreed;
+        }
+      }
+      setTableStates(nextTables);
+      setScalarNotes(nextNotes);
+      setStage(doc.has_consensus || doc.has_adjudication ? 'final' : Object.keys(nextTables).length ? 'align' : 'resolve');
+      setPaperHidden(typeof window !== 'undefined' && window.innerWidth < 1024);
+
       setFields(built);
       setActiveField(null);
       setAgreedCollapsed(true);
@@ -863,10 +975,51 @@ function ConsensusContent() {
   // Memoized: this was called three times per render. isFieldResolved also
   // requires a non-empty correction for 'incorrect', which submission used to
   // allow — and the resolver then saved the value the reviewer had just rejected.
+  const tableModels = useMemo(() => {
+    const out: Record<string, { field: FormField; model: TableModel; state: TableConsensusState }> = {};
+    if (isAiOnly) return out;
+    for (const f of fields) {
+      if (!isEntityTable(f) || !f.field) continue;
+      const state = tableStates[f.fieldName] ?? emptyTableState();
+      const cols = (f.field.subform_fields ?? []).map(c => ({ field_name: c.field_name, options: c.options ?? null }));
+      out[f.fieldName] = {
+        field: f.field,
+        state,
+        model: buildTableModel(f.fieldName, cols, keyColumnsOfField(f.field), f.sources, state, unambiguousAbsenceLabel),
+      };
+    }
+    return out;
+  }, [fields, tableStates, isAiOnly]);
+
   const canSubmit = useMemo(
-    () => fields.length > 0 && fields.every(isFieldResolved),
-    [fields],
+    () => fields.length > 0 && fields.every(f => {
+      const t = tableModels[f.fieldName];
+      if (t) return t.model.finalRows !== null && t.model.duplicateSuggestions.length === 0;
+      return isFieldResolved(f);
+    }),
+    [fields, tableModels],
   );
+
+  /**
+   * One resolution per field, for saving. Workspace tables resolve to their
+   * built rows; the provenance label is the single source every cell came from
+   * when there is one, `agreed` when nothing needed deciding, else `custom`.
+   */
+  const resolveForSave = (f: FieldDecision): { finalValue: any; source: ResolutionSource; agreed: boolean } => {
+    const t = tableModels[f.fieldName];
+    if (!t) return resolveField(f);
+    const m = t.model;
+    if (m.issues.length === 0 && m.proposals.length === 0 && m.entities.every(e => e.status === 'auto_aligned')) {
+      return { finalValue: m.finalRows, source: 'agreed', agreed: true };
+    }
+    const froms = new Set<string>();
+    for (const p of m.provenance ?? []) for (const c of Object.values(p.cells)) if (c !== 'agreed') froms.add(c);
+    const only = froms.size === 1 ? [...froms][0] : null;
+    const SRC: Record<string, ResolutionSource> = { ai: 'ai', r1: 'reviewer_1', r2: 'reviewer_2' };
+    const one = only && only !== 'custom'
+      && (m.provenance ?? []).every(p => p.included === (p.rows[only as SourceKey] != null));
+    return { finalValue: m.finalRows, source: one ? SRC[only!] : 'custom', agreed: false };
+  };
 
   // No keyboard shortcuts on this screen, by decision.
   //
@@ -887,8 +1040,9 @@ function ConsensusContent() {
     try {
       const draft = fields.map(f => ({ fieldName: f.fieldName, decision: f.decision, customValue: f.customValue, legacyCorrection: f.legacyCorrection }));
       localStorage.setItem(key, JSON.stringify(draft));
+      localStorage.setItem(`cdr2:${selectedProject.id}:${selectedForm.id}:${reviewDoc.document_id}`, JSON.stringify({ tables: tableStates, notes: scalarNotes }));
     } catch {}
-  }, [fields, screen, selectedProject?.id, selectedForm?.id, reviewDoc?.document_id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [fields, tableStates, scalarNotes, screen, selectedProject?.id, selectedForm?.id, reviewDoc?.document_id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Submit ──────────────────────────────────────────────────────────────────────
   const handleSubmit = async () => {
@@ -900,7 +1054,7 @@ function ConsensusContent() {
       // decision trees, which is where the agreed-override and empty-correction
       // bugs lived. The counts come from the same pass too; the adjudication loop
       // used to compute a pair of counters and then throw them away.
-      const resolved = fields.map(f => ({ f, r: resolveField(f) }));
+      const resolved = fields.map(f => ({ f, r: resolveForSave(f) }));
       const agreedCount = resolved.filter(({ r }) => r.agreed).length;
       const disputedCount = resolved.length - agreedCount;
 
@@ -914,6 +1068,7 @@ function ConsensusContent() {
             agreed: r.agreed,
             final_value: r.finalValue,
             resolution_source: r.source,
+            ...(scalarNotes[f.fieldName]?.trim() ? { adjudicator_note: scalarNotes[f.fieldName].trim() } : {}),
           };
         }
 
@@ -949,9 +1104,17 @@ function ConsensusContent() {
             ai_value: f.sources.ai ?? '',
             r1_value: f.sources.r1 ?? null,
             r2_value: f.sources.r2 ?? null,
-            decision: f.decision,
+            decision: tableModels[f.fieldName] ? 'custom' : f.decision,
             resolution_source: r.source,
             final_value: r.finalValue,
+            ...(scalarNotes[f.fieldName]?.trim() ? { note: scalarNotes[f.fieldName].trim() } : {}),
+            // Workspace tables keep every decision and where each result came
+            // from, so a reopened review restores exactly and an export can be
+            // traced back to the source rows.
+            ...(tableModels[f.fieldName] ? {
+              consensus_state: tableModels[f.fieldName].state,
+              record_provenance: tableModels[f.fieldName].model.provenance,
+            } : {}),
           };
         }
       }
@@ -981,8 +1144,15 @@ function ConsensusContent() {
       } catch {}
 
       setLastReviewDoc(reviewDoc);
-      setLastFields([...fields]);
-      try { localStorage.removeItem(`cdr:${selectedProject!.id}:${selectedForm!.id}:${reviewDoc.document_id}`); } catch {}
+      // The summary screen reads resolveField(); give workspace tables the rows
+      // that were actually saved.
+      setLastFields(fields.map(f => tableModels[f.fieldName]
+        ? { ...f, decision: 'custom' as Decision, customValue: tableModels[f.fieldName].model.finalRows }
+        : f));
+      try {
+        localStorage.removeItem(`cdr:${selectedProject!.id}:${selectedForm!.id}:${reviewDoc.document_id}`);
+        localStorage.removeItem(`cdr2:${selectedProject!.id}:${selectedForm!.id}:${reviewDoc.document_id}`);
+      } catch {}
       setScreen('summary');
     } catch {
       toast({ title: 'Failed to save consensus', variant: 'error' });
@@ -1219,6 +1389,139 @@ function ConsensusContent() {
     const progressDenominator = reviewPool.length;
     const progressPct = progressDenominator > 0 ? (reviewedCount / progressDenominator) * 100 : 0;
     const remaining = progressDenominator - reviewedCount;
+
+    const pdfPane = (
+      <PdfHighlightViewer
+        documentId={reviewDoc.document_id}
+        filename={reviewDoc.study_label || reviewDoc.filename}
+        sourceText={evidenceFocus?.meta.source_text ?? null}
+        highlightBoxes={evidenceFocus?.meta.boxes ?? null}
+        initialPage={evidenceFocus?.meta.page ?? null}
+        storedValue={
+          evidenceFocus ? (typeof evidenceFocus.value === 'string' ? evidenceFocus.value : JSON.stringify(evidenceFocus.value)) : null
+        }
+        fieldLabel={
+          evidenceFocus ? `${evidenceFocus.fieldLabel} · ${sourceColors(evidenceFocus.source).label}` : null
+        }
+        captionImage={evidenceFocus?.meta.caption_image ?? null}
+        figureImage={evidenceFocus?.meta.figure_image ?? null}
+        figureVerified={evidenceFocus?.meta.figure_verified ?? null}
+      />
+    );
+
+    // ── Dual-source papers: Align → Resolve → Final ──
+    if (!isAiOnly) {
+      const scalarRows: ScalarRow[] = fields
+        .map((f, idx) => ({ f, idx }))
+        .filter(({ f }) => !tableModels[f.fieldName])
+        .map(({ f, idx }) => ({
+          idx,
+          label: f.field?.display_name || f.fieldName.replace(/_/g, ' '),
+          field: f.field,
+          cells: Object.fromEntries(docSources.map(k => [k, f.sourceCells[k]])),
+          agreed: f.agreed,
+          decision: f.decision,
+          customValue: f.customValue,
+          isTable: !!f.field && isTableField(f.field),
+        }));
+      const tableItems: TableItem[] = Object.values(tableModels);
+      const commitScalars = (changes: ScalarChange[]) => setFields(prev => prev.map((x, i) => {
+        const c = changes.find(ch => ch.idx === i);
+        return c ? { ...x, decision: c.decision as Decision, customValue: c.decision === 'custom' ? c.customValue : x.customValue } : x;
+      }));
+      const exportPaperCsv = () => {
+        const lines: string[][] = [['field', 'result', 'column', 'value', 'from']];
+        for (const r of scalarRows) {
+          const res = resolveField(fields[r.idx]);
+          lines.push([r.label, '', '', shortValue(res.finalValue), resolutionLabel(res.source)]);
+        }
+        for (const t of tableItems) {
+          const rows = t.model.finalRows ?? [];
+          const prov = (t.model.provenance ?? []).filter(p => p.included);
+          rows.forEach((row, i) => {
+            for (const c of t.model.cols) {
+              lines.push([t.field.display_name || t.field.field_name, String(i + 1), c.field_name, cellValue(row?.[c.field_name]), prov[i]?.cells[c.field_name] ?? '']);
+            }
+          });
+        }
+        const csv = lines.map(r => r.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')).join('\n');
+        const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `consensus_${(reviewDoc.study_label || reviewDoc.filename).replace(/[^\w.-]+/g, '_')}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+      };
+
+      return (
+        <DashboardLayout title="Consensus" description="Corpus-level consensus review" fullHeight>
+          {sameAuthorBothSlots && (
+            <div className="mb-3 flex flex-shrink-0 items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50/70 px-3 py-2.5 dark:border-amber-500/25 dark:bg-amber-500/10">
+              <AlertTriangle className="mt-px h-3.5 w-3.5 flex-shrink-0 text-amber-600 dark:text-amber-400" />
+              <p className="text-[12.5px] font-semibold text-amber-900 dark:text-amber-200">
+                Both reviewer columns were extracted by the same person — these are not two independent extractions.
+              </p>
+            </div>
+          )}
+          <div className="mb-3 flex flex-shrink-0 flex-wrap items-center gap-2">
+            <button
+              onClick={goBackToDashboard}
+              className="flex cursor-pointer items-center gap-1.5 border-none bg-transparent text-xs font-medium text-gray-500 transition-colors hover:text-gray-700 dark:text-zinc-400 dark:hover:text-zinc-200"
+            >
+              <ArrowLeft className="h-3.5 w-3.5" /> Consensus
+            </button>
+            <ChevronRight className="h-3 w-3 text-gray-300 dark:text-zinc-700" />
+            <span className="rounded-md bg-gray-100 px-2 py-0.5 text-xs font-medium text-gray-500 dark:bg-[#1a1a1a] dark:text-zinc-400">{selectedForm?.form_name}</span>
+            <ChevronRight className="h-3 w-3 text-gray-300 dark:text-zinc-700" />
+            <span className="max-w-[240px] truncate text-xs font-semibold text-gray-700 dark:text-zinc-200" title={reviewDoc.filename}>{reviewDoc.study_label || reviewDoc.filename}</span>
+          </div>
+
+          {fields.length === 0 ? (
+            <div className="rounded-xl border border-gray-200 bg-white p-8 text-center text-sm text-gray-500 dark:border-[#1f1f1f] dark:bg-[#111111] dark:text-zinc-400">
+              No extracted fields for this document. Re-run the extraction from the Extractions page.
+            </div>
+          ) : (
+            <PanelGroup orientation="horizontal" className="min-h-0 flex-1 gap-0">
+              {!paperHidden && (
+                <>
+                  <Panel defaultSize={34} minSize={22}>
+                    <div className="h-full min-h-0">{pdfPane}</div>
+                  </Panel>
+                  <PanelResizeHandle className="group mx-1 flex w-2 cursor-col-resize items-center justify-center">
+                    <div className="flex h-full w-1 items-center justify-center rounded-full bg-gray-200 transition-colors group-hover:bg-gray-400 dark:bg-[#2a2a2a] dark:group-hover:bg-zinc-600">
+                      <GripVertical className="h-4 w-4 text-gray-400 opacity-0 transition-opacity group-hover:opacity-100" />
+                    </div>
+                  </PanelResizeHandle>
+                </>
+              )}
+              <Panel defaultSize={paperHidden ? 100 : 66} minSize={40}>
+                <div className="h-full min-h-0 overflow-hidden rounded-xl border border-gray-200 bg-[#fafafa] dark:border-[#1f1f1f] dark:bg-[#0b0b0b]">
+                  <ConsensusWorkspace
+                    stage={stage}
+                    onStage={setStage}
+                    scalars={scalarRows}
+                    scalarSources={docSources}
+                    commitScalars={commitScalars}
+                    tables={tableItems}
+                    onTableState={(fn, next) => setTableStates(prev => ({ ...prev, [fn]: next }))}
+                    onJump={(source, meta, label, value) => {
+                      setEvidenceFocus({ source, fieldLabel: label, meta, value });
+                      if (paperHidden) setPaperHidden(false);
+                    }}
+                    onFinalize={handleSubmit}
+                    submitting={submitting}
+                    isUpdate={!!(reviewDoc.has_consensus || reviewDoc.has_adjudication)}
+                    onExportCsv={exportPaperCsv}
+                    paperHidden={paperHidden}
+                    onTogglePaper={() => setPaperHidden(h => !h)}
+                  />
+                </div>
+              </Panel>
+            </PanelGroup>
+          )}
+        </DashboardLayout>
+      );
+    }
 
     return (
       <DashboardLayout title="Consensus" description="Corpus-level consensus review" fullHeight>

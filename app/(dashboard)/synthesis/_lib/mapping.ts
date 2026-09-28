@@ -10,7 +10,8 @@
 import { fieldIsEmpty } from '@/lib/absence';
 import { PRECOMPUTED_MEASURES, type EffectMeasure } from '@/lib/metaAnalysis';
 import type { ProportionMethod } from '@/lib/singleGroupMeta';
-import type { LongFormatRow } from '@/lib/longFormatTransform';
+import { classifyFields, type LongFormatRow } from '@/lib/longFormatTransform';
+import type { FormField } from '@/types/api';
 
 /**
  * `effect` is the third entry path: the table holds an already-computed effect
@@ -37,6 +38,8 @@ export type SlotKey =
   | 'mean_comparator' | 'sd_comparator' | 'n_comparator'
   // long
   | 'value' | 'variability' | 'denominator'
+  // optional, long + continuous: quartiles / extremes beside a median, for Wan 2014
+  | 'q1' | 'q3' | 'min' | 'max'
   // pre-computed effect
   | 'effect_value' | 'effect_se' | 'effect_ci_lower' | 'effect_ci_upper'
   // single group
@@ -159,7 +162,25 @@ export const SLOT_LABEL: Record<SlotKey, string> = {
   prop_total: 'Total assessed (n)',
   corr_r: 'Correlation (r)',
   corr_n: 'Sample size (n)',
+  q1: 'First quartile (Q1)',
+  q3: 'Third quartile (Q3)',
+  min: 'Minimum',
+  max: 'Maximum',
 };
+
+/**
+ * Optional columns beside a median in the long continuous layout. Never
+ * required: without them a median falls back to median-as-mean and IQR/1.35 (or
+ * range/4), and the conversion record says so.
+ */
+export function medianSpreadSlots(): Array<{ key: SlotKey; label: string; hint: string }> {
+  return [
+    { key: 'q1', label: 'First quartile (Q1)', hint: 'Optional — with Q3 and the median, enables Wan 2014' },
+    { key: 'q3', label: 'Third quartile (Q3)', hint: 'Optional — with Q1 and the median, enables Wan 2014' },
+    { key: 'min', label: 'Minimum', hint: 'Optional — with the maximum and the median, enables Wan 2014' },
+    { key: 'max', label: 'Maximum', hint: 'Optional — with the minimum and the median, enables Wan 2014' },
+  ];
+}
 
 /** Paired rows for the wide layout: one label, one slot per arm. */
 export function pairedRows(kind: OutcomeKind): Array<{
@@ -365,4 +386,25 @@ export function clearMapping(formId: string): void {
   } catch {
     /* nothing to do */
   }
+}
+
+/**
+ * The fields to flatten for a synthesis source form. When the protocol (or the
+ * mapping screen) names the table the mapping was made against, that table
+ * drives the rows — the mapper and the flattening must read the SAME table, and
+ * the backend suggestion picks the widest one while `classifyFields` picks by
+ * join relationship. The relationship heuristic is only the fallback when no
+ * table is named (or the named one is no longer a table on the form).
+ *
+ * When the named table is already the one the heuristic picks, the field list
+ * is returned unchanged (parent-table joins included), so existing datasets are
+ * untouched. Otherwise only the flat fields and the named table are kept, which
+ * makes it the sole — hence driving — table.
+ */
+export function fieldsForFlattening(fields: FormField[], fieldName: string | null | undefined): FormField[] {
+  if (!fieldName) return fields;
+  const cls = classifyFields(fields);
+  const named = cls.tableFields.find(t => t.field_name === fieldName);
+  if (!named || cls.deepestTableField?.field_name === fieldName) return fields;
+  return fields.filter(f => !cls.tableFields.includes(f) || f === named);
 }

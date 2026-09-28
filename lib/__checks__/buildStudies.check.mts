@@ -25,8 +25,16 @@ import {
   parseNumber,
   precomputedFromCells,
   toStandardDeviation,
+  wanFromQuartiles,
+  wanFromRange,
+  wanIqrDivisor,
+  wanRangeDivisor,
+  ciToSd,
+  designEffectN,
+  type ConversionRecord,
   type Pairing,
 } from '../../app/(dashboard)/synthesis/_lib/buildStudies.ts';
+import { runMetaAnalysis } from '../metaAnalysis.ts';
 import { EXCLUDE, KEEP } from '../../app/(dashboard)/synthesis/_lib/reconcile.ts';
 import type { Mapping } from '../../app/(dashboard)/synthesis/_lib/mapping.ts';
 import type { BinaryArm, ContinuousArm } from '../metaAnalysis.ts';
@@ -90,6 +98,28 @@ const confirmed = (cols: Record<string, string>): Mapping =>
   // The whole point: an absence must never become a count.
   const nr = parseNumber(undefined, 'NR');
   check('NR does not become 0', !nr.ok);
+
+  // Commas: only a real thousands separator is removed.
+  for (const [text, value] of [['1,234', 1234], ['12,345,678', 12345678], ['1,234.5', 1234.5], ['-1,234', -1234], ['1 234', 1234]] as const) {
+    const r = parseNumber(undefined, text, 'count');
+    check(`"${text}" parses as ${value}`, r.ok && r.value === value, r.ok ? String(r.value) : r.reason);
+  }
+  for (const text of ['1,5', '12,34', '1,2345', '1,000,00', '1234,5', ',5', '12 5']) {
+    const r = parseNumber(undefined, text);
+    check(`"${text}" is ambiguous, not guessed`, !r.ok && r.reason === 'ambiguous_number', r.ok ? `parsed as ${r.value}` : r.reason);
+  }
+  // Percent: a unit on a measurement, a different quantity in a count slot.
+  const pctCount = parseNumber(undefined, '25%', 'count');
+  check('"25%" in a count slot is refused', !pctCount.ok && pctCount.reason === 'percent_in_count',
+    pctCount.ok ? `parsed as ${pctCount.value}` : pctCount.reason);
+  const pctValue = parseNumber(undefined, '25 %', 'value');
+  check('"25 %" in a value slot keeps the number', pctValue.ok && pctValue.value === 25);
+  for (const text of ['0x1A', 'Infinity', '12abc', '--3']) {
+    const r = parseNumber(undefined, text);
+    check(`"${text}" is unparseable`, !r.ok && r.reason === 'unparseable', r.ok ? `parsed as ${r.value}` : r.reason);
+  }
+  check('a signed decimal parses', (() => { const r = parseNumber(undefined, '-0.35'); return r.ok && r.value === -0.35; })());
+  check('".5" parses', (() => { const r = parseNumber(undefined, '.5'); return r.ok && r.value === 0.5; })());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -518,6 +548,31 @@ const confirmed = (cols: Record<string, string>): Mapping =>
     groups.reduce((a, g) => a + g.studies.length, 0) === built.excluded.length);
 }
 
+// 6b. A percent in an events column and a decimal comma are exclusions, never counts
+{
+  const rows = [
+    row('p1', 'Good 2020', { outcome: 'X', arm1_events: '1,200', arm1_n: '2,400', arm2_events: '900', arm2_n: '2,400' }),
+    row('p2', 'Pct 2021', { outcome: 'X', arm1_events: '25%', arm1_n: '60', arm2_events: '18', arm2_n: '58' }),
+    row('p3', 'Comma 2022', { outcome: 'X', arm1_events: '1,5', arm1_n: '60', arm2_events: '18', arm2_n: '58' }),
+  ];
+  const mapping = confirmed({
+    events_treatment: 'arm1_events', total_treatment: 'arm1_n',
+    events_comparator: 'arm2_events', total_comparator: 'arm2_n', outcome: 'outcome',
+  });
+  const { pairings } = buildPairings(rows, mapping, 'wide', '', null, { treatment: null, comparator: null });
+  const built = buildStudies(pairings, {
+    kind: 'dichotomous', layout: 'wide', mapping,
+    variabilityMeasureColumn: null, centralTendencyMeasureColumn: null,
+    variabilityActions: {}, centralTendencyActions: {},
+  });
+  const good = built.studies[0]?.treatment as BinaryArm | undefined;
+  check('thousands-separated counts pair up', built.studies.length === 1 && good?.events === 1200 && good?.total === 2400);
+  const why = new Map(built.excluded.map(e => [e.documentId, e.reason]));
+  check('"25%" events is excluded as percent_in_count', why.get('p2') === 'percent_in_count', String(why.get('p2')));
+  check('"1,5" events is excluded as ambiguous_number', why.get('p3') === 'ambiguous_number', String(why.get('p3')));
+  check('nothing disappears', built.studies.length + built.excluded.length === pairings.length);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 7. Column detection
 // ─────────────────────────────────────────────────────────────────────────────
@@ -710,6 +765,202 @@ const confirmed = (cols: Record<string, string>): Mapping =>
     excluded.some(e => e.documentId === 'd4' && e.reason === 'sample_too_small'));
   check('NA is an absence state, not a zero correlation',
     excluded.some(e => e.documentId === 'd5' && e.reason === 'not_applicable'));
+}
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 12. Wan 2014 — median + quartiles / range → mean and SD (Sep 2026)
+//     η(n) = 2Φ⁻¹((0.75n − 0.125)/(n + 0.25)); ξ(n) = 2Φ⁻¹((n − 0.375)/(n + 0.25)).
+//     Reference values from scipy.stats.norm.ppf (independent of jStat):
+//       η(10) = 1.162786013, η(50) = 1.310093015, η(100) = 1.329424948
+//       ξ(10) = 3.093270543, ξ(50) = 4.486657526, ξ(100) = 4.997181122
+//     and η(n) → 2 × 0.67449 = 1.34898 as n → ∞ (the large-sample IQR/SD ratio
+//     the IQR/1.35 fallback uses).
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  for (const [n, eta, xi] of [
+    [10, 1.162786013, 3.093270543], [50, 1.310093015, 4.486657526], [100, 1.329424948, 4.997181122],
+  ] as Array<[number, number, number]>) {
+    close(`η(${n})`, wanIqrDivisor(n), eta, 1e-8);
+    close(`ξ(${n})`, wanRangeDivisor(n), xi, 1e-8);
+  }
+  close('η(n) → 1.349 for large n', wanIqrDivisor(1e7), 1.3489793, 1e-6);
+
+  // Worked example: n = 50, q1 = 10, median = 14, q3 = 19.
+  //   mean = (10 + 14 + 19)/3 = 14.3333; SD = 9 / 1.310093 = 6.869741
+  const w = wanFromQuartiles(10, 14, 19, 50);
+  check('Wan quartiles converts', w.ok);
+  if (w.ok) {
+    close('Wan mean from quartiles', w.mean, 43 / 3, 1e-12);
+    close('Wan SD from quartiles', w.sd, 6.869741227, 1e-8);
+    check('Wan record kind', w.record.kind === 'median_iqr_wan');
+    check('Wan record cites Wan 2014', /Wan X.*2014/.test(w.record.method_ref));
+    check('Wan record states normality', w.record.assumptions.some(a => /normal/.test(a)));
+    check('Wan record keeps its inputs',
+      w.record.inputs.q1 === 10 && w.record.inputs.median === 14 && w.record.inputs.q3 === 19 && w.record.inputs.n === 50);
+    check('the Wan SD differs from IQR/1.35 at n = 50', Math.abs(w.sd - 9 / 1.35) > 0.1);
+  }
+  // Range: n = 50, min 4, median 12, max 20 → mean (4 + 24 + 20)/4 = 12; SD = 16/4.486658 = 3.566129
+  const r = wanFromRange(4, 12, 20, 50);
+  check('Wan range converts', r.ok);
+  if (r.ok) {
+    close('Wan mean from range', r.mean, 12, 1e-12);
+    close('Wan SD from range', r.sd, 3.566129108, 1e-8);
+    check('Wan range record kind', r.record.kind === 'median_range_wan');
+  }
+  // Skewed: min 2, median 5, max 20, n = 30 → mean (2 + 10 + 20)/4 = 8 (a symmetric
+  // fixture cannot tell (a + 2m + b)/4 from (a + m + b)/3); SD = 18/ξ(30) = 18/4.080563.
+  const skew = wanFromRange(2, 5, 20, 30);
+  if (skew.ok) {
+    close('Wan range mean weights the median twice', skew.mean, 8, 1e-12);
+    close('Wan range SD at n = 30', skew.sd, 4.411156394, 1e-8);
+  } else check('skewed range converts', false);
+  const skewQ = wanFromQuartiles(2, 4, 12, 30);
+  if (skewQ.ok) close('Wan quartile mean on skewed quartiles', skewQ.mean, 6, 1e-12);
+  check('a median outside its quartiles is refused', !wanFromQuartiles(10, 25, 19, 50).ok);
+  check('reversed quartiles are refused', !wanFromQuartiles(19, 14, 10, 50).ok);
+  check('n = 1 is refused (η(1) = 0)', !wanFromQuartiles(10, 14, 19, 1).ok);
+
+  // Through buildStudies: a long continuous table reporting medians.
+  const rows = [
+    row('d1', 'Lee 2020', { arm: 'Drug', outcome: 'VAS', n: '50', ct: 'Median', v: '14', vm: 'Interquartile range', iqr: '10-19' }),
+    row('d1', 'Lee 2020', { arm: 'Placebo', outcome: 'VAS', n: '50', ct: 'Median', v: '20', vm: 'Interquartile range', iqr: '15-26' }),
+    // Quartiles in their own columns, and a width-only IQR cell.
+    row('d2', 'Ng 2019', { arm: 'Drug', outcome: 'VAS', n: '100', ct: 'Median', v: '30', vm: 'IQR', iqr: '12', lo: '24', hi: '36' }),
+    row('d2', 'Ng 2019', { arm: 'Placebo', outcome: 'VAS', n: '100', ct: 'Median', v: '35', vm: 'IQR', iqr: '10', lo: '30', hi: '40' }),
+    // No quartiles at all: width-only IQR → labelled fallback.
+    row('d3', 'Ota 2018', { arm: 'Drug', outcome: 'VAS', n: '40', ct: 'Median', v: '30', vm: 'IQR', iqr: '13.5' }),
+    row('d3', 'Ota 2018', { arm: 'Placebo', outcome: 'VAS', n: '40', ct: 'Median', v: '33', vm: 'IQR', iqr: '13.5' }),
+    // Range with a median.
+    row('d4', 'Roy 2017', { arm: 'Drug', outcome: 'VAS', n: '50', ct: 'Median', v: '12', vm: 'Range', iqr: '4 to 20' }),
+    row('d4', 'Roy 2017', { arm: 'Placebo', outcome: 'VAS', n: '50', ct: 'Median', v: '14', vm: 'Range', iqr: '6 to 22' }),
+  ];
+  const mapping = confirmed({
+    value: 'v', variability: 'iqr', denominator: 'n', arm: 'arm', outcome: 'outcome', q1: 'lo', q3: 'hi',
+  });
+  const { pairings } = buildPairings(rows, mapping, 'long', 'Placebo', null, { treatment: null, comparator: null });
+  const built = buildStudies(pairings, {
+    kind: 'continuous', layout: 'long', mapping,
+    variabilityMeasureColumn: 'vm', centralTendencyMeasureColumn: 'ct',
+    variabilityActions: {}, centralTendencyActions: {},
+  });
+  check('all four median studies are built', built.studies.length === 4, JSON.stringify(built.excluded));
+  const by = (label: string) => built.studies.find(st => st.label === label)!;
+  const kinds = (label: string) => (by(label).conversions ?? []).map((c: ConversionRecord) => `${c.arm}:${c.kind}`).join(',');
+
+  // "10-19" is the quartiles 10 and 19 — not 10 and −19.
+  const lee = by('Lee 2020');
+  close('Lee: Wan mean from a hyphenated IQR cell', (lee.treatment as ContinuousArm).mean, 43 / 3, 1e-12);
+  close('Lee: Wan SD from a hyphenated IQR cell', (lee.treatment as ContinuousArm).sd, 6.869741227, 1e-8);
+  close('Lee: comparator Wan mean', (lee.comparator as ContinuousArm).mean, (15 + 20 + 26) / 3, 1e-12);
+  check('Lee: one Wan record per arm', kinds('Lee 2020') === 'treatment:median_iqr_wan,comparator:median_iqr_wan', kinds('Lee 2020'));
+
+  // Mapped q1/q3 columns outrank the cell, and a width-only cell is not quartiles.
+  const ng = by('Ng 2019');
+  close('Ng: mean from mapped quartiles', (ng.treatment as ContinuousArm).mean, (24 + 30 + 36) / 3, 1e-12);
+  close('Ng: SD from mapped quartiles', (ng.treatment as ContinuousArm).sd, 12 / wanIqrDivisor(100), 1e-12);
+
+  const ota = by('Ota 2018');
+  close('Ota: IQR/1.35 fallback', (ota.treatment as ContinuousArm).sd, 13.5 / 1.35, 1e-12);
+  close('Ota: the median stands in for the mean', (ota.treatment as ContinuousArm).mean, 30, 1e-12);
+  check('Ota: both fallbacks are recorded, per arm',
+    kinds('Ota 2018') === 'treatment:iqr_width,treatment:median_as_mean,comparator:iqr_width,comparator:median_as_mean',
+    kinds('Ota 2018'));
+  check('Ota: the fallback says it is one',
+    (ota.conversions ?? []).some((c: ConversionRecord) => c.kind === 'iqr_width' && c.assumptions.some(a => /fallback/.test(a))));
+
+  const roy = by('Roy 2017');
+  close('Roy: Wan range mean', (roy.treatment as ContinuousArm).mean, 12, 1e-12);
+  close('Roy: Wan range SD', (roy.treatment as ContinuousArm).sd, 3.566129108, 1e-8);
+  check('Roy: range records', kinds('Roy 2017') === 'treatment:median_range_wan,comparator:median_range_wan', kinds('Roy 2017'));
+
+  // Records survive pooling, so the result can list them.
+  const pooled = runMetaAnalysis(built.studies, 'MD', 'random');
+  check('conversions ride through runMetaAnalysis',
+    (pooled.studies.find(st => st.label === 'Lee 2020')?.conversions ?? []).length === 2);
+
+  // A mean with an IQR is not a median: no Wan, the width rule, no median record.
+  const meanIqr = toStandardDeviation('10 to 19', 'IQR', 50, 'approximate');
+  check('toStandardDeviation labels the IQR fallback', meanIqr.ok && meanIqr.conversion?.kind === 'iqr_width');
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 13. CI → SD for one arm's mean: t on n − 1 below 60, z from 60
+//     Cochrane Handbook §6.5.2.2 worked example: n = 25, so the divisor is
+//     2 × t(24) = 2 × 2.0639, not 3.92. CI 3 to 5 → SD = 5 × 2 / 4.1278 = 2.4226.
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  const small = ciToSd(3, 5, 25);
+  check('CI→SD at n = 25 converts', small.ok);
+  if (small.ok) {
+    close('n = 25 uses t(24) = 2.0639', small.sd, 2.4225996824, 1e-6);
+    check('n = 25 is not the z answer', Math.abs(small.sd - (5 * 2) / 3.92) > 0.05);
+    check('the record names t', /t\(24\)/.test(small.record.formula) && small.record.kind === 'ci_to_sd');
+    check('the record says single-arm only', small.record.assumptions.some(a => /this arm's own mean/.test(a)));
+  }
+  const at59 = ciToSd(0, 2, 59);
+  if (at59.ok) close('n = 59 still uses t(58)', at59.sd, 3.8372776422, 1e-6);
+  const at60 = ciToSd(0, 2, 60);
+  if (at60.ok) close('n = 60 switches to 1.96', at60.sd, (Math.sqrt(60) * 2) / 3.92, 1e-12);
+  check('a reversed interval is refused', !ciToSd(5, 3, 25).ok);
+
+  // The long-table path uses the same rule.
+  const viaText = toStandardDeviation('3 to 5', 'CI', 25, 'convert');
+  check('toStandardDeviation CI at n = 25 uses t', viaText.ok && Math.abs(viaText.sd - 2.4225996824) < 1e-6);
+  check('...and records it', viaText.ok && viaText.conversion?.kind === 'ci_to_sd');
+  const viaSe = toStandardDeviation('2.5', 'SE', 64, 'convert');
+  check('SE→SD is recorded', viaSe.ok && viaSe.conversion?.kind === 'se_to_sd'
+    && viaSe.conversion.inputs.se === 2.5 && viaSe.conversion.inputs.n === 64);
+  const plain = toStandardDeviation('4', 'SD', 40, 'use');
+  check('an SD used as-is records nothing', plain.ok && plain.conversion === undefined);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 14. Cluster design effect — n_eff = n / (1 + (m − 1)·ICC)
+//     m = 21, ICC = 0.05 → DE = 2 → n 200 becomes 100 (Handbook §23.1.4).
+// ─────────────────────────────────────────────────────────────────────────────
+{
+  close('design effect halves n at DE = 2', designEffectN(200, 21, 0.05), 100, 1e-12);
+  close('ICC = 0 changes nothing', designEffectN(200, 30, 0), 200, 1e-12);
+  close('m = 1 changes nothing', designEffectN(200, 1, 0.3), 200, 1e-12);
+  check('an ICC above 1 is refused', Number.isNaN(designEffectN(200, 10, 1.5)));
+
+  const rows = [
+    row('c1', 'Cluster 2016', { e1: '30', n1: '200', e2: '50', n2: '200', outcome: 'Caries' }),
+    row('p1', 'Parallel 2015', { e1: '20', n1: '100', e2: '30', n2: '100', outcome: 'Caries' }),
+  ];
+  const mapping = confirmed({
+    events_treatment: 'e1', total_treatment: 'n1', events_comparator: 'e2', total_comparator: 'n2', outcome: 'outcome',
+  });
+  const { pairings } = buildPairings(rows, mapping, 'wide', '', null, { treatment: null, comparator: null });
+  const opts = {
+    kind: 'dichotomous' as const, layout: 'wide' as const, mapping,
+    variabilityMeasureColumn: null, centralTendencyMeasureColumn: null,
+    variabilityActions: {}, centralTendencyActions: {},
+  };
+  const plainBuild = buildStudies(pairings, opts);
+  const adjusted = buildStudies(pairings, { ...opts, designEffects: { c1: { m: 21, icc: 0.05 } } });
+  const cl = adjusted.studies.find(st => st.documentId === 'c1')!;
+  const pl = adjusted.studies.find(st => st.documentId === 'p1')!;
+  close('cluster events divided by DE', (cl.treatment as BinaryArm).events, 15, 1e-12);
+  close('cluster total divided by DE', (cl.treatment as BinaryArm).total, 100, 1e-12);
+  check('randomised n is kept', cl.nRandomised?.treatment === 200 && cl.nRandomised?.comparator === 200);
+  check('one design-effect record, study-level',
+    (cl.conversions ?? []).length === 1 && cl.conversions![0].kind === 'design_effect' && !cl.conversions![0].arm);
+  check('the parallel trial is untouched', !pl.conversions && !pl.nRandomised && (pl.treatment as BinaryArm).total === 100);
+
+  // Same point estimate, wider interval: the design effect is about precision only.
+  const before = runMetaAnalysis(plainBuild.studies, 'RR', 'fixed').studies.find(st => st.documentId === 'c1')!;
+  const after = runMetaAnalysis(adjusted.studies, 'RR', 'fixed');
+  const afterRow = after.studies.find(st => st.documentId === 'c1')!;
+  close('the design effect leaves the RR alone', afterRow.est, before.est, 1e-12);
+  close('...and doubles its variance', afterRow.v, 2 * before.v, 1e-12);
+  check('the row carries effective and randomised n',
+    afterRow.nEffective?.treatment === 100 && afterRow.nRandomised?.treatment === 200);
+  check('totals show effective n', after.totals.treatment === '35/200', after.totals.treatment);
+  check('...and randomised n beside it', after.totalsRandomised?.treatment === '300', JSON.stringify(after.totalsRandomised));
+  check('no randomised totals without a design effect',
+    runMetaAnalysis(plainBuild.studies, 'RR', 'fixed').totalsRandomised === null);
 }
 
 // ── Report ───────────────────────────────────────────────────────────────────

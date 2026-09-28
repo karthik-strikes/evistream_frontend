@@ -4,7 +4,7 @@
  *   node --experimental-strip-types --import ./lib/__checks__/register-alias.mjs \
  *        lib/__checks__/robAdapter.check.mts
  *
- * Run against the **real** form files in `zforms/`, not against fixtures. The
+ * Run against the **real** form files in `resources/forms/`, not against fixtures. The
  * whole reason this layer exists is that those six forms disagree with each
  * other, so a fixture that agrees with itself would prove nothing. The previous
  * implementation read forms directly and could see three of the six; the first
@@ -36,7 +36,7 @@ function check(name: string, condition: boolean, detail = ''): void {
 
 // ── Load every real risk-of-bias form ────────────────────────────────────────
 
-const ROOT = '/home/ubuntu/evistream/zforms';
+const ROOT = '/home/ubuntu/evistream/resources/forms';
 const realForms: Array<{ file: string; form: Form }> = [];
 for (const dir of readdirSync(ROOT)) {
   let files: string[] = [];

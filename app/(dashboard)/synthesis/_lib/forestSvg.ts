@@ -20,7 +20,7 @@
 
 import {
   buildAxis, describeAbsolute, EFFECT_LABEL, formatMeasured, formatMeasuredTick, formatP, formatTick, hasNullValue,
-  isRatioMeasure, measureColumnLabel, MODEL_SHORT, studyDataCells, type MetaResult,
+  isRatioMeasure, measureColumnLabel, MIN_PREDICTION, MODEL_SHORT, studyDataCells, TAU2_LABEL, type MetaResult,
 } from '@/lib/metaAnalysis';
 
 // ── Geometry ─────────────────────────────────────────────────────────────────
@@ -122,6 +122,12 @@ export interface ForestSvgOptions {
   footer?: string;
   /** Minimal important difference on the display scale; shades the trivial zone. */
   mid?: number | null;
+  /**
+   * Which arm the LEFT of the null line favours. Left is the lower effect; it
+   * favours the treatment when a lower value is the benefit (harms, pain
+   * scores). Defaults to the comparator, the historic behaviour.
+   */
+  leftFavours?: 'treatment' | 'comparator';
 }
 
 export interface ForestSvg {
@@ -143,9 +149,14 @@ export function buildForestSvg(result: MetaResult, opts: ForestSvgOptions): Fore
   const stats: string[] = [];
   if (result.heterogeneity) {
     const h = result.heterogeneity;
+    // The estimator is named only where tau² was estimated; a fixed-effect tau² is 0 by assumption.
+    const tauName = result.model === 'random' ? ` (${TAU2_LABEL[result.tau2Method]})` : '';
+    const i2Ci = h.i2Lo != null && h.i2Hi != null
+      ? ` (95% CI ${h.i2Lo.toFixed(0)} to ${h.i2Hi.toFixed(0)}%)`
+      : '';
     stats.push(
-      `Heterogeneity: tau² = ${h.tau2.toFixed(3)}; Q = ${h.q.toFixed(1)}, df = ${h.df} `
-      + `(p = ${formatP(h.p)}); I² = ${h.i2.toFixed(0)}%`,
+      `Heterogeneity: tau²${tauName} = ${h.tau2.toFixed(3)}; Q = ${h.q.toFixed(1)}, df = ${h.df} `
+      + `(p = ${formatP(h.p)}); I² = ${h.i2.toFixed(0)}%${i2Ci}`,
     );
   }
   if (result.glmm) {
@@ -165,11 +176,19 @@ export function buildForestSvg(result: MetaResult, opts: ForestSvgOptions): Fore
       `95% prediction interval ${formatMeasuredTick(result.measure, result.prediction.lo)} to `
       + `${formatMeasuredTick(result.measure, result.prediction.hi)} (t on ${result.prediction.df} df)`,
     );
+  } else if (result.predictionSuppressed) {
+    // The reason is printed in the interval's place: a figure has no tooltip, and
+    // a missing line would read as if the model never had one.
+    stats.push(
+      `95% prediction interval not reported: ${result.predictionSuppressed} studies `
+      + `(needs at least ${MIN_PREDICTION})`,
+    );
   }
   if (result.hksj) {
     stats.push(
       `HKSJ 95% CI ${result.hksj.lo.toFixed(2)} to ${result.hksj.hi.toFixed(2)} `
-      + `(t on ${result.hksj.df} df, q = ${result.hksj.q.toFixed(2)})`,
+      + `(t on ${result.hksj.df} df, q = ${result.hksj.q.toFixed(2)}`
+      + `${Number.isFinite(result.hksj.p) ? `; p = ${formatP(result.hksj.p)}` : ''})`,
     );
   }
   if (result.absolute) {
@@ -379,8 +398,11 @@ export function buildForestSvg(result: MetaResult, opts: ForestSvgOptions): Fore
   // Direction labels, worded exactly as the screen words them — and omitted
   // entirely when there is no comparison to have a direction.
   if (showNull) {
-    const favoursLeft = opts.comparatorHeading.replace(/\s*n\/N$/i, '') || 'comparator';
-    const favoursRight = opts.treatmentHeading.replace(/\s*n\/N$/i, '') || 'treatment';
+    const comparatorName = opts.comparatorHeading.replace(/\s*n\/N$/i, '') || 'comparator';
+    const treatmentName = opts.treatmentHeading.replace(/\s*n\/N$/i, '') || 'treatment';
+    const leftIsTreatment = opts.leftFavours === 'treatment';
+    const favoursLeft = leftIsTreatment ? treatmentName : comparatorName;
+    const favoursRight = leftIsTreatment ? comparatorName : treatmentName;
     out.push(text(nullPx - 6, favoursY, `← Favours ${favoursLeft}`, { size: 9.5, fill: MUTED, anchor: 'end' }));
     out.push(text(nullPx + 6, favoursY, `Favours ${favoursRight} →`, { size: 9.5, fill: MUTED }));
   } else {

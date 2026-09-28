@@ -8,7 +8,7 @@ import type { HighlightBoxes, SelectedQuote, SourceMarker } from '@/components/P
 
 import type { Document, Form } from '@/types/api';
 import { ExtractionToolbar, type ExtractionMode } from './ExtractionToolbar';
-import { ExtractionForm, type DraftStatus } from './ExtractionForm';
+import { ExtractionForm, type ConditionsProp, type DraftStatus } from './ExtractionForm';
 import type { GroupingProps } from './GroupSetupDialog';
 import { DocumentQueueSidebar } from './DocumentQueueSidebar';
 import type { AiTablePrefill } from '../_lib/fieldKinds';
@@ -30,6 +30,8 @@ const PdfHighlightViewer = dynamic(
 );
 
 interface ExtractionViewProps {
+  /** Conditional questions — see ExtractionForm. */
+  conditions?: ConditionsProp;
   form: Form;
   doc: Document;
   documents: Document[];
@@ -148,6 +150,7 @@ export function ExtractionView({
   onSetPaperStatus,
   settingPaperStatus,
   grouping,
+  conditions,
 }: ExtractionViewProps) {
   // `currentPage` is a deep-link target that now also follows the reader's own
   // scrolling, so feeding the moving value back into the viewer would snap the
@@ -253,6 +256,7 @@ export function ExtractionView({
                 saving={saving}
                 hasNextDoc={hasNextDoc}
                 grouping={grouping}
+                conditions={conditions}
               />
             </div>
           </div>

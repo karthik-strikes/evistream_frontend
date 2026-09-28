@@ -11,7 +11,7 @@
  * rather than against itself. Each block below states the tool's own rule in
  * words and then checks the code against it.
  *
- * The binding checks run against the REAL `zforms/rob2/rob2_parallel_trial.json`,
+ * The binding checks run against the REAL `resources/forms/rob2/rob2_parallel_trial.json`,
  * not a fixture, for the reason `robAdapter.check.mts` already learned: a
  * fixture that agrees with the code proves nothing when the point is whether
  * the code survives the shapes real forms actually have.
@@ -298,7 +298,7 @@ function check(name: string, condition: boolean, detail = ''): void {
 // ─────────────────────────────────────────────────────────────────────────────
 {
   const here = dirname(fileURLToPath(import.meta.url));
-  const formPath = resolve(here, '../../../zforms/rob2/rob2_parallel_trial.json');
+  const formPath = resolve(here, '../../../resources/forms/rob2/rob2_parallel_trial.json');
   const form = JSON.parse(readFileSync(formPath, 'utf8'));
   const binding = bindSignalling(form.fields);
 

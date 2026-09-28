@@ -7,7 +7,7 @@ import { cn, modelTagTheme, modelFamilyLabel, modelFamily } from '@/lib/utils';
 import { Badge } from '@/components/ui';
 import { DocumentTags } from '@/components/documents/DocumentTags';
 import type { FormField } from '@/types/api';
-import { transformToLongFormat } from '@/lib/longFormatTransform';
+import { transformToLongFormat, fieldOrderKey } from '@/lib/longFormatTransform';
 import { FieldInfoTooltip } from '@/components/forms/FieldInfoTooltip';
 import { Quote, ScanText, Users } from 'lucide-react';
 import { SourceEvidenceDrawer } from '@/components/source-evidence/SourceEvidenceDrawer';
@@ -164,7 +164,7 @@ export default function LongFormatTable({
 
 
   // Column reorder (first/"Paper" column is locked in place)
-  const colOrderKey = formId ? `results-col-order:${formId}` : null;
+  const colOrderKey = formId ? `results-col-order:${formId}:${fieldOrderKey(formFields)}` : null;
   const [columnOrder, setColumnOrder] = useState<string[]>([]);
   useEffect(() => {
     if (!colOrderKey) { setColumnOrder([]); return; }

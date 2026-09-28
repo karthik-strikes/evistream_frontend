@@ -215,6 +215,8 @@ function diamondPoints(svg: string): number[] {
   const studies = [
     binary('A', 20, 100, 30, 100), binary('B', 26, 100, 28, 100),
     binary('C', 35, 100, 25, 100), binary('D', 41, 100, 22, 100),
+    // Fifth study since Sep 2026: the PI is suppressed below k = 5 (see below).
+    binary('E', 30, 100, 27, 100),
   ];
   const random = runMetaAnalysis(studies, 'RR', 'random');
   const fixed = runMetaAnalysis(studies, 'RR', 'fixed');
@@ -231,7 +233,23 @@ function diamondPoints(svg: string): number[] {
   check('the prediction interval is named with its df',
     /95% prediction interval .* \(t on \d+ df\)/.test(rSvg));
   check('the PI whisker is drawn dashed', rSvg.includes('stroke-dasharray="3 2"'));
-  check('HKSJ is reported with its q', /HKSJ 95% CI .* q = [\d.]+\)/.test(rSvg));
+  check('HKSJ is reported with its q', /HKSJ 95% CI .* q = [\d.]+[;)]/.test(rSvg));
+  check('and with its t-based p', /HKSJ 95% CI .*; p = (< )?[\d.]+\)/.test(rSvg));
+  check('I² is reported with its 95% CI', /I² = \d+% \(95% CI \d+ to \d+%\)/.test(rSvg));
+  check('the default estimator is named', rSvg.includes('tau² (DerSimonian–Laird)'));
+  const remlSvg = buildForestSvg(runMetaAnalysis(studies, 'RR', 'random', { tau2Method: 'reml' }), OPTS).svg;
+  check('a REML figure names REML', remlSvg.includes('tau² (REML)') && !remlSvg.includes('DerSimonian'));
+  check('a fixed-effect figure names no estimator', !fSvg.includes('tau² ('));
+
+  // Below k = 5 the PI is withheld and the figure says why, in its place.
+  const four = runMetaAnalysis(studies.slice(0, 4), 'RR', 'random');
+  const fourSvg = buildForestSvg(four, OPTS).svg;
+  check('k = 4: no PI whisker', !fourSvg.includes('stroke-dasharray="3 2"'));
+  check('k = 4: no "95% PI" label', !fourSvg.includes('95% PI'));
+  check('k = 4: the suppression reason is printed',
+    fourSvg.includes('95% prediction interval not reported: k = 4 &lt; 5 studies'));
+  check('k = 4: no interval numbers claimed', !/95% prediction interval [\d.-]+ to/.test(fourSvg));
+  check('k = 5: no suppression line', !rSvg.includes('not reported'));
   check('the overall-effect test is reported', rSvg.includes('Test for overall effect'));
 
   // A fixed-effect figure must not claim random-effects quantities.
@@ -243,6 +261,11 @@ function diamondPoints(svg: string): number[] {
   // Direction labels follow the column headings, as on screen.
   check('the favours labels use the arm headings',
     rSvg.includes('Favours Treatment') && rSvg.includes('Favours Comparator'));
+  check('by default the left side favours the comparator', rSvg.includes('← Favours Comparator'));
+  // Lower-is-benefit (harms, pain): left of the null favours the treatment.
+  const lSvg = buildForestSvg(random, { ...OPTS, leftFavours: 'treatment' }).svg;
+  check('leftFavours = treatment puts the treatment on the left',
+    lSvg.includes('← Favours Treatment') && lSvg.includes('Favours Comparator →'));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

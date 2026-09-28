@@ -7,7 +7,7 @@
  * fields (e.g., interventions) joined and repeated on every row.
  */
 
-import { displayLabel } from './absence';
+import { classify, displayLabel, NA_LABEL, NR_LABEL, NOT_APPLICABLE, NOT_REPORTED } from './absence';
 import { buildLabelMap, filenameStem } from './documentLabel';
 import type { FormField } from '@/types/api';
 
@@ -201,6 +201,20 @@ export function findJoinKey(a: FormField, b: FormField): string | null {
 // Column building
 // ---------------------------------------------------------------------------
 
+/**
+ * Short fingerprint of the form's field + column order. Screens that remember a
+ * dragged column order key it with this, so reordering fields on the Edit form
+ * screen shows up instead of hiding behind an older saved drag order.
+ */
+export function fieldOrderKey(fields: FormField[]): string {
+  const s = (fields ?? [])
+    .map(f => [f.field_name, ...(f.subform_fields ?? []).map(sf => sf.field_name)].join(','))
+    .join('|');
+  let h = 0;
+  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
+
 /** Build ordered column names for the long-format table. */
 export function buildColumns(classification: FieldClassification): string[] {
   const cols: string[] = ['Paper', 'Ref ID'];
@@ -315,7 +329,26 @@ export function transformToLongFormat(
     // envelopes too, or the flat cells silently lose their source evidence
     // whenever the table came back empty).
     if (deepestArray.length === 0) {
-      rows.push({ ...baseRow, ...flatValues, _rawCells: { ...flatRaw } });
+      // Say what the table said (NA / NR / failed) in each of its columns, and
+      // in any parent table's columns that carry a verdict of their own.
+      const row: LongFormatRow = { ...baseRow, ...flatValues };
+      const rawCells: Record<string, any> = { ...flatRaw };
+      const deepLabel = tableAbsenceLabel(data[deepestFieldName]);
+      for (const sf of (classification.deepestTableField.subform_fields ?? [])) {
+        row[sf.field_name] = deepLabel;
+        if (deepLabel) rawCells[sf.field_name] = data[deepestFieldName];
+      }
+      for (const parent of classification.parentTableFields) {
+        const pLabel = tableAbsenceLabel(data[parent.field_name]);
+        if (!pLabel) continue;
+        for (const sf of (parent.subform_fields ?? [])) {
+          if (row[sf.field_name]) continue;
+          row[sf.field_name] = pLabel;
+          rawCells[sf.field_name] = data[parent.field_name];
+        }
+      }
+      row._rawCells = rawCells;
+      rows.push(row);
       continue;
     }
 
@@ -344,11 +377,13 @@ export function transformToLongFormat(
           const deepVal = extractSubfieldValue(entry, joinKey);
           matchedParent = entries.find(pe => extractSubfieldValue(pe, joinKey) === deepVal) ?? null;
         }
-        // Fill parent subfield columns (skip join key if in deepest)
+        // Fill parent subfield columns (skip join key if in deepest). A parent
+        // table that is itself NA/NR as a whole says so in its columns.
+        const parentLabel = entries.length === 0 ? tableAbsenceLabel(data[parent.field_name]) : '';
         for (const sf of (parent.subform_fields ?? [])) {
           if ((classification.deepestTableField?.subform_fields ?? []).some(d => d.field_name === sf.field_name)) continue;
-          row[sf.field_name] = matchedParent ? extractSubfieldValue(matchedParent, sf.field_name) : '';
-          rawCells[sf.field_name] = matchedParent ? matchedParent[sf.field_name] : undefined;
+          row[sf.field_name] = matchedParent ? extractSubfieldValue(matchedParent, sf.field_name) : parentLabel;
+          rawCells[sf.field_name] = matchedParent ? matchedParent[sf.field_name] : (parentLabel ? data[parent.field_name] : undefined);
         }
       }
 
@@ -364,6 +399,29 @@ export function transformToLongFormat(
   }
 
   return { columns, rows };
+}
+
+/**
+ * What a table's columns should say when the WHOLE table carries a verdict
+ * instead of rows — `{value: "NA", status: "not_applicable"}`, an NR envelope,
+ * a failed cell, or a legacy bare "NR"/"NA" string. Every column of the one row
+ * we emit gets that label. Without it the table exploded to zero rows, every
+ * column came out blank, and the screens' `{val || 'NR'}` fallback turned a
+ * table that does not apply into one that is "not reported". Returns '' for no
+ * verdict (absent field, empty or real row list).
+ */
+export function tableAbsenceLabel(data: any): string {
+  if (data == null || Array.isArray(data)) return '';
+  if (typeof data === 'object') {
+    if (Array.isArray((data as any).value)) return '';
+    return displayLabel(data) ?? '';
+  }
+  if (typeof data === 'string' && data.trim()) {
+    const st = classify(data);
+    if (st === NOT_APPLICABLE) return NA_LABEL;
+    if (st === NOT_REPORTED) return NR_LABEL;
+  }
+  return '';
 }
 
 /** Extract an array from the extracted_data value (handles wrappers). */

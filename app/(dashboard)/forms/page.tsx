@@ -21,7 +21,7 @@ import {
   Textarea,
   EmptyState,
 } from '@/components/ui';
-import { Plus, Trash2, FileText, Code, AlertCircle, Check, Edit3, FolderOpen, ThumbsUp, ThumbsDown, MessageSquare, ChevronDown, ChevronUp, ChevronRight, X, Clipboard, ClipboardCheck, Download, FilePlus2 } from 'lucide-react';
+import { Plus, Trash2, FileText, Code, AlertCircle, Check, Edit3, FolderOpen, ThumbsUp, ThumbsDown, MessageSquare, ChevronDown, ChevronUp, ChevronRight, X, Clipboard, ClipboardCheck, Download, FilePlus2, StickyNote, GitBranch } from 'lucide-react';
 import PilotStudyDialog from '@/components/pilot/PilotStudyDialog';
 import { connectToJobLogs, type LogMessage } from '@/services/jobLogsWebSocket';
 import { apiClient } from '@/lib/api';
@@ -43,6 +43,8 @@ import {
   type DecompositionDependencyEdge,
 } from '@/components/forms/DecompositionDependencyOverlay';
 import { buildLabelMap } from '@/lib/documentLabel';
+import { LogicMap } from '@/components/forms/LogicMap';
+import { columnDepth, conditionDepth, conditionTag, orderViolations, renameReferences, validateConditions } from '@/lib/fieldConditions';
 
 export default function FormsPage() {
   const { selectedProject, projects } = useProject();
@@ -1467,9 +1469,19 @@ const importJsonFieldRec = (f: any): FormField => {
   ...(Array.isArray(f.hints) ? { hints: f.hints } : {}),
   ...(Array.isArray(f.rules) ? { rules: f.rules } : {}),
   ...(Array.isArray(f.examples) ? { examples: f.examples } : f.example != null ? { examples: [{ value: String(f.example), source_text: '' }] } : {}),
+  ...(f.condition && typeof f.condition === 'object' ? { condition: portableCondition(f.condition) } : {}),
   ...(Array.isArray(f.subform_fields) ? { subform_fields: f.subform_fields.map(importJsonFieldRec) } : {}),
   });
 };
+
+/** A condition as it travels between forms: rule_id / rev are the server's
+ *  bookkeeping for ONE form, so they are dropped on copy and import. */
+function portableCondition(c: any) {
+  return {
+    field: c.field, op: c.op, values: Array.isArray(c.values) ? c.values : [],
+    ...(c.from ? { from: c.from } : {}),
+  };
+}
 
 const sanitizeNameForApi = (name: string): string =>
   (name || '').trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '').replace(/_{2,}/g, '_').replace(/^(\d)/, '_$1');
@@ -1477,6 +1489,9 @@ const sanitizeNameForApi = (name: string): string =>
 const sanitizeFieldDeep = (f: FormField): FormField => ({
   ...f,
   field_name: sanitizeNameForApi(f.field_name),
+  // The parent is referenced by field_name, so it is sanitized the same way
+  // ("Study Design" → study_design) or the reference would dangle.
+  ...(f.condition ? { condition: { ...f.condition, field: sanitizeNameForApi(f.condition.field) } } : {}),
   ...(f.field_type === 'select' && f.options ? { options: f.options.filter(o => o.trim()) } : {}),
   ...(Array.isArray(f.subform_fields) ? { subform_fields: f.subform_fields.map(sanitizeFieldDeep) } : {}),
 });
@@ -1518,6 +1533,7 @@ const serializeFieldForCopy = (f: FormField): any => ({
   ...((f as any).hints?.length ? { hints: (f as any).hints } : {}),
   ...((f as any).rules?.length ? { rules: (f as any).rules } : {}),
   ...((f as any).examples?.length ? { examples: (f as any).examples } : {}),
+  ...(f.condition ? { condition: portableCondition(f.condition) } : {}),
   ...(f.field_type === 'array'
     ? { subform_fields: (f.subform_fields || []).map(serializeFieldForCopy) }
     : (f.subform_fields?.length ? { subform_fields: f.subform_fields.map(serializeFieldForCopy) } : {})),
@@ -1550,6 +1566,10 @@ function CreateFormDialog({
   ]);
   const [calState, setCalState] = useState<Record<string, UEFCalField>>({ '': blankCal() });
   const [selectedIdx, setSelectedIdx] = useState(0);
+  // Drag-to-reorder in the field list.
+  const newDragFrom = useRef<number | null>(null);
+  const [newDropIdx, setNewDropIdx] = useState<number | null>(null);
+  const [showLogic, setShowLogic] = useState(false);
 
   // JSON import panel
   const [showJsonPanel, setShowJsonPanel] = useState(false);
@@ -1562,6 +1582,12 @@ function CreateFormDialog({
   const saving = savingDraft || savingBuild;
 
   // ── Inline validation ────────────────────────────────────────────────────────
+  // Conditional questions are only valid relative to the other fields, so they
+  // are checked form-wide (same rules and wording as the server).
+  const conditionErrors = useMemo(
+    () => validateConditions(fields.map(({ _isNew, _isDeleted, ...f }) => sanitizeFieldDeep(f as FormField))),
+    [fields],
+  );
   const nameError = useMemo(() => {
     if (!formName.trim()) return null;
     const dupe = existingForms.some(f => f.form_name.trim().toLowerCase() === formName.trim().toLowerCase());
@@ -1576,8 +1602,9 @@ function CreateFormDialog({
       const effectiveDesc = calState[f.field_name]?.description || f.field_description || '';
       if (validateFieldRec({ ...f, field_description: effectiveDesc })) return false;
     }
+    if (conditionErrors.length > 0) return false;
     return true;
-  }, [formName, nameError, formDescription, fields, calState]);
+  }, [formName, nameError, formDescription, fields, calState, conditionErrors]);
 
   // ── Field helpers ─────────────────────────────────────────────────────────────
   const addField = () => {
@@ -1608,6 +1635,8 @@ function CreateFormDialog({
     const newName = patch.field_name !== undefined ? patch.field_name : oldName;
     updateField(idx, patch);
     if (newName !== oldName) {
+      // Follow-ups point at this field by name: keep them pointing at it.
+      setFields(prev => renameReferences(prev as any, oldName, newName) as UEFEditableField[]);
       setCalState(prev => {
         const next = { ...prev };
         next[newName] = next[oldName] ?? blankCal();
@@ -1736,7 +1765,20 @@ function CreateFormDialog({
 
   return (
     <div className="fixed inset-0 bg-black/60 dark:bg-black/70 backdrop-blur-md flex items-center justify-center z-50 p-4" onClick={handleClose}>
-      <div className="bg-white dark:bg-[#111111] rounded-2xl border border-gray-200 dark:border-[#1f1f1f] w-full max-w-[95vw] xl:max-w-[1400px] max-h-[95vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+      <div className="relative bg-white dark:bg-[#111111] rounded-2xl border border-gray-200 dark:border-[#1f1f1f] w-full max-w-[95vw] xl:max-w-[1400px] max-h-[95vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+        {showLogic && (
+          <LogicMap
+            fields={fields as any}
+            editable
+            onChange={next => {
+              const sel = fields[selectedIdx]?.field_name;
+              setFields(next as UEFEditableField[]);
+              setSelectedIdx(Math.max(0, next.findIndex(f => f.field_name === sel)));
+            }}
+            onClose={() => setShowLogic(false)}
+            onOpenField={name => { const i = fields.findIndex(f => f.field_name === name); if (i >= 0) setSelectedIdx(i); setShowLogic(false); }}
+          />
+        )}
 
         {/* Header */}
         <div className="px-6 pt-5 pb-4 flex-shrink-0 border-b border-gray-100 dark:border-[#1a1a1a]">
@@ -1781,6 +1823,10 @@ function CreateFormDialog({
               <p className="text-xs text-gray-600 dark:text-zinc-400">
                 <span className="font-semibold text-gray-800 dark:text-zinc-200">{fields.length}</span> field{fields.length !== 1 ? 's' : ''}
               </p>
+              <button type="button" onClick={() => setShowLogic(true)} title="Question logic — which answers unlock which questions"
+                className="text-[11px] text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200 transition-colors flex items-center gap-1">
+                <GitBranch className="h-3 w-3" /> Logic
+              </button>
               <button type="button" onClick={addField} className="text-[11px] text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200 transition-colors flex items-center gap-1">
                 <Plus className="h-3 w-3" /> Add field
               </button>
@@ -1826,12 +1872,30 @@ function CreateFormDialog({
                     const displayName = f.display_name || humanizeFieldName(f.field_name);
                     const hasErr = !!validateFieldRec(f);
                     return (
-                      <div key={idx} className="group flex items-center gap-1">
+                      <div key={idx}
+                        draggable={fields.length > 1}
+                        onDragStart={e => { newDragFrom.current = idx; e.dataTransfer.effectAllowed = 'move'; }}
+                        onDragOver={e => { if (newDragFrom.current === null) return; e.preventDefault(); if (newDropIdx !== idx) setNewDropIdx(idx); }}
+                        onDragLeave={() => setNewDropIdx(d => (d === idx ? null : d))}
+                        onDrop={e => {
+                          e.preventDefault();
+                          const from = newDragFrom.current;
+                          newDragFrom.current = null; setNewDropIdx(null);
+                          if (from === null || from === idx) return;
+                          const n = [...fields]; const [m] = n.splice(from, 1); n.splice(idx, 0, m);
+                          const broken = orderViolations(n as any).filter(e => !orderViolations(fields as any).includes(e));
+                          if (broken.length) { toast({ title: "Can't move it there", description: broken[0], variant: 'error' }); return; }
+                          setFields(n);
+                          setSelectedIdx(idx);
+                        }}
+                        onDragEnd={() => { newDragFrom.current = null; setNewDropIdx(null); }}
+                        className={cn("group flex items-center gap-1 rounded-lg cursor-grab active:cursor-grabbing", dropLineClass(newDropIdx === idx, newDragFrom.current, idx))}>
                         <button type="button" onClick={() => setSelectedIdx(idx)}
                           className={cn("flex-1 min-w-0 text-left px-3 py-2 rounded-lg flex items-center gap-2 text-sm transition-colors",
                             isSelected ? "bg-gray-900 dark:bg-zinc-200 text-white dark:text-gray-900" : "text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]")}>
                           <span className={cn("text-xs shrink-0", isSelected ? "text-gray-400 dark:text-zinc-600" : "text-gray-400 dark:text-zinc-500")}>{typeGlyph}</span>
-                          <span className="flex-1 truncate">{f.field_name.trim() ? displayName : <span className="italic opacity-60">unnamed</span>}</span>
+                          <span className="flex-1 truncate" style={{ paddingLeft: conditionDepth(fields as any, f.field_name) * 12 }}>{f.field_name.trim() ? displayName : <span className="italic opacity-60">unnamed</span>}</span>
+                          {f.condition && <span className={cn("text-[10px] shrink-0", isSelected ? "opacity-70" : "text-slate-400 dark:text-zinc-500")}>{conditionTag(f.condition)}</span>}
                           {hasErr && !isSelected && <span className="w-1.5 h-1.5 rounded-full bg-red-400 shrink-0" />}
                         </button>
                         {fields.length > 1 && (
@@ -1865,6 +1929,12 @@ function CreateFormDialog({
                 cal={selectedCal!}
                 editable={true}
                 simple={true}
+                conditionProps={{
+                  onOpenLogic: () => setShowLogic(true),
+                  fields,
+                  index: selectedIdx,
+                  onOpenField: name => { const i = fields.findIndex(f => f.field_name === name); if (i >= 0) setSelectedIdx(i); },
+                }}
                 onFieldPatch={patch => updateFieldAndRekey(selectedIdx, patch)}
                 onCalPatch={patch => updateCal(selectedField.field_name, patch)}
               />
@@ -1878,6 +1948,11 @@ function CreateFormDialog({
             <input type="checkbox" checked={enableReview} onChange={e => setEnableReview(e.target.checked)} className="w-3.5 h-3.5 rounded border-gray-300 dark:border-zinc-600 accent-amber-500" />
             <span className="text-xs text-gray-500 dark:text-zinc-400">Enable decomposition review (HITL #1)</span>
           </label>
+          {conditionErrors.length > 0 && (
+            <p className="text-[11px] text-red-500 leading-snug min-w-0 truncate" title={conditionErrors.join('\n')}>
+              {conditionErrors[0]}{conditionErrors.length > 1 ? ` (+${conditionErrors.length - 1} more)` : ''}
+            </p>
+          )}
           <div className="flex-1" />
           <div className="flex items-center gap-2 shrink-0">
             <button type="button" onClick={onClose} disabled={saving} className="text-sm px-4 py-2 rounded-lg border border-gray-200 dark:border-[#2a2a2a] text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-white/[0.03] transition-colors">Cancel</button>
@@ -2537,7 +2612,7 @@ function DecompositionReviewDialog({
                             <p className="text-[10px] text-blue-500/60 dark:text-blue-400/40 mt-1.5">
                               {storedMode
                                 ? 'This is the mode saved for this field. You can change it in the field editor once the form finishes generating.'
-                                : 'No mode saved yet, so this table will run Fast. You can switch it to Rigorous or Agentic in the field editor once the form finishes generating.'}
+                                : 'No mode saved yet, so this table will run Fast. You can switch it to Rigorous in the field editor once the form finishes generating.'}
                             </p>
                           </div>
                         )}
@@ -2633,6 +2708,24 @@ interface UEFDiff {
   calibrationChanges: string[];
   optionsChanged: string[];
   subfieldParentFields: string[];
+  /** Top-level display order differs from the saved one (display only — no regen). */
+  orderChanged: boolean;
+  /** Top-level `required` toggled. Subfield `required` travels with subform_fields. */
+  requiredChanged: string[];
+  /** Top-level condition set / edited / cleared. Column conditions travel with subform_fields. */
+  conditionChanged: string[];
+}
+
+/** Insertion line for drag-to-reorder: above the target when moving up, below when moving down. */
+function dropLineClass(active: boolean, from: number | null, to: number): string {
+  if (!active || from === null || from === to) return '';
+  return from > to ? 'shadow-[inset_0_2px_0_0_#0ea5e9]' : 'shadow-[inset_0_-2px_0_0_#0ea5e9]';
+}
+
+/** What a condition SAYS — rule_id / rev are server bookkeeping, not an edit. */
+function conditionKey(c: any): string {
+  if (!c || typeof c !== 'object' || !c.field) return '';
+  return JSON.stringify([c.from || 'form', c.field, c.op, c.values || []]);
 }
 
 function computeUEFDiff(
@@ -2652,11 +2745,16 @@ function computeUEFDiff(
   const typeChanged: Array<{ field_name: string; from: string; to: string }> = [];
   const optionsChanged: string[] = [];
   const subfieldParentFields: string[] = [];
+  const requiredChanged: string[] = [];
+  const conditionChanged: string[] = [];
 
   for (const [fname, ef] of editedMap) {
     if (ef._isNew) continue;
     const orig = origMap.get(fname);
     if (!orig) continue;
+    // Independent of the chain below: a field can change options AND required.
+    if ((orig.required === true) !== (ef.required === true)) requiredChanged.push(fname);
+    if (conditionKey(orig.condition) !== conditionKey(ef.condition)) conditionChanged.push(fname);
     if (orig.field_type !== ef.field_type) {
       typeChanged.push({ field_name: fname, from: orig.field_type, to: ef.field_type });
     } else if (JSON.stringify(orig.options) !== JSON.stringify(ef.options)) {
@@ -2680,14 +2778,23 @@ function computeUEFDiff(
     ) calibrationChanges.push(fname);
   }
 
+  // Order of the fields both sides share. Display only: it rewrites the order
+  // of forms.fields, which pilot/results iterate, and leaves schema_def alone.
+  const origOrder = originalFields.map(f => f.field_name).filter(n => editedMap.has(n));
+  const editedOrder = activeEdited.filter(f => !f._isNew && origMap.has(f.field_name)).map(f => f.field_name);
+  const orderChanged = origOrder.join('\u0000') !== editedOrder.join('\u0000');
+
   const hasSchema = added.length > 0 || removed.length > 0 || typeChanged.length > 0;
-  const hasCalibration = calibrationChanges.length > 0 || subfieldParentFields.length > 0 || optionsChanged.length > 0;
+  const hasCalibration = calibrationChanges.length > 0 || subfieldParentFields.length > 0 || optionsChanged.length > 0 || orderChanged || requiredChanged.length > 0 || conditionChanged.length > 0;
   return {
     kind: hasSchema ? 'schema' : hasCalibration ? 'calibration' : 'none',
     schemaChanges: { added, removed, typeChanged },
     calibrationChanges,
     optionsChanged,
     subfieldParentFields,
+    orderChanged,
+    requiredChanged,
+    conditionChanged,
   };
 }
 
@@ -2858,8 +2965,8 @@ function EditFormDialog({
 
   // ── Diff ─────────────────────────────────────────────────────────────────
   const diff = useMemo<UEFDiff>(() => {
-    if (!isActive) return { kind: 'schema', schemaChanges: { added: [], removed: [], typeChanged: [] }, calibrationChanges: [], optionsChanged: [], subfieldParentFields: [] };
-    if (calLoading) return { kind: 'none', schemaChanges: { added: [], removed: [], typeChanged: [] }, calibrationChanges: [], optionsChanged: [], subfieldParentFields: [] };
+    if (!isActive) return { kind: 'schema', schemaChanges: { added: [], removed: [], typeChanged: [] }, calibrationChanges: [], optionsChanged: [], subfieldParentFields: [], orderChanged: false, requiredChanged: [], conditionChanged: [] };
+    if (calLoading) return { kind: 'none', schemaChanges: { added: [], removed: [], typeChanged: [] }, calibrationChanges: [], optionsChanged: [], subfieldParentFields: [], orderChanged: false, requiredChanged: [], conditionChanged: [] };
     return computeUEFDiff(form, fields, calState, origCalState, origStructuralFields);
   }, [isActive, calLoading, fields, calState, origCalState, form]);
 
@@ -2870,7 +2977,7 @@ function EditFormDialog({
   const [addPanel, setAddPanel] = useState({ field_name: '', display_name: '', field_type: 'text', target_signature_class: '', options: [] as string[], description: '', examples: [] as Array<{ value: string; source_text: string }> });
   const [addingField, setAddingField] = useState(false);
   const [addPanelError, setAddPanelError] = useState('');
-  const [removeModal, setRemoveModal] = useState<null | { fieldName: string; consumers: string[]; phase: 'confirm' | 'blocked' }>(null);
+  const [removeModal, setRemoveModal] = useState<null | { fieldName: string; consumers: string[]; conditionDependents?: string[]; phase: 'confirm' | 'blocked' }>(null);
   const [removingField, setRemovingField] = useState(false);
 
   // ── Saving ────────────────────────────────────────────────────────────────
@@ -2923,8 +3030,34 @@ function EditFormDialog({
     } finally { setSavingIdentity(false); }
   };
 
+  // ── Notes (team-only, never reaches codegen) ──────────────────────────────
+  // Editable whenever the user can manage forms — even while the form is
+  // generating — because notes touch no column the pipeline reads.
+  const [notesDraft, setNotesDraft] = useState(form.notes || '');
+  const [notesOpen, setNotesOpen] = useState(false);
+  const [savingNotes, setSavingNotes] = useState(false);
+  const savedNotesRef = useRef(form.notes || '');
+
+  const saveNotes = async () => {
+    const next = notesDraft.trim();
+    if (next === savedNotesRef.current.trim()) return;
+    setSavingNotes(true);
+    try {
+      await formsService.update(form.id, { notes: next });
+      savedNotesRef.current = next;
+      queryClient.invalidateQueries({ queryKey: ['forms'], exact: false });
+    } catch (err: any) {
+      toast({ title: 'Could not save notes', description: getErrorMessage(err), variant: 'error' });
+    } finally { setSavingNotes(false); }
+  };
+
   const handleSave = async () => {
     if (isReadOnly) return;
+    const condErrs = validateConditions(fields.filter(f => !f._isDeleted) as any);
+    if (condErrs.length) {
+      toast({ title: 'Fix the conditional questions first', description: condErrs[0], variant: 'error' });
+      return;
+    }
     if (isDraftOrFailed) { await doStructuralSave(false); return; }
     // active form
     if (diff.kind === 'none') { onClose(); return; }
@@ -2944,6 +3077,9 @@ function EditFormDialog({
   const doCalibrationSave = async () => {
     setSaving(true);
     try {
+      if (diff.orderChanged) {
+        await formsService.reorderFields(form.id, fields.filter(f => !f._isDeleted).map(f => f.field_name));
+      }
       const fieldNamesToUpdate = Array.from(new Set([...diff.calibrationChanges, ...diff.optionsChanged]));
       if (fieldNamesToUpdate.length > 0) {
         const updates = fieldNamesToUpdate.map(fname => ({
@@ -2956,7 +3092,26 @@ function EditFormDialog({
             ? { options: fields.find(f => f.field_name === fname)?.options || [] }
             : {}),
         }));
+        for (const u of updates as any[]) {
+          const f = fields.find(ff => ff.field_name === u.field_name);
+          if (diff.requiredChanged.includes(u.field_name)) u.required = f?.required === true;
+          if (diff.conditionChanged.includes(u.field_name)) u.condition = f?.condition ?? null;
+        }
         await formsService.updateFieldEdits(form.id, updates);
+      }
+      // Required / condition toggles: a minimal entry, so they don't resend
+      // calibration. `condition: null` clears one on the server.
+      const flagOnly = Array.from(new Set([...diff.requiredChanged, ...diff.conditionChanged]))
+        .filter(n => !fieldNamesToUpdate.includes(n));
+      if (flagOnly.length > 0) {
+        await formsService.updateFieldEdits(form.id, flagOnly.map(n => {
+          const f = fields.find(ff => ff.field_name === n);
+          return {
+            field_name: n,
+            ...(diff.requiredChanged.includes(n) ? { required: f?.required === true } : {}),
+            ...(diff.conditionChanged.includes(n) ? { condition: f?.condition ?? null } : {}),
+          };
+        }));
       }
       let droppedBlankCount = 0;
       for (const fname of diff.subfieldParentFields) {
@@ -3039,8 +3194,9 @@ function EditFormDialog({
     const f = fields[idx];
     try {
       const deps = await formsService.getFieldDependencies(form.id, f.field_name);
-      if (deps.consuming_signatures.length > 0) {
-        setRemoveModal({ fieldName: f.field_name, consumers: deps.consuming_signatures, phase: 'blocked' });
+      const conditionDependents = deps.condition_dependents || [];
+      if (deps.consuming_signatures.length > 0 || conditionDependents.length > 0) {
+        setRemoveModal({ fieldName: f.field_name, consumers: deps.consuming_signatures, conditionDependents, phase: 'blocked' });
       } else {
         setRemoveModal({ fieldName: f.field_name, consumers: [], phase: 'confirm' });
       }
@@ -3094,18 +3250,98 @@ function EditFormDialog({
     finally { setRemovingField(false); }
   };
 
+  // Drag-to-reorder. Draft forms save it with the whole field list; active
+  // forms save it through /field-order (top level) and subfield-edit (columns).
+  const dragItem = useRef<
+    | { kind: 'field'; name: string; group: string | null }
+    | { kind: 'col'; field: string; from: number }
+    | null
+  >(null);
+  const [dropKey, setDropKey] = useState<string | null>(null);
+  const endDrag = () => { dragItem.current = null; setDropKey(null); };
+
+  const moveFieldTo = (fromName: string, toName: string) => {
+    if (fromName === toName) return;
+    const selName = fields[selectedIdx]?.field_name;
+    const n = [...fields];
+    const i = n.findIndex(f => f.field_name === fromName);
+    const j = n.findIndex(f => f.field_name === toName);
+    if (i < 0 || j < 0) return;
+    const [m] = n.splice(i, 1);
+    n.splice(j, 0, m);
+    if (refuseIfOrderBreaks(n)) return;
+    setFields(n);
+    setSelectedIdx(Math.max(0, n.findIndex(f => f.field_name === selName)));
+  };
+
+  // A follow-up must stay below the question it depends on.
+  const refuseIfOrderBreaks = (next: UEFEditableField[]): boolean => {
+    const before = new Set(orderViolations(fields as any));
+    const broken = orderViolations(next as any).filter(e => !before.has(e));
+    if (!broken.length) return false;
+    toast({ title: "Can't move it there", description: broken[0], variant: 'error' });
+    return true;
+  };
+
+  const moveColumnTo = (fieldIdx: number, from: number, to: number) => {
+    const subs = [...((fields[fieldIdx]?.subform_fields as any[]) || [])];
+    if (from === to || from < 0 || to < 0 || from >= subs.length || to >= subs.length) return;
+    const [m] = subs.splice(from, 1);
+    subs.splice(to, 0, m);
+    if (refuseIfOrderBreaks(fields.map((f, k) => (k === fieldIdx ? { ...f, subform_fields: subs } : f)))) return;
+    updateField(fieldIdx, { subform_fields: subs } as any);
+  };
+
+  // Props that make one field row/chip draggable. `group` limits drops to the
+  // same signature in the Stages tree; the Order list passes null (anywhere).
+  const fieldDragProps = (name: string, group: string | null) => {
+    if (isReadOnly) return {};
+    const key = `field:${name}`;
+    return {
+      draggable: true,
+      onDragStart: (e: React.DragEvent) => { e.stopPropagation(); dragItem.current = { kind: 'field', name, group }; e.dataTransfer.effectAllowed = 'move'; },
+      onDragOver: (e: React.DragEvent) => {
+        const d = dragItem.current;
+        if (!d || d.kind !== 'field' || d.group !== group) return;
+        e.preventDefault(); e.stopPropagation();
+        if (dropKey !== key) setDropKey(key);
+      },
+      onDragLeave: () => setDropKey(k => (k === key ? null : k)),
+      onDrop: (e: React.DragEvent) => {
+        const d = dragItem.current;
+        e.preventDefault(); e.stopPropagation();
+        endDrag();
+        if (d && d.kind === 'field' && d.group === group) moveFieldTo(d.name, name);
+      },
+      onDragEnd: endDrag,
+    };
+  };
+  const fieldDropLine = (name: string) => {
+    const d = dragItem.current;
+    if (dropKey !== `field:${name}` || !d || d.kind !== 'field') return '';
+    return dropLineClass(true, fieldIndexByName[d.name] ?? null, fieldIndexByName[name] ?? 0);
+  };
+
   const toggleDelete = (idx: number) => {
     setFields(prev => prev.map((f, i) => i === idx ? { ...f, _isDeleted: !f._isDeleted } : f));
   };
 
   const updateField = (idx: number, patch: Partial<FormField>) => {
-    setFields(prev => prev.map((f, i) => {
-      if (i !== idx) return f;
-      const updated = { ...f, ...patch };
-      if (patch.field_type === 'select' && !updated.options) updated.options = [''];
-      if (patch.field_type && patch.field_type !== 'select') delete updated.options;
-      return updated;
-    }));
+    setFields(prev => {
+      const oldName = prev[idx]?.field_name;
+      const next = prev.map((f, i) => {
+        if (i !== idx) return f;
+        const updated = { ...f, ...patch };
+        if (patch.field_type === 'select' && !updated.options) updated.options = [''];
+        if (patch.field_type && patch.field_type !== 'select') delete updated.options;
+        return updated;
+      });
+      // Draft rename (a live form's field_name is locked): keep follow-ups
+      // pointing at the field they depend on.
+      return patch.field_name !== undefined && oldName && patch.field_name !== oldName
+        ? renameReferences(next as any, oldName, patch.field_name) as UEFEditableField[]
+        : next;
+    });
   };
 
   const updateCal = (fname: string, patch: Partial<UEFCalField>) => {
@@ -3164,6 +3400,10 @@ function EditFormDialog({
   const [uefExpandedSigs, setUefExpandedSigs] = useState<Set<string>>(new Set(uefMeta.signatures.map((s: any) => s.name)));
   // Table fields whose column list is expanded in the left rail.
   const [uefExpandedTables, setUefExpandedTables] = useState<Set<string>>(new Set());
+  // Rail shows the pipeline tree by default; "Order" shows the flat list in
+  // display order (what pilot and results follow), with move arrows.
+  const [railView, setRailView] = useState<'stages' | 'order'>('stages');
+  const [showLogic, setShowLogic] = useState(false);
   // Focus request handed to FieldEditorPane so a rail click on a column scrolls
   // the editor to that column's card. Nonce makes repeat clicks re-scroll.
   const [focusSubfield, setFocusSubfield] = useState<{ name: string; nonce: number } | null>(null);
@@ -3186,21 +3426,48 @@ function EditFormDialog({
       {subs.map((sf: any, si: number) => {
         const subName = sf.field_name || '';
         const isFocused = focusSubfield?.name === subName && fieldIdx === selectedIdx;
+        const key = `col:${fname}:${si}`;
+        const d = dragItem.current;
+        const dragProps = isReadOnly ? {} : {
+          draggable: true,
+          onDragStart: (e: React.DragEvent) => { e.stopPropagation(); dragItem.current = { kind: 'col', field: fname, from: si }; e.dataTransfer.effectAllowed = 'move'; },
+          onDragOver: (e: React.DragEvent) => {
+            const cur = dragItem.current;
+            if (!cur || cur.kind !== 'col' || cur.field !== fname) return;
+            e.preventDefault(); e.stopPropagation();
+            if (dropKey !== key) setDropKey(key);
+          },
+          onDragLeave: () => setDropKey(k => (k === key ? null : k)),
+          onDrop: (e: React.DragEvent) => {
+            const cur = dragItem.current;
+            e.preventDefault(); e.stopPropagation();
+            endDrag();
+            if (cur && cur.kind === 'col' && cur.field === fname) moveColumnTo(fieldIdx, cur.from, si);
+          },
+          onDragEnd: endDrag,
+        };
         return (
+          <div key={subName || si} {...dragProps}
+            className={cn("rounded-md", !isReadOnly && "cursor-grab active:cursor-grabbing",
+              dropLineClass(dropKey === key, d && d.kind === 'col' && d.field === fname ? d.from : null, si))}>
           <button
-            key={subName || si}
             type="button"
             onClick={() => selectSubfield(fieldIdx, subName)}
             title={subName}
             className={cn(
-              "text-left text-[11px] leading-snug py-[3px] px-1.5 rounded-md truncate transition-colors",
+              "w-full text-left text-[11px] leading-snug py-[3px] px-1.5 rounded-md truncate transition-colors",
+              !isReadOnly && "cursor-grab active:cursor-grabbing",
               isFocused
                 ? "text-sky-700 dark:text-sky-300 bg-sky-50 dark:bg-sky-950/30"
                 : "text-gray-500 dark:text-zinc-400 hover:text-gray-900 dark:hover:text-zinc-100 hover:bg-black/[0.03] dark:hover:bg-white/[0.04]",
             )}
           >
-            {sf.display_name || (subName ? humanizeFieldName(subName) : <span className="italic opacity-60">unnamed column</span>)}
+            <span style={{ paddingLeft: columnDepth(subs, subName) * 10 }}>
+              {sf.display_name || (subName ? humanizeFieldName(subName) : <span className="italic opacity-60">unnamed column</span>)}
+            </span>
+            {sf.condition && <span className="ml-1 text-[10px] text-slate-400 dark:text-zinc-500">{conditionTag(sf.condition)}</span>}
           </button>
+          </div>
         );
       })}
       {subs.length === 0 && <p className="text-[10.5px] text-gray-400 dark:text-zinc-600 italic px-1.5 py-0.5">No columns</p>}
@@ -3214,7 +3481,21 @@ function EditFormDialog({
 
   return (
     <div className="fixed inset-0 bg-black/60 dark:bg-black/70 backdrop-blur-md flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div className="bg-white dark:bg-[#111111] rounded-2xl border border-gray-200 dark:border-[#1f1f1f] w-full max-w-[95vw] xl:max-w-[1500px] max-h-[95vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+      <div className="relative bg-white dark:bg-[#111111] rounded-2xl border border-gray-200 dark:border-[#1f1f1f] w-full max-w-[95vw] xl:max-w-[1500px] max-h-[95vh] flex flex-col shadow-2xl" onClick={e => e.stopPropagation()}>
+        {showLogic && (
+          <LogicMap
+            fields={fields as any}
+            editable={!isReadOnly}
+            onChange={next => {
+              if (refuseIfOrderBreaks(next as UEFEditableField[])) return;
+              const sel = fields[selectedIdx]?.field_name;
+              setFields(next as UEFEditableField[]);
+              setSelectedIdx(Math.max(0, next.findIndex(f => f.field_name === sel)));
+            }}
+            onClose={() => setShowLogic(false)}
+            onOpenField={name => { const i = fields.findIndex(f => f.field_name === name); if (i >= 0) setSelectedIdx(i); setShowLogic(false); }}
+          />
+        )}
 
         {/* Header */}
         <div className="px-6 pt-5 pb-3 flex-shrink-0 border-b border-gray-100 dark:border-[#1a1a1a]">
@@ -3267,6 +3548,57 @@ function EditFormDialog({
                   ? 'Viewing only — editing needs the Create Forms permission.'
                   : isActive ? 'Calibration edits save instantly. Use Add / Remove for structural changes.' : 'Edit fields, descriptions, hints, rules, and examples. Save when ready.'}
               </p>
+              <div className={cn(
+                "mt-3 w-full rounded-xl border transition-colors",
+                notesOpen
+                  ? "border-gray-200 dark:border-[#262626] bg-gray-50/70 dark:bg-[#151515]"
+                  : "border-transparent hover:border-gray-200 dark:hover:border-[#262626] hover:bg-gray-50/60 dark:hover:bg-[#141414]",
+              )}>
+                <button
+                  type="button"
+                  onClick={() => setNotesOpen(o => !o)}
+                  className="w-full flex items-center gap-2.5 px-3 py-2 text-left"
+                >
+                  <span className="h-6 w-6 rounded-lg bg-sky-50 dark:bg-sky-950/40 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
+                    <StickyNote className="h-3.5 w-3.5" />
+                  </span>
+                  <span className="text-[13px] font-medium text-gray-800 dark:text-zinc-200 shrink-0">Notes</span>
+                  {notesOpen ? (
+                    <span className="text-[11px] text-gray-400 dark:text-zinc-500">Team only · not used by the AI</span>
+                  ) : notesDraft.trim() ? (
+                    <span className="text-[13px] text-gray-500 dark:text-zinc-400 truncate min-w-0">{notesDraft.trim().split('\n')[0]}</span>
+                  ) : (
+                    <span className="text-[13px] text-gray-400 dark:text-zinc-500 italic">{canManage ? 'Add a note for the team' : 'No notes'}</span>
+                  )}
+                  <span className="ml-auto flex items-center gap-2 shrink-0">
+                    {notesOpen && (
+                      <span className="text-[11px] text-gray-400 dark:text-zinc-500 tabular-nums">
+                        {savingNotes ? 'Saving…' : notesDraft.trim() === savedNotesRef.current.trim() ? (notesDraft.trim() ? 'Saved' : '') : 'Unsaved'}
+                      </span>
+                    )}
+                    {notesOpen ? <ChevronUp className="h-3.5 w-3.5 text-gray-400" /> : <ChevronDown className="h-3.5 w-3.5 text-gray-400" />}
+                  </span>
+                </button>
+                {notesOpen && (
+                  <div className="px-3 pb-3">
+                    <textarea
+                      autoFocus={canManage}
+                      value={notesDraft}
+                      readOnly={!canManage}
+                      onChange={e => setNotesDraft(e.target.value)}
+                      onBlur={() => { if (canManage) saveNotes(); }}
+                      rows={5}
+                      maxLength={20000}
+                      placeholder={canManage ? 'Protocol decisions, caveats, how to handle edge cases, change history…' : 'No notes yet.'}
+                      className="w-full text-sm text-gray-700 dark:text-zinc-200 placeholder:text-gray-400 dark:placeholder:text-zinc-600 bg-white dark:bg-[#0e0e0e] border border-gray-200 dark:border-[#232323] rounded-lg px-3.5 py-2.5 outline-none focus:border-sky-300 dark:focus:border-sky-800 focus:ring-4 focus:ring-sky-100/60 dark:focus:ring-sky-950/40 leading-relaxed resize-y min-h-[110px] transition-shadow"
+                    />
+                    <div className="flex items-center justify-between mt-1.5 px-0.5">
+                      <p className="text-[11px] text-gray-400 dark:text-zinc-500">{canManage ? 'Saves automatically when you click away.' : 'Read-only — editing needs the Create Forms permission.'}</p>
+                      <p className="text-[11px] text-gray-400 dark:text-zinc-500 tabular-nums">{notesDraft.length.toLocaleString()} / 20,000</p>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
             <button type="button" onClick={onClose} className="text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 transition-colors p-1 shrink-0">
               <X className="h-4 w-4" />
@@ -3282,6 +3614,22 @@ function EditFormDialog({
               <p className="text-xs text-gray-600 dark:text-zinc-400">
                 <span className="font-semibold text-gray-800 dark:text-zinc-200">{activeFieldCount}</span> fields
               </p>
+              {uefMeta.pipeline.length > 0 && (
+                <div className="flex items-center rounded-md border border-gray-200 dark:border-[#2a2a2a] p-0.5 text-[10.5px]">
+                  {(['stages', 'order'] as const).map(v => (
+                    <button key={v} type="button" onClick={() => setRailView(v)}
+                      title={v === 'order' ? 'Display order used by Pilot and Results — reorder here' : 'Grouped by extraction stage'}
+                      className={cn("px-1.5 py-0.5 rounded transition-colors",
+                        railView === v ? "bg-gray-900 dark:bg-zinc-200 text-white dark:text-gray-900" : "text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200")}>
+                      {v === 'stages' ? 'Stages' : 'Order'}
+                    </button>
+                  ))}
+                </div>
+              )}
+              <button type="button" onClick={() => setShowLogic(true)} title="Question logic — which answers unlock which questions"
+                className="text-[11px] text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200 transition-colors flex items-center gap-1">
+                <GitBranch className="h-3 w-3" /> Logic
+              </button>
               {!isReadOnly && (
                 <button type="button" onClick={addField} className="text-[11px] text-gray-500 dark:text-zinc-400 hover:text-gray-800 dark:hover:text-zinc-200 transition-colors flex items-center gap-1">
                   <Plus className="h-3 w-3" /> Add field
@@ -3290,7 +3638,7 @@ function EditFormDialog({
             </div>
             {/* Inline add-field panel for active forms */}
             <div className="flex-1 overflow-y-auto px-4 py-3">
-              {uefMeta.pipeline.length > 0 ? (
+              {uefMeta.pipeline.length > 0 && railView === 'stages' ? (
                 // Pipeline-grouped view
                 <>
                   {uefMeta.pipeline.map((stage: any, si: number) => {
@@ -3316,7 +3664,9 @@ function EditFormDialog({
                           </button>
                           {isOpen && stageSigs.map((sig: any) => {
                             const sigOpen = uefExpandedSigs.has(sig.name);
-                            const sigFieldNames = Object.keys(sig.fields || {});
+                            // Display order (what pilot/results follow), not decomposition order.
+                            const sigFieldNames = Object.keys(sig.fields || {})
+                              .sort((a, b) => (fieldIndexByName[a] ?? 1e9) - (fieldIndexByName[b] ?? 1e9));
                             return (
                               <div key={sig.name} className="ml-2 mb-1">
                                 <button
@@ -3348,12 +3698,14 @@ function EditFormDialog({
                                           )}
                                         >
                                           {f?.display_name || humanizeFieldName(fname)}
+                                          {f?.condition && <span className="ml-1 text-[10px] opacity-60">{conditionTag(f.condition)}</span>}
                                         </button>
                                       );
                                       // Scalar field → plain chip. Table field → chip + expandable column list.
-                                      if (!isTable) return <div key={fname}>{chip}</div>;
+                                      const dragCls = cn("rounded-md", !isReadOnly && "cursor-grab active:cursor-grabbing", fieldDropLine(fname));
+                                      if (!isTable) return <div key={fname} {...fieldDragProps(fname, sig.name)} className={dragCls}>{chip}</div>;
                                       return (
-                                        <div key={fname} className="w-full">
+                                        <div key={fname} {...fieldDragProps(fname, sig.name)} className={cn("w-full", dragCls)}>
                                           <div className="flex items-center gap-1">
                                             {chip}
                                             <button
@@ -3405,13 +3757,16 @@ function EditFormDialog({
                     const subs = subfieldsOf(f);
                     const colsOpen = uefExpandedTables.has(f.field_name);
                     return (
-                      <div key={idx}>
+                      <div key={f.field_name || idx} {...fieldDragProps(f.field_name, null)}
+                        className={cn("rounded-lg", !isReadOnly && "cursor-grab active:cursor-grabbing", fieldDropLine(f.field_name))}>
+                        <div className="flex items-center">
                         <button type="button" onClick={() => { setSelectedIdx(idx); if (isTable) toggleTableCols(f.field_name); }}
-                          className={cn("w-full text-left px-3 py-2 rounded-lg flex items-center gap-2 text-sm transition-colors",
+                          className={cn("flex-1 min-w-0 text-left px-3 py-2 rounded-lg flex items-center gap-2 text-sm transition-colors",
                             isSelected ? "bg-gray-900 dark:bg-zinc-200 text-white dark:text-gray-900" : "text-gray-700 dark:text-zinc-300 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]",
                             f._isDeleted && "opacity-40 line-through")}>
                           <span className="text-xs text-gray-400 dark:text-zinc-500 shrink-0">{typeGlyph}</span>
-                          <span className="flex-1 truncate">{f._isNew ? <em className="not-italic text-emerald-600 dark:text-emerald-400">{displayName}</em> : displayName}</span>
+                          <span className="flex-1 truncate" style={{ paddingLeft: conditionDepth(fields as any, f.field_name) * 12 }}>{f._isNew ? <em className="not-italic text-emerald-600 dark:text-emerald-400">{displayName}</em> : displayName}</span>
+                          {f.condition && <span className={cn("text-[10px] shrink-0", isSelected ? "opacity-70" : "text-slate-400 dark:text-zinc-500")}>{conditionTag(f.condition)}</span>}
                           {isTable && (
                             <span className={cn("flex items-center gap-0.5 text-[10px] shrink-0", isSelected ? "opacity-70" : "text-gray-400 dark:text-zinc-500")}>
                               {subs.length}
@@ -3420,6 +3775,7 @@ function EditFormDialog({
                           )}
                           {f._isDeleted && <span className="text-[10px] text-red-400 shrink-0">del</span>}
                         </button>
+                        </div>
                         {isTable && colsOpen && <div className="ml-3 mb-1">{subfieldRail(idx, f.field_name, subs)}</div>}
                       </div>
                     );
@@ -3433,6 +3789,7 @@ function EditFormDialog({
           <div className="flex-1 flex flex-col border-l border-gray-100 dark:border-[#1a1a1a] min-w-0">
             <div className="px-5 py-2.5 border-b border-gray-100 dark:border-[#1a1a1a] flex-shrink-0 flex items-center justify-between">
               <p className={ml}>Field editor</p>
+              <div className="flex items-center gap-3">
               {selectedField && !isReadOnly && !selectedField._isNew && !showAddPanel && (
                 <button
                   type="button"
@@ -3442,6 +3799,7 @@ function EditFormDialog({
                   {selectedField._isDeleted ? '↩ Restore' : '× Remove field'}
                 </button>
               )}
+              </div>
             </div>
 
             {showAddPanel && isActive ? (
@@ -3573,6 +3931,12 @@ function EditFormDialog({
                 editable={!isReadOnly && !selectedField._isDeleted}
                 structuralEditable={!isReadOnly && !selectedField._isDeleted && !isStructurallyLocked}
                 focusSubfield={focusSubfield}
+                conditionProps={{
+                  onOpenLogic: () => setShowLogic(true),
+                  fields: fields.filter(f => !f._isDeleted),
+                  index: fields.filter(f => !f._isDeleted).findIndex(f => f.field_name === selectedField.field_name),
+                  onOpenField: name => { const i = fields.findIndex(f => f.field_name === name); if (i >= 0) setSelectedIdx(i); },
+                }}
                 onFieldPatch={patch => updateField(selectedIdx, patch)}
                 onCalPatch={patch => updateCal(selectedField.field_name, patch)}
                 tableModeProps={
@@ -3743,13 +4107,24 @@ function EditFormDialog({
           <div className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center rounded-2xl z-10">
             <div className="bg-white dark:bg-[#111111] rounded-xl border border-gray-200 dark:border-[#2a2a2a] shadow-2xl w-[420px] p-6" onClick={e => e.stopPropagation()}>
               <h3 className="text-base font-semibold text-gray-900 dark:text-white mb-2">Cannot remove field</h3>
-              <p className="text-sm text-gray-500 dark:text-zinc-400 mb-3 leading-relaxed">
-                <span className="font-mono text-gray-700 dark:text-zinc-300">{removeModal.fieldName}</span> is consumed by downstream signatures:
-              </p>
-              <div className="rounded-lg bg-gray-50 dark:bg-[#141414] border border-gray-100 dark:border-[#1f1f1f] px-4 py-3 mb-4 space-y-1">
-                {removeModal.consumers.map(s => <p key={s} className="font-mono text-xs text-amber-600 dark:text-amber-400">· {s}</p>)}
-              </div>
-              <p className="text-xs text-gray-500 dark:text-zinc-400 mb-4">Remove or reassign those signatures first, then retry.</p>
+              {removeModal.consumers.length > 0 && (<>
+                <p className="text-sm text-gray-500 dark:text-zinc-400 mb-3 leading-relaxed">
+                  <span className="font-mono text-gray-700 dark:text-zinc-300">{removeModal.fieldName}</span> is consumed by downstream signatures:
+                </p>
+                <div className="rounded-lg bg-gray-50 dark:bg-[#141414] border border-gray-100 dark:border-[#1f1f1f] px-4 py-3 mb-4 space-y-1">
+                  {removeModal.consumers.map(s => <p key={s} className="font-mono text-xs text-amber-600 dark:text-amber-400">· {s}</p>)}
+                </div>
+                <p className="text-xs text-gray-500 dark:text-zinc-400 mb-4">Remove or reassign those signatures first, then retry.</p>
+              </>)}
+              {(removeModal.conditionDependents?.length ?? 0) > 0 && (<>
+                <p className="text-sm text-gray-500 dark:text-zinc-400 mb-3 leading-relaxed">
+                  <span className="font-mono text-gray-700 dark:text-zinc-300">{removeModal.fieldName}</span> decides whether these questions are asked:
+                </p>
+                <div className="rounded-lg bg-gray-50 dark:bg-[#141414] border border-gray-100 dark:border-[#1f1f1f] px-4 py-3 mb-4 space-y-1">
+                  {removeModal.conditionDependents!.map(s => <p key={s} className="font-mono text-xs text-gray-600 dark:text-zinc-300">· {s}</p>)}
+                </div>
+                <p className="text-xs text-gray-500 dark:text-zinc-400 mb-4">Remove their “Ask only if” condition, or point it at another question, then retry.</p>
+              </>)}
               <div className="flex justify-end">
                 <button onClick={() => setRemoveModal(null)} className="text-sm px-4 py-2 rounded-lg border border-gray-200 dark:border-[#2a2a2a] text-gray-600 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-white/[0.03] transition-colors">
                   Close

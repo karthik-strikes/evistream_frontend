@@ -22,6 +22,8 @@ interface TableFieldProps {
   /** Open the column-grouping setup for this field. Absent when the reviewer
    *  may not edit forms. */
   onEditGrouping?: () => void;
+  /** Conditional questions: the columns NOT asked in this row. */
+  hiddenCols?: (row: Record<string, string>) => Set<string>;
 }
 
 interface RowCardProps {
@@ -37,13 +39,18 @@ interface RowCardProps {
   aiCells: Set<string>;
   errors?: Set<string>;
   saving?: boolean;
+  hiddenCols?: (row: Record<string, string>) => Set<string>;
 }
 
 function RowCard({
-  parentName, cols, row, rowIdx, onChange, onRemove,
-  initialExpanded, aiRowPrefilled, aiCells, errors, saving,
+  parentName, cols: allCols, row, rowIdx, onChange, onRemove,
+  initialExpanded, aiRowPrefilled, aiCells, errors, saving, hiddenCols,
 }: RowCardProps) {
   const [expanded, setExpanded] = useState(initialExpanded);
+  // A column whose condition does not apply in THIS row is not asked here; its
+  // answer (if any) stays in the row and comes back if the row changes.
+  const hidden = hiddenCols ? hiddenCols(row) : null;
+  const cols = hidden && hidden.size ? allCols.filter(c => !hidden.has(c.field_name)) : allCols;
 
   useEffect(() => {
     if (errors && errors.size > 0) setExpanded(true);
@@ -120,7 +127,7 @@ function RowCard({
   );
 }
 
-export function TableField({ field, rows, onChange, aiPrefill, errors, saving, onEditGrouping }: TableFieldProps) {
+export function TableField({ field, rows, onChange, aiPrefill, errors, saving, onEditGrouping, hiddenCols }: TableFieldProps) {
   const cols = field.subform_fields ?? [];
   const isAiTable = !!aiPrefill && aiPrefill.rowIndices.size > 0;
 
@@ -215,6 +222,7 @@ export function TableField({ field, rows, onChange, aiPrefill, errors, saving, o
               aiCells={aiPrefill?.cells[rowIdx] ?? new Set()}
               errors={errors?.[rowIdx]}
               saving={saving}
+              hiddenCols={hiddenCols}
             />
           ))}
         </div>

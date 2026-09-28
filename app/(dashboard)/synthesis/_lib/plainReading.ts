@@ -134,8 +134,13 @@ export function plainReading(
     // reports it as 0 by construction, and quoting that would imply the studies
     // were found to agree rather than assumed to.
     const tau = result.model === 'random' ? `τ² = ${h.tau2.toFixed(3)}, ` : '';
+    // No Low/Moderate/Substantial word: those bands overlap in the Handbook and a
+    // label reads as a verdict. The number and its interval say how sure it is.
+    const ci = h.i2Lo != null && h.i2Hi != null
+      ? ` (95% CI ${h.i2Lo.toFixed(0)} to ${h.i2Hi.toFixed(0)}%)`
+      : '';
     caveats.push(
-      `Heterogeneity was ${h.label.toLowerCase()} (I² = ${h.i2.toFixed(0)}%, `
+      `Between-study heterogeneity: I² = ${h.i2.toFixed(0)}%${ci} (`
       + `${tau}Q = ${h.q.toFixed(1)} on ${h.df} df)`
       + (h.i2 >= 50
         ? `, so the studies are not all estimating the same thing and the pooled average describes `
@@ -162,6 +167,12 @@ export function plainReading(
     caveats.push(
       `With ${k} studies the between-study variance is estimated imprecisely, so treat the interval's `
       + `exact width as illustrative.`,
+    );
+  }
+  if (result.predictionSuppressed) {
+    caveats.push(
+      `No prediction interval is reported (${result.predictionSuppressed}): with so few studies its `
+      + `width would come mostly from the t multiplier rather than from the data.`,
     );
   }
   if (result.hksj && result.hksj.narrower === false) {

@@ -10,7 +10,7 @@
  * scalar and rendered the literal "[object Object]" everywhere.
  */
 
-import { extractScalar } from '../longFormatTransform.ts';
+import { extractScalar, transformToLongFormat, tableAbsenceLabel } from '../longFormatTransform.ts';
 
 let failures = 0;
 function eq(actual: unknown, expected: unknown, what: string) {
@@ -62,6 +62,55 @@ console.log('\nAbsence still wins over the value');
   // some stale payload is still sitting in `value`.
   eq(extractScalar({ value: 'stale', status: 'not_reported' }), 'NR', 'not_reported');
   eq(extractScalar({ value: 'stale', status: 'not_applicable' }), 'NA', 'not_applicable');
+}
+
+console.log('\nA whole-table verdict reaches every column (was blank → shown as "NR")');
+{
+  const fields: any[] = [
+    { field_name: 'country', field_type: 'text' },
+    { field_name: 'adverse_events', field_type: 'array', subform_fields: [
+      { field_name: 'ae_type', field_type: 'text' }, { field_name: 'ae_n', field_type: 'number' } ] },
+  ];
+  const docs = { d1: { id: 'd1', filename: 'Raslan 2021.pdf' } };
+  const run = (table: any) => transformToLongFormat(
+    [{ id: 'r1', document_id: 'd1', extracted_data: { country: { value: 'US', status: 'reported' }, adverse_events: table } }],
+    fields as any, docs as any,
+  ).rows;
+
+  const na = run({ value: 'NA', source_text: '', status: 'not_applicable' });
+  eq(na.length, 1, 'one row for the paper');
+  eq(na[0].ae_type, 'NA', 'NA envelope → "NA" in ae_type');
+  eq(na[0].ae_n, 'NA', 'NA envelope → "NA" in ae_n');
+  eq(na[0].country, 'US', 'flat field untouched');
+  eq((na[0] as any)._rawCells.ae_type?.status, 'not_applicable', 'raw cell carries the table envelope');
+
+  eq(run({ value: 'NR', status: 'not_reported' })[0].ae_type, 'NR', 'NR envelope → "NR"');
+  eq(run({ value: 'NR', status: 'missing' })[0].ae_type, '⚠', 'failed table → failure marker, not NR');
+  eq(run('NA')[0].ae_type, 'NA', 'legacy bare "NA" string → "NA"');
+  eq(run({ value: [], status: 'reported' })[0].ae_type, '', 'empty row list stays blank');
+  eq(run(undefined)[0].ae_type, '', 'absent field stays blank');
+  eq(run({ value: [{ ae_type: { value: 'Nausea' }, ae_n: { value: 3 } }] })[0].ae_type, 'Nausea', 'real rows unchanged');
+  eq(tableAbsenceLabel({ value: [{}] }), '', 'row list is not a verdict');
+}
+
+console.log('\nA parent table that is NA as a whole labels its columns on every child row');
+{
+  const fields: any[] = [
+    { field_name: 'arms', field_type: 'array', subform_fields: [
+      { field_name: 'arm', field_type: 'text' }, { field_name: 'dose', field_type: 'text' } ] },
+    { field_name: 'outcomes', field_type: 'array', subform_fields: [
+      { field_name: 'arm', field_type: 'text' }, { field_name: 'outcome', field_type: 'text' },
+      { field_name: 'n', field_type: 'number' } ] },
+  ];
+  const rows = transformToLongFormat(
+    [{ id: 'r1', document_id: 'd1', extracted_data: {
+      arms: { value: 'NA', status: 'not_applicable' },
+      outcomes: { value: [{ arm: { value: 'A' }, outcome: { value: 'Pain' }, n: { value: 10 } }] },
+    } }],
+    fields as any, { d1: { id: 'd1', filename: 'x.pdf' } } as any,
+  ).rows;
+  eq(rows[0].outcome, 'Pain', 'child row kept');
+  eq(rows[0].dose, 'NA', 'parent-only column says NA, not blank');
 }
 
 console.log(failures === 0 ? '\nAll long-format flattening checks passed.\n' : `\n${failures} check(s) FAILED.\n`);

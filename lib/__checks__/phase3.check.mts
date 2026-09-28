@@ -101,15 +101,25 @@ const text = (r: Parameters<typeof plainReading>[0]) => plainReading(r, CTX).joi
 
   // Heterogeneity, prediction interval and small-k caveats appear only when due.
   const heterogeneous = runMetaAnalysis(
-    [binary('A', 10, 100, 30, 100), binary('B', 40, 100, 20, 100), binary('C', 25, 100, 24, 100)],
+    [binary('A', 10, 100, 30, 100), binary('B', 40, 100, 20, 100), binary('C', 25, 100, 24, 100),
+      binary('D', 35, 100, 15, 100), binary('E', 12, 100, 28, 100)],
     'RR', 'random',
   );
   const h = text(heterogeneous);
-  check('substantial heterogeneity is named', /Heterogeneity was (substantial|considerable)/i.test(h));
+  // Sep 2026: no Low/Moderate/Substantial label — I² with its interval instead.
+  check('heterogeneity is stated as I² with its interval',
+    /Between-study heterogeneity: I² = \d+% \(95% CI \d+ to \d+%\)/.test(h));
+  check('and never as a band label', !/Heterogeneity was (low|moderate|substantial|considerable)/i.test(h));
   check('and its consequence spelled out', h.includes('describes them loosely'));
   check('the prediction interval is explained as such',
     h.includes('A future study in a similar population'));
-  check('a small corpus is flagged', h.includes('estimated imprecisely'));
+  const three = text(runMetaAnalysis(
+    [binary('A', 10, 100, 30, 100), binary('B', 40, 100, 20, 100), binary('C', 25, 100, 24, 100)],
+    'RR', 'random',
+  ));
+  check('a small corpus is flagged', three.includes('estimated imprecisely'));
+  check('a suppressed PI is explained, not described',
+    three.includes('No prediction interval is reported (k = 3 < 5)') && !three.includes('A future study'));
 
   const fixed = runMetaAnalysis(
     [binary('A', 10, 100, 30, 100), binary('B', 12, 100, 32, 100), binary('C', 8, 100, 28, 100)],
@@ -194,6 +204,7 @@ const text = (r: Parameters<typeof plainReading>[0]) => plainReading(r, CTX).joi
   const studies = [
     binary('A', 10, 100, 30, 100), binary('B', 12, 100, 32, 100),
     binary('C', 8, 100, 28, 100), binary('D', 14, 100, 26, 100),
+    binary('E', 11, 100, 29, 100),
   ];
   const label = (r: Parameters<typeof methodsFormulas>[0]) => methodsFormulas(r).map(f => f.label).join(' | ');
   const latex = (r: Parameters<typeof methodsFormulas>[0]) => methodsFormulas(r).map(f => f.latex).join(' ');
@@ -202,6 +213,15 @@ const text = (r: Parameters<typeof plainReading>[0]) => plainReading(r, CTX).joi
   check('a random-effects pool shows DerSimonian–Laird', label(random).includes('DerSimonian'));
   check('and the prediction interval formula', label(random).includes('Prediction interval'));
   check('and HKSJ, which it computed', label(random).includes('Hartung'));
+  check('and the I² interval', label(random).includes('I² confidence interval'));
+  const remlPool = runMetaAnalysis(studies, 'RR', 'random', { tau2Method: 'reml' });
+  check('a REML pool shows REML, not DerSimonian–Laird',
+    label(remlPool).includes('REML') && !label(remlPool).includes('DerSimonian'));
+  const pmPool = runMetaAnalysis(studies, 'RR', 'random', { tau2Method: 'pm' });
+  check('a PM pool shows Paule–Mandel, not DerSimonian–Laird',
+    label(pmPool).includes('Paule') && !label(pmPool).includes('DerSimonian'));
+  check('a suppressed PI gets no formula',
+    !label(runMetaAnalysis(studies.slice(0, 4), 'RR', 'random')).includes('Prediction interval'));
   check('with random-effects weights', latex(random).includes('w_i^{*}'));
 
   const fixed = runMetaAnalysis(studies, 'RR', 'fixed');
@@ -333,6 +353,8 @@ const text = (r: Parameters<typeof plainReading>[0]) => plainReading(r, CTX).joi
     ['quasi-RCT', 'quasi_randomised'],
     ['non-randomised comparison', 'quasi_randomised'],
     ['Prospective cohort', 'cohort'],
+    ['Single center, prospective, randomized, double-blinded, placebo-controlled trial', 'randomised'],
+    ['prospective randomised controlled trial', 'randomised'],
     ['retrospective registry review', 'cohort'],
     ['case-control', 'case_control'],
     ['Case control study', 'case_control'],

@@ -62,6 +62,10 @@ export function classifyDesign(raw: string): DesignCategory {
   }
   if (/case.?control/.test(v)) return 'case_control';
   if (/cross.?section|prevalence survey|survey/.test(v)) return 'cross_sectional';
+  // "Prospective, randomized, placebo-controlled trial" is a trial, not a
+  // cohort: an explicit randomisation claim outranks the timing words below.
+  // (Quasi / non-randomised wording has already been caught above.)
+  if (/\brct\b|randomi/.test(v) && !/cohort/.test(v)) return 'randomised';
   if (/cohort|prospective|retrospective|longitudinal|registry/.test(v)) return 'cohort';
   if (/\brct\b|randomi|parallel|controlled trial|\bcct\b/.test(v)) return 'randomised';
   return 'unclear';

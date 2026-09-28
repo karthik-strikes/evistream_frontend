@@ -811,7 +811,7 @@ function tableSnapshotKey(sources: UnifiedFieldCardProps['sources']): string {
   }
 }
 
-function cellValue(raw: any): string {
+export function cellValue(raw: any): string {
   if (raw == null) return '';
   if (Array.isArray(raw)) return raw.map(cellValue).join(', ');
   if (typeof raw === 'object') {
@@ -824,7 +824,7 @@ function cellValue(raw: any): string {
 
 /** Per-cell grounding metadata for a `{value, source_text}` envelope. Returns
  *  undefined for bare-scalar cells (old data) so no evidence chip is rendered. */
-function cellMeta(raw: any): EvidenceMeta | undefined {
+export function cellMeta(raw: any): EvidenceMeta | undefined {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
   const meta: EvidenceMeta = {};
   if (typeof raw.source_text === 'string') {

@@ -25,7 +25,7 @@ export const formsService = {
     return apiClient.post<Form>('/api/v1/forms/', data);
   },
 
-  async update(id: string, data: Partial<CreateFormRequest>): Promise<Form> {
+  async update(id: string, data: Partial<CreateFormRequest> & { notes?: string }): Promise<Form> {
     return apiClient.put<Form>(`/api/v1/forms/${id}`, data);
   },
 
@@ -167,7 +167,7 @@ export const formsService = {
     return apiClient.delete(`/api/v1/forms/${formId}/fields/${encodeURIComponent(fieldName)}`);
   },
 
-  async getFieldDependencies(formId: string, fieldName: string): Promise<{ field_name: string; consuming_signatures: string[] }> {
+  async getFieldDependencies(formId: string, fieldName: string): Promise<{ field_name: string; consuming_signatures: string[]; condition_dependents?: string[] }> {
     return apiClient.get(`/api/v1/forms/${formId}/fields/${encodeURIComponent(fieldName)}/dependencies`);
   },
 
@@ -176,5 +176,10 @@ export const formsService = {
       field_name: fieldName,
       subform_fields: subfieldData,
     });
+  },
+
+  /** Display order of the top-level fields (every field name, in order). */
+  async reorderFields(formId: string, fieldOrder: string[]): Promise<{ form_id: string; field_order: string[] }> {
+    return apiClient.put(`/api/v1/forms/${formId}/field-order`, { field_order: fieldOrder });
   },
 };

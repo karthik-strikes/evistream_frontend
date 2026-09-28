@@ -153,7 +153,22 @@ export function methodsFormulas(result: MetaResult): Formula[] {
     });
   }
 
-  if (result.model === 'random' && result.heterogeneity) {
+  if (result.model === 'random' && result.heterogeneity && result.tau2Method === 'reml') {
+    out.push({
+      label: 'REML between-study variance',
+      latex: String.raw`\hat\tau^2 = \arg\max_{\tau^2 \ge 0} -\tfrac12\Big[\sum \ln(v_i + \tau^2) `
+        + String.raw`+ \ln \sum w_i^{*} + \sum w_i^{*}(y_i - \hat\theta)^2\Big]`,
+      note: 'Restricted maximum likelihood, solved by Fisher scoring from the DerSimonian–Laird start '
+        + 'and truncated at zero. Q on k−1 df still tests the disagreement; I² = (Q − df)/Q.',
+    });
+  } else if (result.model === 'random' && result.heterogeneity && result.tau2Method === 'pm') {
+    out.push({
+      label: 'Paule–Mandel between-study variance',
+      latex: String.raw`\sum w_i^{*}(\tau^2)\,\big(y_i - \hat\theta(\tau^2)\big)^2 = k - 1, \qquad \tau^2 \ge 0`,
+      note: 'The τ² at which the generalised Q equals its expectation. Q on k−1 df still tests the '
+        + 'disagreement; I² = (Q − df)/Q.',
+    });
+  } else if (result.model === 'random' && result.heterogeneity) {
     out.push({
       label: 'DerSimonian–Laird between-study variance',
       latex: String.raw`\tau^2 = \max\!\left(0, \frac{Q - (k-1)}{C}\right), \quad `
@@ -163,13 +178,23 @@ export function methodsFormulas(result: MetaResult): Formula[] {
     });
   }
 
+  if (result.heterogeneity && result.heterogeneity.i2Lo != null) {
+    out.push({
+      label: 'I² confidence interval',
+      latex: String.raw`H = \sqrt{\tfrac{Q}{k-1}}, \quad \exp(\ln H \pm 1.96\,B), \quad `
+        + String.raw`I^2 = \max\!\left(0, \tfrac{H^2 - 1}{H^2}\right)`,
+      note: 'Higgins & Thompson (2002), test-based: B is the standard error of ln H, '
+        + '½(ln Q − ln(k−1))/(√(2Q) − √(2k−3)) when Q > k.',
+    });
+  }
+
   if (result.hksj) {
     out.push({
       label: 'Hartung–Knapp–Sidik–Jonkman interval',
       latex: String.raw`q = \frac{1}{k-1}\sum w_i^{*}(y_i - \hat\theta)^2, \qquad `
         + String.raw`\hat\theta \pm t_{k-1,\,0.975}\sqrt{\frac{q}{\sum w_i^{*}}}`,
-      note: 'The same estimate with an interval that stops treating τ² as known. Usually wider; '
-        + 'narrower when q < 1, which is flagged where it happens.',
+      note: 'The same estimate with an interval that stops treating τ² as known, and its test '
+        + 'θ̂/SE on t with k−1 df. Usually wider; narrower when q < 1, which is flagged where it happens.',
     });
   }
 
@@ -249,6 +274,15 @@ export function methodsNotation(result: MetaResult): NotationEntry[] {
       { symbol: 'Q', meaning: 'weighted sum of squared departures from the pooled effect' },
       { symbol: 'I^2', meaning: 'share of the variation that is between studies rather than within them' },
     );
+  }
+  if (result.heterogeneity && result.heterogeneity.i2Lo != null) {
+    out.push(
+      { symbol: 'H', meaning: 'the square root of Q per degree of freedom; I² is its rescaling' },
+      { symbol: 'B', meaning: 'standard error of ln H, used for the I² interval' },
+    );
+  }
+  if (result.model === 'random' && result.heterogeneity && result.tau2Method === 'reml') {
+    out.push({ symbol: 'v_i', meaning: "study i's within-study variance, Var(y_i)" });
   }
   if (result.prediction) {
     out.push({ symbol: 't_{k-2}', meaning: 'Student t multiplier on k−2 degrees of freedom' });

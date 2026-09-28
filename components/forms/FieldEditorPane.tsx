@@ -5,6 +5,8 @@ import { Bot, ShieldCheck, X, Zap } from 'lucide-react';
 import { Textarea, TooltipSimple } from '@/components/ui';
 import { cn } from '@/lib/utils';
 import type { FormField, TableFieldExtractionStrategy } from '@/types/api';
+import { ConditionSummary, ControlsFollowUps } from './ConditionEditor';
+import { conditionsUsing, labelOf, validateConditions } from '@/lib/fieldConditions';
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -52,8 +54,25 @@ export interface FieldEditorPaneProps {
     disabled?: boolean;
     saving?: boolean;
   };
+  /**
+   * Conditional questions ("Ask only if…"). The editor needs the whole form to
+   * know which questions sit above this one and what they answer. Omit to hide.
+   */
+  conditionProps?: {
+    fields: FormField[];
+    index: number;
+    onOpenField?: (fieldName: string) => void;
+    /** Open the Question logic map, where rules are drawn. */
+    onOpenLogic?: () => void;
+  };
   onFieldPatch: (patch: Partial<FormField>) => void;
   onCalPatch: (patch: Partial<UEFCalField>) => void;
+}
+
+const PARENT_TYPES = ['select', 'boolean'];
+/** Conditions on this field / column from the form-wide check, same wording as the server. */
+function errorsFor(all: string[], label: string): string[] {
+  return all.filter(e => e.startsWith(`"${label}"`) || e.includes(`before "${label}",`));
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -200,8 +219,10 @@ export const TABLE_MODE_META: Record<
   },
 };
 
+// Agentic is deliberately NOT offered (owner decision, Sep 28 2026). Its META
+// entry stays so a legacy field that still carries it renders a label.
 export const TABLE_MODE_ORDER: TableFieldExtractionStrategy[] = [
-  'single_call', 'row_then_columns', 'agentic',
+  'single_call', 'row_then_columns',
 ];
 
 // ── Row definition — which columns make a new row ──────────────────────────
@@ -371,12 +392,24 @@ export function RowDefinitionSection({
 //    named in TABLE_MODE_META above, over unchanged stored values) ──
 
 
-export function FieldEditorPane({ field, cal, editable, structuralEditable = editable, simple = false, focusSubfield = null, tableModeProps, rowDefProps, onFieldPatch, onCalPatch }: FieldEditorPaneProps) {
+export function FieldEditorPane({ field, cal, editable, structuralEditable = editable, simple = false, focusSubfield = null, tableModeProps, rowDefProps, conditionProps, onFieldPatch, onCalPatch }: FieldEditorPaneProps) {
   const ml = "text-[11px] font-semibold text-gray-500 dark:text-zinc-400 uppercase tracking-wider";
   const fname = field.field_name;
   const isTableField = field.field_type === 'array';
   const isSelectField = field.field_type === 'select';
   const subformFields: any[] = isTableField && Array.isArray(field.subform_fields) ? field.subform_fields : [];
+
+  // ── Conditional questions ────────────────────────────────────────────────
+  const condFields = conditionProps?.fields ?? [];
+  const condIndex = conditionProps?.index ?? -1;
+  const condErrors = conditionProps ? validateConditions(condFields as any) : [];
+  const keyCols: string[] = (() => {
+    for (const k of ['key_columns', 'anchor_columns'] as const) {
+      const raw = (field as any)[k];
+      if (Array.isArray(raw)) return raw.map((c: any) => String(c ?? '').trim()).filter(Boolean);
+    }
+    return [];
+  })();
 
   const subfieldNameRefs = useRef<Record<number, HTMLInputElement | null>>({});
   const subfieldCardRefs = useRef<Record<number, HTMLDivElement | null>>({});
@@ -392,6 +425,12 @@ export function FieldEditorPane({ field, cal, editable, structuralEditable = edi
     }
     setPendingFocusIdx(null);
   }, [pendingFocusIdx, subformFields.length]);
+
+  const parentLabelOf = (c: any, cols?: any[]) => {
+    if (!c?.field) return undefined;
+    const pool = c.from === 'row' ? (cols || []) : condFields;
+    return labelOf(pool.find((f: any) => f.field_name === c.field), c.field);
+  };
 
   // Rail click → scroll that column's card into view and flash a ring on it.
   // Keyed on nonce so clicking the same column twice re-scrolls.
@@ -470,19 +509,22 @@ export function FieldEditorPane({ field, cal, editable, structuralEditable = edi
             </span>
           </label>
         )}
-        {editable && isTableField && (
-          <label className="flex items-center gap-2 cursor-pointer select-none">
-            <input
-              type="checkbox"
-              checked={field.required === true}
-              onChange={e => onFieldPatch({ required: e.target.checked })}
-              className="w-3.5 h-3.5 rounded border-gray-300 dark:border-zinc-600 accent-violet-500"
+        {conditionProps && (
+          <div className="mt-3 flex flex-col gap-2">
+            <ConditionSummary
+              condition={field.condition}
+              parentLabel={parentLabelOf(field.condition)}
+              errors={errorsFor(condErrors, fname)}
+              subject={isTableField ? 'the whole table' : 'this question'}
+              onOpenLogic={conditionProps.onOpenLogic}
             />
-            <span className="text-[11px] text-gray-500 dark:text-zinc-400">
-              Required — this table needs at least one row, and every required column filled
-            </span>
-          </label>
+            <ControlsFollowUps uses={conditionsUsing(condFields as any, fname)} onOpen={conditionProps.onOpenField} />
+          </div>
         )}
+        {/* No "Required" toggle on tables or their columns (owner decision,
+            Sep 28 2026): a paper can legitimately report no rows, and 0 of 419
+            live fields ever set it. Manual extraction still honours a stored
+            `required: true`, so removing the control breaks nothing. */}
       </div>
 
       {/* Table callout */}
@@ -506,7 +548,7 @@ export function FieldEditorPane({ field, cal, editable, structuralEditable = edi
             </span>
           </div>
           <TooltipSimple text={tableModeProps.disabled ? 'You need the "Create Forms" permission' : ''}>
-            <div className="grid gap-2 sm:grid-cols-3">
+            <div className="grid gap-2 sm:grid-cols-2">
               {TABLE_MODE_ORDER.map(m => {
                 const meta = TABLE_MODE_META[m];
                 const active = tableModeProps.mode === m;
@@ -648,20 +690,6 @@ export function FieldEditorPane({ field, cal, editable, structuralEditable = edi
                       <input value={sf.field_description || ''} onChange={e => patchSf({ field_description: e.target.value })}
                         placeholder="Description (tells the LLM what this column means)"
                         className="w-full text-xs bg-gray-50 dark:bg-[#141414] border border-gray-200 dark:border-[#2a2a2a] rounded-md px-2 py-1.5 text-gray-800 dark:text-zinc-200 placeholder:text-gray-400 dark:placeholder:text-zinc-600 focus:outline-none" />
-                      {/* Per column, because that is the granularity the
-                          extraction screen validates at — it rings the
-                          offending cell and opens the row it is in. */}
-                      <label className="flex items-center gap-1.5 cursor-pointer select-none">
-                        <input
-                          type="checkbox"
-                          checked={sf.required === true}
-                          onChange={e => patchSf({ required: e.target.checked })}
-                          className="w-3 h-3 rounded border-gray-300 dark:border-zinc-600 accent-violet-500"
-                        />
-                        <span className="text-[10.5px] text-gray-400 dark:text-zinc-500">
-                          Required in every row
-                        </span>
-                      </label>
                       {sf.field_type === 'select' && (
                         <div className="flex flex-col gap-1 mt-1 pt-1.5 border-t border-gray-100 dark:border-[#1f1f1f]">
                           <div className="flex items-center justify-between gap-2">
@@ -676,6 +704,19 @@ export function FieldEditorPane({ field, cal, editable, structuralEditable = edi
                             </div>
                           ))}
                           <button type="button" onClick={() => patchSf({ options: [...(sf.options || []), ''] })} className="text-[10px] text-gray-400 dark:text-zinc-500 hover:text-gray-600 dark:hover:text-zinc-300 text-left transition-colors">+ Add option</button>
+                        </div>
+                      )}
+                      {conditionProps && sf.field_name && (
+                        <div className="mt-1 pt-1.5 border-t border-gray-100 dark:border-[#1f1f1f] flex flex-col gap-1.5">
+                          <ConditionSummary
+                            condition={sf.condition}
+                            parentLabel={parentLabelOf(sf.condition, subformFields)}
+                            blockedReason={keyCols.includes(sf.field_name) ? 'Identifies a row, so it is always asked.' : undefined}
+                            errors={errorsFor(condErrors, `${fname} → ${sf.field_name}`)}
+                            subject="this column"
+                            onOpenLogic={conditionProps.onOpenLogic}
+                          />
+                          <ControlsFollowUps uses={conditionsUsing(condFields as any, sf.field_name, fname)} />
                         </div>
                       )}
                       <div className="flex flex-col gap-1 mt-1 pt-1.5 border-t border-gray-100 dark:border-[#1f1f1f]">
@@ -734,6 +775,11 @@ export function FieldEditorPane({ field, cal, editable, structuralEditable = edi
                       <p className="font-mono text-[11px] text-gray-400 dark:text-zinc-500">{sf.field_name}</p>
                       {sf.field_description && <p className="text-xs text-gray-500 dark:text-zinc-400 mt-0.5">{sf.field_description}</p>}
                       {Array.isArray(sf.options) && sf.options.length > 0 && <div className="mt-1.5"><p className="text-[10px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider mb-0.5">Options</p>{sf.options.map((opt: string, oi: number) => <p key={oi} className="text-[11px] text-gray-500 dark:text-zinc-400">{'·'} {opt}</p>)}</div>}
+                      {conditionProps && sf.condition && (
+                        <div className="mt-1.5">
+                          <ConditionSummary condition={sf.condition} parentLabel={parentLabelOf(sf.condition, subformFields)} subject="this column" onOpenLogic={conditionProps.onOpenLogic} />
+                        </div>
+                      )}
                       {sfHints.length > 0 && <div className="mt-1.5"><p className="text-[10px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider mb-0.5">Hints</p>{sfHints.map((h, hi) => <p key={hi} className="text-[11px] text-gray-500 dark:text-zinc-400">{'\u2192'} {h}</p>)}</div>}
                       {sfRules.length > 0 && <div className="mt-1"><p className="text-[10px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider mb-0.5">Rules</p>{sfRules.map((r, ri) => <p key={ri} className="text-[11px] text-gray-500 dark:text-zinc-400">{'\u00B7'} {r}</p>)}</div>}
                       {sfExamples.length > 0 && <div className="mt-1"><p className="text-[10px] font-semibold text-gray-400 dark:text-zinc-500 uppercase tracking-wider mb-0.5">Examples</p>{sfExamples.map((ex, ei) => <p key={ei} className="text-[11px] text-gray-500 dark:text-zinc-400">{String(ex.value ?? '')}</p>)}</div>}

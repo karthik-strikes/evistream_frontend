@@ -29,6 +29,8 @@ interface LinkedTableFieldProps {
   saving?: boolean;
   /** Open the column-grouping setup for this field. */
   onEditGrouping?: () => void;
+  /** Conditional questions: the columns NOT asked in a given row. */
+  hiddenCols?: (row: TableRow) => Set<string>;
 }
 
 const newId = () => Math.random().toString(36).slice(2);
@@ -235,9 +237,23 @@ function InstanceBlock({
 }
 
 export function LinkedTableField({
-  field, rows, onChange, aiPrefill, errors, saving, onEditGrouping,
+  field, rows, onChange, aiPrefill, errors, saving, onEditGrouping, hiddenCols,
 }: LinkedTableFieldProps) {
-  const plan = useMemo(() => planTable(field), [field]);
+  const basePlan = useMemo(() => planTable(field), [field]);
+  // A shared (study / group) value is entered once for many rows, so it is
+  // hidden only where it applies in NONE of them; a per-row cell by its own row.
+  const hiddenIn = (col: string, rowIdxs: number[]) =>
+    !!hiddenCols && (rowIdxs.length ? rowIdxs : [-1]).every(i => hiddenCols(i < 0 ? {} : rows[i]).has(col));
+  const plan = useMemo(() => {
+    if (!hiddenCols) return basePlan;
+    const every = rows.map((_, i) => i);
+    return {
+      ...basePlan,
+      study: basePlan.study.filter(c => !hiddenIn(c.field_name, every)),
+      groups: basePlan.groups.map(g => ({ ...g, cols: g.cols.filter(c => !hiddenIn(c.field_name, every)) })),
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [basePlan, hiddenCols, rows]);
   const [flat, setFlat] = useState(false);
   const allCols = field.subform_fields ?? [];
 
@@ -305,7 +321,7 @@ export function LinkedTableField({
         <TableField
           field={field} rows={rows} onChange={onChange}
           aiPrefill={aiPrefill} errors={errors} saving={saving}
-          onEditGrouping={onEditGrouping}
+          onEditGrouping={onEditGrouping} hiddenCols={hiddenCols}
         />
       </div>
     );
@@ -469,6 +485,7 @@ export function LinkedTableField({
                 onChange={onChange} setCell={setRowCell}
                 onRemove={() => removeRow(rowIdx)} onDuplicate={() => duplicateRow(rowIdx)}
                 aiPrefill={aiPrefill} errors={errors} saving={saving}
+                hiddenCols={hiddenCols}
               />
             ))}
           </div>
@@ -534,8 +551,9 @@ export function LinkedTableField({
  */
 function ResultRow({
   field, plan, allCols, row, rowIdx, rows, instances, colorOf,
-  onChange, setCell, onRemove, onDuplicate, aiPrefill, errors, saving,
+  onChange, setCell, onRemove, onDuplicate, aiPrefill, errors, saving, hiddenCols,
 }: {
+  hiddenCols?: (row: TableRow) => Set<string>;
   field: FormField;
   plan: ReturnType<typeof planTable>;
   allCols: FormField[];
@@ -653,7 +671,7 @@ function ResultRow({
           });
         })}
 
-        {plan.row.map(col => (
+        {plan.row.filter(col => !hiddenCols?.(row).has(col.field_name)).map(col => (
           <div key={`${rowIdx}-${col.field_name}`} className="min-w-0">
             <FieldLabel
               name={col.field_name}

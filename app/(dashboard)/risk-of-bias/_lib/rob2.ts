@@ -23,7 +23,7 @@
  *    rather than guessing, because a half-answered domain that displayed as
  *    "Low" would be a claim nobody made.
  *
- * Question wording is the tool's own, matching `zforms/rob2/rob2_parallel_trial.json`.
+ * Question wording is the tool's own, matching `resources/forms/rob2/rob2_parallel_trial.json`.
  */
 
 import type { Severity } from './robForm';

@@ -140,6 +140,8 @@ export const resultsService = {
     extraction_type: 'manual' | 'consensus';
     reviewer_role?: string | null;
     is_partial?: boolean;
+    /** Move the record to the form's current conditional-question rules. */
+    upgrade_condition_rules?: boolean;
   }): Promise<ExtractionResult> {
     return apiClient.post<ExtractionResult>('/api/v1/results/manual', data);
   },

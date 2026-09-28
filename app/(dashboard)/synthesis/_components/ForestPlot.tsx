@@ -7,7 +7,7 @@ import { downloadSvg, downloadSvgAsImage, slugify } from '@/lib/rasterizeSvg';
 import { buildForestSvg } from '../_lib/forestSvg';
 import {
   buildAxis, EFFECT_LABEL, formatMeasured, formatMeasuredTick, formatP, formatTick, hasNullValue,
-  isRatioMeasure, measureColumnLabel, MIN_POOLABLE, MODEL_SHORT, NOT_ESTIMABLE_TEXT,
+  isRatioMeasure, measureColumnLabel, MIN_POOLABLE, modelLabel, NOT_ESTIMABLE_TEXT,
   studyDataCells,
   type MetaResult, type StudyEffect,
 } from '@/lib/metaAnalysis';
@@ -36,6 +36,7 @@ export function ForestPlot({
   onDiagnostics,
   fileBase = 'forest-plot',
   mid = null,
+  leftFavours = 'comparator',
 }: {
   result: MetaResult;
   outcomeLabel: string;
@@ -43,8 +44,8 @@ export function ForestPlot({
   treatmentHeading: string;
   comparatorHeading: string;
   onOpenStudy: (s: StudyEffect) => void;
-  onExport: () => void;
-  onDiagnostics: () => void;
+  onExport?: () => void;
+  onDiagnostics?: () => void;
   /** Stem for exported filenames — usually the form name and measure. */
   fileBase?: string;
   /**
@@ -53,10 +54,14 @@ export function ForestPlot({
    * clinically important, so a significant-but-trivial result looks trivial.
    */
   mid?: number | null;
+  /** Which arm the left (lower) side of the null line favours — see ForestSvgOptions. */
+  leftFavours?: 'treatment' | 'comparator';
 }) {
   const [hover, setHover] = useState<string | null>(null);
   const [exportError, setExportError] = useState<string | null>(null);
   const axis = buildAxis(result);
+  const treatmentName = treatmentHeading.replace(/\s*n\/N$/i, '') || 'treatment';
+  const comparatorName = comparatorHeading.replace(/\s*n\/N$/i, '') || 'comparator';
   const maxWeight = Math.max(...result.studies.map(s => s.weightPct), 1);
 
   /**
@@ -74,6 +79,7 @@ export function ForestPlot({
         treatmentHeading,
         comparatorHeading,
         mid,
+        leftFavours,
         footer: `${outcomeLabel} · ${comparisonLabel} · exported from EviStream`,
       });
       const name = `${slugify(fileBase)}-${slugify(outcomeLabel)}`;
@@ -125,16 +131,18 @@ export function ForestPlot({
         <div className="flex items-baseline gap-2.5 flex-wrap">
           <span className="text-base font-semibold dark:text-white">{outcomeLabel}</span>
           <span className="text-[13px] text-gray-500 dark:text-zinc-400">
-            {comparisonLabel} · {EFFECT_LABEL[result.measure]}, {MODEL_SHORT[result.model]}
+            {comparisonLabel} · {EFFECT_LABEL[result.measure]}, {modelLabel(result.model, result.tau2Method)}
           </span>
           <div className="ml-auto flex items-center gap-1.5">
             <span className="text-[11px] text-gray-400 dark:text-zinc-600 flex items-center gap-1">
               <Download className="h-3 w-3" />
               Export
             </span>
-            <ExportButton onClick={onExport} title="Study-level numbers as a RevMan-style CSV">
-              CSV
-            </ExportButton>
+            {onExport && (
+              <ExportButton onClick={onExport} title="Study-level numbers as a RevMan-style CSV">
+                CSV
+              </ExportButton>
+            )}
             <ExportButton
               onClick={() => saveFigure('png')}
               title="The figure as a PNG image, rendered at 3x for print"
@@ -154,13 +162,15 @@ export function ForestPlot({
               SVG
             </ExportButton>
           </div>
-          <button
-            type="button"
-            onClick={onDiagnostics}
-            className="cursor-pointer text-[12.5px] font-semibold bg-[#0a0a0a] text-white rounded-md px-3 py-1.5 hover:bg-zinc-800 dark:bg-white dark:text-black dark:hover:bg-zinc-100"
-          >
-            Diagnostics →
-          </button>
+          {onDiagnostics && (
+            <button
+              type="button"
+              onClick={onDiagnostics}
+              className="cursor-pointer text-[12.5px] font-semibold bg-[#0a0a0a] text-white rounded-md px-3 py-1.5 hover:bg-zinc-800 dark:bg-white dark:text-black dark:hover:bg-zinc-100"
+            >
+              Diagnostics →
+            </button>
+          )}
         </div>
         <div className="text-xs text-gray-400 dark:text-zinc-600 mt-1">
           Click any study to open its source evidence.
@@ -188,19 +198,23 @@ export function ForestPlot({
           const hix = axis.toX(s.hi);
           const isHover = hover === s.key;
           return (
-            <div
+            <button
+              type="button"
               key={s.key}
               onMouseEnter={() => setHover(s.key)}
               onMouseLeave={() => setHover(null)}
+              onFocus={() => setHover(s.key)}
+              onBlur={() => setHover(null)}
               onClick={() => onOpenStudy(s)}
               className={cn(
                 GRID,
-                'items-center h-8 cursor-pointer rounded-md',
+                'w-full text-left items-center h-8 cursor-pointer rounded-md',
                 isHover && 'bg-gray-50 dark:bg-[#1a1a1a]',
               )}
             >
               <span className="text-[13px] text-zinc-900 dark:text-zinc-100 pl-1.5 truncate" title={s.label}>
                 {s.label}
+                {(s.evidence as any)?.derived && <span title="SD derived rather than reported" className="ml-0.5">†</span>}
                 {s.corrected && (
                   <span title="Continuity correction applied (+0.5 to each cell)" className="text-amber-600 dark:text-amber-500 ml-1">
                     *
@@ -236,7 +250,7 @@ export function ForestPlot({
               </div>
               <Num>{formatMeasured(result.measure, s.est, s.lo, s.hi)}</Num>
               <Num right muted>{s.weightPct.toFixed(1)}%</Num>
-            </div>
+            </button>
           );
         })}
 
@@ -268,6 +282,28 @@ export function ForestPlot({
             <Num right bold>100.0%</Num>
           </div>
         )}
+        {result.pooled && result.totalsRandomised && (
+          <div className={cn(GRID, 'items-center h-6')}>
+            <span className="text-[11px] text-gray-400 dark:text-zinc-600 pl-1.5">randomised (effective above)</span>
+            <Num right muted>{result.totalsRandomised.treatment}</Num>
+            <Num right muted>{result.totalsRandomised.comparator}</Num>
+            <span /><span /><span />
+          </div>
+        )}
+        {result.pooled && result.prediction && !result.glmm && (
+          <div className={cn(GRID, 'items-center h-7')}>
+            <span className="text-[12px] text-gray-500 dark:text-zinc-500 pl-1.5">Prediction interval</span>
+            <span /><span />
+            <div className="relative h-7 text-gray-200 dark:text-[#2a2a2a]" style={gridBackground}>
+              <div
+                className="absolute top-1/2 border-t-[1.5px] border-dashed border-blue-500"
+                style={{ left: `${axis.toX(result.prediction.lo)}%`, width: `${Math.max(axis.toX(result.prediction.hi) - axis.toX(result.prediction.lo), 0.5)}%` }}
+              />
+            </div>
+            <Num muted>{formatMeasured(result.measure, result.pooled.est, result.prediction.lo, result.prediction.hi).replace(/^[^(]*/, '')}</Num>
+            <span />
+          </div>
+        )}
 
         {!result.pooled && result.studies.length > 0 && (
           <div className="flex items-center gap-2.5 border border-dashed border-gray-300 dark:border-[#2a2a2a] bg-gray-50 dark:bg-[#0d0d0d] rounded-lg px-3.5 py-2.5 mt-2.5">
@@ -292,10 +328,10 @@ export function ForestPlot({
             {showNull ? (
               <>
                 <span className="absolute top-4 text-[10.5px]" style={{ right: `${100 - axis.nullX + 2}%` }}>
-                  ← Favours {comparatorHeading.replace(/\s*n\/N$/i, '') || 'comparator'}
+                  ← Favours {leftFavours === 'treatment' ? treatmentName : comparatorName}
                 </span>
                 <span className="absolute top-4 text-[10.5px]" style={{ left: `${axis.nullX + 2}%` }}>
-                  Favours {treatmentHeading.replace(/\s*n\/N$/i, '') || 'treatment'} →
+                  Favours {leftFavours === 'treatment' ? comparatorName : treatmentName} →
                 </span>
               </>
             ) : (
@@ -340,18 +376,17 @@ export function ForestPlot({
               Heterogeneity: τ² = {result.heterogeneity.tau2.toFixed(3)}; Q ={' '}
               {result.heterogeneity.q.toFixed(1)}, df = {result.heterogeneity.df} (p ={' '}
               {formatP(result.heterogeneity.p)}); I² = {result.heterogeneity.i2.toFixed(0)}%
-            </span>
-            <span
-              className={cn(
-                'text-[11px] font-semibold rounded-full px-2.5 py-0.5',
-                result.heterogeneity.label === 'Low' && 'bg-green-50 text-green-700 dark:bg-green-500/10 dark:text-green-300',
-                result.heterogeneity.label === 'Moderate' && 'bg-amber-50 text-amber-700 dark:bg-amber-500/10 dark:text-amber-300',
-                result.heterogeneity.label === 'Substantial' && 'bg-orange-50 text-orange-700 dark:bg-orange-500/10 dark:text-orange-300',
-                result.heterogeneity.label === 'Considerable' && 'bg-red-50 text-red-700 dark:bg-red-500/10 dark:text-red-300',
+              {result.heterogeneity.i2Lo != null && result.heterogeneity.i2Hi != null && (
+                <span className="text-gray-500 dark:text-zinc-500"> (95% CI {result.heterogeneity.i2Lo.toFixed(0)}–{result.heterogeneity.i2Hi.toFixed(0)}%)</span>
               )}
-            >
-              {result.heterogeneity.label} heterogeneity
             </span>
+            {!result.prediction && result.predictionSuppressed && (
+              <span className="text-[12.5px] text-gray-500 dark:text-zinc-500 tabular-nums"
+                title="Below five studies the prediction interval's t multiplier, not the data, is most of its width, so it is not reported.">
+                PI suppressed: {result.predictionSuppressed}
+              </span>
+            )}
+
             {result.prediction && (
               <span
                 className="text-[12.5px] text-gray-700 dark:text-zinc-300 tabular-nums"
@@ -366,7 +401,12 @@ export function ForestPlot({
                 <span className="text-gray-400 dark:text-zinc-600"> (t{result.prediction.df})</span>
               </span>
             )}
-            {result.hksj && (
+            {result.ciMethod === 'hk' && result.hksj && (
+              <span className="text-[12.5px] text-gray-700 dark:text-zinc-300 tabular-nums">
+                CI: Hartung–Knapp, t on {result.hksj.df} df
+              </span>
+            )}
+            {result.ciMethod !== 'hk' && result.hksj && (
               <span
                 className="text-[12.5px] text-gray-700 dark:text-zinc-300 tabular-nums"
                 title={

@@ -10,6 +10,7 @@
  * papers grouped by the role you play on them.
  */
 
+import { extractionQueueRank } from '@/lib/queuePick';
 import { useMemo, useState } from 'react';
 import {
   ChevronRight, ClipboardList, Scale, Loader2, Check, CircleDot, Search, X,
@@ -282,9 +283,12 @@ export function MyQueueView({
   const matches = (r: QueueRow) => !q || r.label.toLowerCase().includes(q);
 
   /** Rank: what is half-finished first, then untouched, then what can't be opened. */
-  const rank = (r: QueueRow) => (r.ready ? 0 : 2) + (r.status === 'active' ? 0 : 1);
+  // Shared with Project Home's Continue card — lib/queuePick.ts.
   const sortRows = (list: QueueRow[]) =>
-    [...list].sort((x, y) => rank(x) - rank(y) || x.label.localeCompare(y.label));
+    [...list].sort((x, y) =>
+      extractionQueueRank({ ready: x.ready, active: x.status === 'active' })
+      - extractionQueueRank({ ready: y.ready, active: y.status === 'active' })
+      || x.label.localeCompare(y.label));
 
   const openRows = useMemo(() => rows.filter(r => r.status !== 'done'), [rows]);
   const doneRows = useMemo(

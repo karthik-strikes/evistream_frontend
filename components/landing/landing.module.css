@@ -1,0 +1,121 @@
+/* Landing page primitives that Tailwind can't express cleanly: keyframes,
+   the reduced-motion kill switch, font stacks and the layered shadows. */
+
+.root {
+  font-family: var(--font-inter), 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  background: #ffffff;
+  color: #0a0a0a;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  display: flex;
+  flex-direction: column;
+  overflow-x: clip;
+}
+
+.root a {
+  text-decoration: none;
+}
+
+.root :focus-visible {
+  outline: 2px solid #011f5b;
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.serif {
+  font-family: var(--font-landing-serif), 'Crimson Pro', Georgia, serif;
+}
+
+.mono {
+  font-family: var(--font-landing-mono), 'JetBrains Mono', ui-monospace, monospace;
+}
+
+/* Product-window shadow (s3) and its hover state. */
+.windowShadow {
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 12px 32px -12px rgba(0, 0, 0, 0.12),
+    0 40px 80px -32px rgba(1, 31, 91, 0.18), inset 0 1px 0 #ffffff;
+}
+
+/* Hero window: rests tilted, flattens and lifts on hover. The entry pose is
+   applied inline only until the hero has settled, so this rule owns the rest
+   and hover transforms. */
+.heroWindow {
+  transform: perspective(1800px) rotateX(2.5deg);
+  transform-origin: 50% 0%;
+  transition: transform 1.1s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.9s cubic-bezier(0.22, 1, 0.36, 1);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 12px 32px -12px rgba(0, 0, 0, 0.12),
+    0 40px 80px -32px rgba(1, 31, 91, 0.22), inset 0 1px 0 #ffffff;
+}
+.heroWindow:hover {
+  transform: perspective(1800px) rotateX(0deg) translateY(-4px);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 16px 40px -12px rgba(0, 0, 0, 0.14),
+    0 56px 100px -32px rgba(1, 31, 91, 0.26), inset 0 1px 0 #ffffff;
+}
+
+.teamWindow {
+  transition: opacity 0.9s cubic-bezier(0.22, 1, 0.36, 1), transform 0.9s cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 0.7s;
+}
+.teamWindow:hover {
+  transform: translateY(-3px);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), 0 16px 40px -12px rgba(0, 0, 0, 0.14),
+    0 56px 100px -32px rgba(1, 31, 91, 0.22), inset 0 1px 0 #ffffff;
+}
+
+.entryCard:hover {
+  box-shadow: 0 0 0 2px rgba(1, 31, 91, 0.18);
+  transform: translateY(-2px);
+}
+
+.primaryBtn {
+  box-shadow: 0 1px 2px rgba(1, 31, 91, 0.3), inset 0 1px 0 rgba(255, 255, 255, 0.12);
+  transition: transform 0.5s cubic-bezier(0.22, 1, 0.36, 1), box-shadow 0.5s;
+}
+.primaryBtn:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 4px rgba(1, 31, 91, 0.3), 0 10px 24px -10px rgba(1, 31, 91, 0.5),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12);
+}
+
+.footerLink {
+  display: inline-block;
+  transition: color 0.3s, transform 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.footerLink:hover {
+  color: #ffffff;
+  transform: translateX(2px);
+}
+
+.lineClamp4 {
+  display: -webkit-box;
+  -webkit-line-clamp: 4;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+@keyframes rise {
+  0% { transform: translateY(10px); opacity: 0; }
+  100% { transform: translateY(0); opacity: 1; }
+}
+@keyframes fadein {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.rise {
+  animation: rise 0.6s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.fadeinLate {
+  animation: fadein 0.6s cubic-bezier(0.22, 1, 0.36, 1) 0.4s both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .root *,
+  .root *::before,
+  .root *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}

@@ -11,7 +11,7 @@ import { useProject } from '@/contexts/ProjectContext';
 import { formsService, documentsService } from '@/services';
 import { apiClient } from '@/lib/api';
 import { cn, getErrorMessage } from '@/lib/utils';
-import { transformToLongFormat } from '@/lib/longFormatTransform';
+import { transformToLongFormat, fieldOrderKey } from '@/lib/longFormatTransform';
 import { boxesFromLocation, type EvidenceBoxes } from '@/lib/sourceBoxes';
 import type { Form, Document, PilotState, PilotFieldFeedback, FormField, FieldPrompt } from '@/types/api';
 import { FieldEditorPane, type UEFCalField, type UEFEditableField } from '@/components/forms/FieldEditorPane';
@@ -113,7 +113,7 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
   const [expandedCell, setExpandedCell] = useState<string | null>(null); // "fieldName:docId"
 
   // Column reorder (Paper column is locked at index 0)
-  const colOrderKey = `pilot-col-order:${form.id}`;
+  const colOrderKey = `pilot-col-order:${form.id}:${fieldOrderKey(form.fields)}`;
   const [columnOrder, setColumnOrder] = useState<string[]>(() => {
     if (typeof window === 'undefined') return [];
     try {
@@ -440,6 +440,9 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
   };
 
   // ── Field feedback helpers ────────────────────────────────────────────────
+
+  /** document_id for a rating that covers every pilot paper (see pilot.py). */
+  const ALL_PAPERS = '';
 
   const setRating = (fieldName: string, docId: string, rating: 'correct' | 'incorrect') => {
     setFieldFeedback(prev => ({
@@ -872,8 +875,13 @@ export default function PilotStudyDialog({ form, onClose }: Props) {
                           const isIncorrect = colRating === 'incorrect';
                           const rate = (rating: 'correct' | 'incorrect') => {
                             if (!owner) return;
-                            if (subCol) setSubfieldRating(owner.field_name, subCol, docIds[0], rating);
-                            else setRating(owner.field_name, docIds[0], rating);
+                            // A header thumb judges the column across EVERY pilot
+                            // paper, so it names no paper: '' tells the backend to
+                            // learn from all of them. It used to send docIds[0],
+                            // so examples came from paper 1 only — often an NR or
+                            // empty cell there while the other papers had values.
+                            if (subCol) setSubfieldRating(owner.field_name, subCol, ALL_PAPERS, rating);
+                            else setRating(owner.field_name, ALL_PAPERS, rating);
                           };
                           return (
                             <th
