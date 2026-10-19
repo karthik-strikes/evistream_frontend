@@ -1,0 +1,130 @@
+import { useEffect, useRef, useCallback, useState } from 'react';
+import { apiClient } from '@/lib/api';
+import type { WSMessage } from '@/types/api';
+
+const MAX_RECONNECT_ATTEMPTS = 10;
+
+function buildWsBaseUrl(): string {
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
+  const isLocal = /localhost|127\.0\.0\.1/.test(apiUrl);
+  if (!isLocal && apiUrl.startsWith('http://')) {
+    return apiUrl.replace(/^http:\/\//, 'wss://');
+  }
+  return apiUrl.replace(/^https?/, (s) => (s === 'https' ? 'wss' : 'ws'));
+}
+const WS_BASE_URL = buildWsBaseUrl();
+
+interface UseJobWebSocketOptions {
+  jobId: string | null;
+  onMessage?: (message: WSMessage) => void;
+  onStatusChange?: (status: string) => void;
+  onProgress?: (progress: number) => void;
+  onMaxRetriesReached?: () => void;
+  enabled?: boolean;
+}
+
+interface UseJobWebSocketReturn {
+  connected: boolean;
+  lastMessage: WSMessage | null;
+}
+
+export function useJobWebSocket({
+  jobId,
+  onMessage,
+  onStatusChange,
+  onProgress,
+  onMaxRetriesReached,
+  enabled = true,
+}: UseJobWebSocketOptions): UseJobWebSocketReturn {
+  const wsRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const reconnectAttemptsRef = useRef(0);
+  const [connected, setConnected] = useState(false);
+  const [lastMessage, setLastMessage] = useState<WSMessage | null>(null);
+
+  // Stable callback refs
+  const onMessageRef = useRef(onMessage);
+  const onStatusChangeRef = useRef(onStatusChange);
+  const onProgressRef = useRef(onProgress);
+  const onMaxRetriesReachedRef = useRef(onMaxRetriesReached);
+  onMessageRef.current = onMessage;
+  onStatusChangeRef.current = onStatusChange;
+  onProgressRef.current = onProgress;
+  onMaxRetriesReachedRef.current = onMaxRetriesReached;
+
+  const connect = useCallback(() => {
+    if (!jobId || !enabled) return;
+
+    const token = apiClient.getToken();
+
+    const url = token
+      ? `${WS_BASE_URL}/api/v1/ws/jobs/${jobId}?token=${encodeURIComponent(token)}`
+      : `${WS_BASE_URL}/api/v1/ws/jobs/${jobId}`;
+
+    const ws = new WebSocket(url);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      // Send auth token as first message instead of URL query param
+      if (token) {
+        ws.send(JSON.stringify({ type: 'auth', token }));
+      }
+      reconnectAttemptsRef.current = 0;
+      setConnected(true);
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data: WSMessage = JSON.parse(event.data);
+
+        // Ignore heartbeats and pongs
+        if ((data as any).type === 'heartbeat' || (data as any).type === 'pong' || (data as any).type === 'connected') {
+          return;
+        }
+
+        setLastMessage(data);
+        onMessageRef.current?.(data);
+
+        if (data.status) {
+          onStatusChangeRef.current?.(data.status);
+        }
+        if (data.progress !== undefined) {
+          onProgressRef.current?.(data.progress);
+        }
+      } catch {
+        // Ignore parse errors
+      }
+    };
+
+    ws.onclose = () => {
+      setConnected(false);
+      // Reconnect after 3 seconds if still enabled and under max attempts
+      if (enabled && jobId) {
+        if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
+          reconnectAttemptsRef.current++;
+          reconnectTimerRef.current = setTimeout(connect, 3000);
+        } else {
+          onMaxRetriesReachedRef.current?.();
+        }
+      }
+    };
+
+    ws.onerror = () => {
+      ws.close();
+    };
+  }, [jobId, enabled]);
+
+  useEffect(() => {
+    connect();
+
+    return () => {
+      clearTimeout(reconnectTimerRef.current);
+      if (wsRef.current) {
+        wsRef.current.close();
+        wsRef.current = null;
+      }
+    };
+  }, [connect]);
+
+  return { connected, lastMessage };
+}

@@ -1,0 +1,108 @@
+'use client';
+
+import { ArrowLeft, EyeOff, Sparkles, PanelLeft } from 'lucide-react';
+import { cn } from '@/lib/utils';
+
+export type ExtractionMode = 'blind' | 'ai_assisted';
+
+interface ExtractionToolbarProps {
+  formName: string;
+  docFilename: string;
+  extractionMode: ExtractionMode;
+  onModeChange: (mode: ExtractionMode) => void;
+  onBack: () => void;
+  queueOpen: boolean;
+  onToggleQueue: () => void;
+  showAiToggle: boolean;
+  reviewerRole?: string | null;
+}
+
+const ROLE_PILL: Record<string, { label: string; cls: string }> = {
+  reviewer_1:  { label: 'R1',  cls: 'text-blue-600 dark:text-blue-400 bg-blue-100 dark:bg-blue-400/15' },
+  reviewer_2:  { label: 'R2',  cls: 'text-emerald-600 dark:text-emerald-400 bg-emerald-100 dark:bg-emerald-400/15' },
+  adjudicator: { label: 'Adjudicator', cls: 'text-amber-600 dark:text-amber-400 bg-amber-100 dark:bg-amber-400/15' },
+};
+
+export function ExtractionToolbar({
+  formName,
+  docFilename,
+  extractionMode,
+  onModeChange,
+  onBack,
+  queueOpen,
+  onToggleQueue,
+  showAiToggle,
+  reviewerRole,
+}: ExtractionToolbarProps) {
+  const rolePill = reviewerRole ? ROLE_PILL[reviewerRole] : null;
+  return (
+    <div className="flex items-center gap-2 mb-3 flex-wrap">
+      <button
+        onClick={onBack}
+        className="flex items-center gap-1.5 text-xs font-medium text-gray-500 dark:text-zinc-400 hover:text-gray-700 dark:hover:text-zinc-200 bg-transparent border-none cursor-pointer transition-colors"
+      >
+        <ArrowLeft className="w-3.5 h-3.5" /> Back
+      </button>
+
+      {rolePill && (
+        <>
+          <span className="text-gray-300 dark:text-zinc-700 text-xs">·</span>
+          <span className={cn('inline-flex items-center text-[10px] font-semibold rounded-full px-2 py-0.5', rolePill.cls)} title={`Extracting as ${rolePill.label}`}>
+            {rolePill.label}
+          </span>
+        </>
+      )}
+
+      <span className="text-gray-300 dark:text-zinc-700 text-xs">·</span>
+      <span className="text-xs font-medium text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] px-2 py-0.5 rounded-md">{formName}</span>
+      <span className="text-gray-300 dark:text-zinc-700 text-xs">·</span>
+      <span className="text-xs font-medium text-gray-500 dark:text-zinc-400 bg-gray-100 dark:bg-[#1a1a1a] px-2 py-0.5 rounded-md truncate max-w-[220px]">{docFilename}</span>
+
+      <div className="ml-auto flex items-center gap-2">
+        {/* Queue toggle */}
+        <button
+          onClick={onToggleQueue}
+          className={cn(
+            "flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-md border cursor-pointer transition-colors",
+            queueOpen
+              ? "text-gray-800 dark:text-zinc-200 bg-gray-100 dark:bg-[#1f1f1f] border-gray-300 dark:border-[#3a3a3a]"
+              : "text-gray-500 dark:text-zinc-400 bg-transparent border-gray-200 dark:border-[#2a2a2a] hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
+          )}
+        >
+          <PanelLeft className="w-3 h-3" />
+          Queue
+        </button>
+
+        {/* AI mode toggle — only shown when AI results exist */}
+        {showAiToggle && (
+          <div className="flex items-center rounded-lg border border-gray-200 dark:border-[#2a2a2a] overflow-hidden">
+            <button
+              onClick={() => onModeChange('blind')}
+              className={cn(
+                "flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 cursor-pointer transition-colors border-none",
+                extractionMode === 'blind'
+                  ? "bg-gray-900 dark:bg-zinc-100 text-white dark:text-gray-900"
+                  : "bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
+              )}
+            >
+              <EyeOff className="w-3 h-3" />
+              Blind
+            </button>
+            <button
+              onClick={() => onModeChange('ai_assisted')}
+              className={cn(
+                "flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 cursor-pointer transition-colors border-none",
+                extractionMode === 'ai_assisted'
+                  ? "bg-gray-900 dark:bg-zinc-100 text-white dark:text-gray-900"
+                  : "bg-white dark:bg-[#111111] text-gray-500 dark:text-zinc-400 hover:bg-gray-50 dark:hover:bg-[#1a1a1a]"
+              )}
+            >
+              <Sparkles className="w-3 h-3" />
+              AI Assisted
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
