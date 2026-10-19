@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "next lint",
+    "test": "node tests/review-drafts.test.cjs",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "postinstall": "node -e \"const fs=require('fs');const p='node_modules/pdfjs-dist/build/pdf.worker.min.mjs';if(fs.existsSync(p)){fs.copyFileSync(p,'public/pdf.worker.min.mjs');console.log('Copied pdfjs worker to public/')}\""
   },
@@ -51,6 +52,7 @@
     "postcss": "^8.4.33",
     "prettier": "^3.2.4",
     "prettier-plugin-tailwindcss": "^0.5.11",
+    "react-test-renderer": "18.3.1",
     "tailwindcss": "^3.4.1"
   }
 }

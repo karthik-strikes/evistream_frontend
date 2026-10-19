@@ -13,13 +13,15 @@ interface DocumentQueueSidebarProps {
   doneDocs: Set<string>;
   partialDocs: Set<string>;
   formId: string;
+  userId?: string;
+  reviewerRolesByDoc: Map<string, string>;
   onSelectDoc: (doc: Document) => void;
 }
 
-function getDocStatus(doc: Document, doneDocs: Set<string>, partialDocs: Set<string>, formId: string): DocStatus {
+function getDocStatus(doc: Document, doneDocs: Set<string>, partialDocs: Set<string>, formId: string, userId: string | undefined, reviewerRole: string | null): DocStatus {
   if (doneDocs.has(doc.id)) return 'done';
   if (partialDocs.has(doc.id)) return 'partial';
-  if (getDraftStatus(formId, doc.id)) return 'draft';
+  if (getDraftStatus(userId, reviewerRole, formId, doc.id)) return 'draft';
   return 'todo';
 }
 
@@ -32,9 +34,9 @@ const statusBadge: Record<DocStatus, { label: string; cls: string }> = {
   todo: { label: 'Todo', cls: 'text-gray-500 dark:text-zinc-500 bg-gray-50 dark:bg-[#1a1a1a] border-gray-200 dark:border-[#2a2a2a]' },
 };
 
-export function DocumentQueueSidebar({ documents, currentDocId, doneDocs, partialDocs, formId, onSelectDoc }: DocumentQueueSidebarProps) {
+export function DocumentQueueSidebar({ documents, currentDocId, doneDocs, partialDocs, formId, userId, reviewerRolesByDoc, onSelectDoc }: DocumentQueueSidebarProps) {
   const docsWithStatus = documents
-    .map(d => ({ doc: d, status: getDocStatus(d, doneDocs, partialDocs, formId) }))
+    .map(d => ({ doc: d, status: getDocStatus(d, doneDocs, partialDocs, formId, userId, reviewerRolesByDoc.get(d.id) ?? null) }))
     .sort((a, b) => statusOrder[a.status] - statusOrder[b.status]);
 
   const doneCount = docsWithStatus.filter(d => d.status === 'done').length;

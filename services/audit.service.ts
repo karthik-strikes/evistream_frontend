@@ -19,7 +19,7 @@ export const auditService = {
     return apiClient.get<AuditEntry[]>(`/api/v1/audit${qs ? `?${qs}` : ''}`);
   },
 
-  async getEntityHistory(entityType: string, entityId: string): Promise<AuditEntry[]> {
-    return apiClient.get<AuditEntry[]>(`/api/v1/audit/entity/${entityType}/${entityId}`);
+  async getEntityHistory(entityType: string, entityId: string, projectId: string): Promise<AuditEntry[]> {
+    return apiClient.get<AuditEntry[]>(`/api/v1/audit/entity/${entityType}/${entityId}?project_id=${encodeURIComponent(projectId)}`);
   },
 };

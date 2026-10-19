@@ -25,6 +25,8 @@ interface ExtractionViewProps {
   hasNextDoc: boolean;
   showAiToggle: boolean;
   reviewerRole?: string | null;
+  draftUserId?: string;
+  reviewerRolesByDoc: Map<string, string>;
   currentPage?: number | null;
   onPageChange?: ((page: number | null) => void) | undefined;
   onModeChange: (mode: ExtractionMode) => void;
@@ -56,6 +58,8 @@ export function ExtractionView({
   hasNextDoc,
   showAiToggle,
   reviewerRole,
+  draftUserId,
+  reviewerRolesByDoc,
   currentPage,
   onModeChange,
   onFieldChange,
@@ -114,6 +118,8 @@ export function ExtractionView({
                 doneDocs={doneDocs}
                 partialDocs={partialDocs}
                 formId={form.id}
+                userId={draftUserId}
+                reviewerRolesByDoc={reviewerRolesByDoc}
                 onSelectDoc={onSelectDoc}
               />
             )}

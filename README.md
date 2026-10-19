@@ -31,6 +31,11 @@ npm run build
 npm start
 ```
 
+Run `npm test` for reviewer-draft isolation regressions. Drafts are scoped to the
+signed-in account, reviewer role, form, and document. Legacy drafts from the
+initial release lack an author and are discarded instead of being restored
+under another account. Submitted results in the backend are unaffected.
+
 ## Included workflow
 
 - Projects, team membership, and PDF uploads.

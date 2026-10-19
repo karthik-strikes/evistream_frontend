@@ -1,7 +1,7 @@
 import { useEffect, useRef, useCallback } from 'react';
 import { useToast } from '@/hooks/use-toast';
 
-const DRAFT_PREFIX = 'evistream:draft:v2:';
+const DRAFT_PREFIX = 'evistream:draft:v3:';
 const DEBOUNCE_MS = 1000;
 const MAX_AGE_DAYS = 7;
 
@@ -10,13 +10,14 @@ interface DraftData {
   updatedAt: string;
 }
 
-function getDraftKey(formId: string, documentId: string) {
-  return `${DRAFT_PREFIX}${formId}:${documentId}`;
+function getDraftKey(userId: string, reviewerRole: string | null, formId: string, documentId: string) {
+  return `${DRAFT_PREFIX}${[userId, reviewerRole ?? 'unassigned', formId, documentId].map(encodeURIComponent).join(':')}`;
 }
 
-export function getDraftStatus(formId: string, documentId: string): boolean {
+export function getDraftStatus(userId: string | undefined, reviewerRole: string | null, formId: string, documentId: string): boolean {
+  if (!userId) return false;
   try {
-    return localStorage.getItem(getDraftKey(formId, documentId)) !== null;
+    return localStorage.getItem(getDraftKey(userId, reviewerRole, formId, documentId)) !== null;
   } catch {
     return false;
   }
@@ -28,11 +29,15 @@ export function useDraftAutoSave(
   formData: Record<string, any>,
   setFormData: (data: Record<string, any>) => void,
   enabled: boolean,
+  userId: string | undefined,
+  reviewerRole: string | null,
 ) {
   const { toast } = useToast();
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mountedRef = useRef(false);
-  const restoredRef = useRef(false);
+  const draftKey = userId && formId && documentId
+    ? getDraftKey(userId, reviewerRole, formId, documentId) : null;
+  const identityRef = useRef<string | null>(null);
 
   // Prune old drafts on mount
   useEffect(() => {
@@ -40,7 +45,12 @@ export function useDraftAutoSave(
       const cutoff = Date.now() - MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
       for (let i = localStorage.length - 1; i >= 0; i--) {
         const key = localStorage.key(i);
-        if (!key?.startsWith(DRAFT_PREFIX)) continue;
+        if (!key?.startsWith('evistream:draft:')) continue;
+        // Legacy drafts have no author; never assign them to the next signed-in user.
+        if (!key.startsWith(DRAFT_PREFIX)) {
+          localStorage.removeItem(key);
+          continue;
+        }
         try {
           const raw = localStorage.getItem(key);
           if (!raw) continue;
@@ -57,11 +67,17 @@ export function useDraftAutoSave(
 
   // Check for existing draft on mount / doc change — auto-restore
   useEffect(() => {
-    if (!formId || !documentId || !enabled) return;
-    restoredRef.current = false;
-    const key = getDraftKey(formId, documentId);
+    mountedRef.current = false;
+    if (!draftKey || !enabled) return;
+    const identity = `${userId}:${reviewerRole ?? 'unassigned'}`;
+    if (identityRef.current && identityRef.current !== identity) {
+      setFormData((prev: Record<string, any>) => Object.fromEntries(
+        Object.entries(prev).map(([key, value]) => [key, Array.isArray(value) ? [] : '']),
+      ));
+    }
+    identityRef.current = identity;
     try {
-      const raw = localStorage.getItem(key);
+      const raw = localStorage.getItem(draftKey);
       if (!raw) return;
       const parsed: DraftData = JSON.parse(raw);
       const ago = new Date(parsed.updatedAt);
@@ -79,18 +95,17 @@ export function useDraftAutoSave(
         }
         return anyRestored ? merged : prev;
       });
-      restoredRef.current = true;
       toast({
         title: 'Draft restored',
         description: `Restored unsaved draft from ${timeStr}`,
         variant: 'default',
       });
     } catch { /* ignore */ }
-  }, [formId, documentId, enabled]);
+  }, [draftKey, enabled, userId, reviewerRole, setFormData, toast]);
 
   // Debounced auto-save
   useEffect(() => {
-    if (!formId || !documentId || !enabled) return;
+    if (!draftKey || !enabled) return;
     // Skip first render (initial empty form)
     if (!mountedRef.current) { mountedRef.current = true; return; }
 
@@ -100,24 +115,20 @@ export function useDraftAutoSave(
         const hasContent = Object.values(formData).some(v => v?.toString().trim());
         if (!hasContent) return;
         const draft: DraftData = { formData, updatedAt: new Date().toISOString() };
-        localStorage.setItem(getDraftKey(formId, documentId), JSON.stringify(draft));
+        localStorage.setItem(draftKey, JSON.stringify(draft));
       } catch { /* quota exceeded, ignore */ }
     }, DEBOUNCE_MS);
 
     return () => { if (timerRef.current) clearTimeout(timerRef.current); };
-  }, [formData, formId, documentId, enabled]);
-
-  // Reset mounted flag when doc changes
-  useEffect(() => {
-    mountedRef.current = false;
-  }, [documentId]);
+  }, [formData, draftKey, enabled]);
 
   const clearDraft = useCallback(() => {
-    if (!formId || !documentId) return;
+    if (timerRef.current) clearTimeout(timerRef.current);
+    if (!draftKey) return;
     try {
-      localStorage.removeItem(getDraftKey(formId, documentId));
+      localStorage.removeItem(draftKey);
     } catch { /* ignore */ }
-  }, [formId, documentId]);
+  }, [draftKey]);
 
   return { clearDraft };
 }

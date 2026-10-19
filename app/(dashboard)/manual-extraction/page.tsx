@@ -5,6 +5,7 @@ import { DashboardLayout } from '@/components/layout';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { useToast } from '@/hooks/use-toast';
 import { useProject } from '@/contexts/ProjectContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { EmptyState } from '@/components/ui';
 import { FolderOpen } from 'lucide-react';
 import { documentsService, formsService, resultsService, assignmentsService } from '@/services';
@@ -51,6 +52,7 @@ function normalizeAiData(raw: Record<string, any>): Record<string, any> {
 function ManualExtractionContent() {
   const { toast } = useToast();
   const { selectedProject } = useProject();
+  const { currentUser } = useAuth();
   const { isOwner, isAdmin, role, can_manage_assignments } = useProjectPermissions();
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -100,7 +102,9 @@ function ManualExtractionContent() {
   }, [myAssignments]);
 
   const { clearDraft } = useDraftAutoSave(
-    selectedForm?.id, selectedDoc?.id, formData, setFormData, mode === 'extract',
+    selectedForm?.id, selectedDoc?.id, formData, setFormData,
+    mode === 'extract' && !loadingAssignments,
+    currentUser?.id, (selectedDoc && myRoleByDoc.get(selectedDoc.id)) || null,
   );
 
   useEffect(() => {
@@ -740,6 +744,8 @@ function ManualExtractionContent() {
           hasNextDoc={!!nextUnextractedDoc}
           showAiToggle={hasAnyAiResults}
           reviewerRole={myRoleByDoc.get(selectedDoc.id) ?? null}
+          draftUserId={currentUser?.id}
+          reviewerRolesByDoc={myRoleByDoc}
           onModeChange={handleModeChange}
           onFieldChange={handleFieldChange}
           onTableChange={handleTableChange}
